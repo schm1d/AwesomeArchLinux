@@ -20,7 +20,7 @@ CRYPT_NAME="crypt_lvm"
 LVM_NAME="lvm_arch"
 USERNAME="<user_name_goes_here>"
 HOSTNAME="<hostname_goes_here>"
-LUKS_KEYS="/mnt/etc/luksKeys" # Where you will store the root partition key
+LUKS_KEYS="/etc/luksKeys/boot.key" # Where you will store the root partition key
 UUID=$(cryptsetup luksDump $DISK"3" | grep UUID | awk '{print $2}')
 
 pacman-key --init
