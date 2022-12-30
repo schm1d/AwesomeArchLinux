@@ -50,6 +50,9 @@ echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME"
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager &&\
 
+echo -e "${BBlue}Enabling OpenSSH...${NC}"
+systemctl enable sshd &&\
+
 # add a user
 echo -e "${BBlue}Adding the new user...${NC}"
 useradd -g wheel -s /bin/zsh -m $USERNAME &&\
