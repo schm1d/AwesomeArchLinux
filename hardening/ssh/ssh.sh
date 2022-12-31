@@ -50,7 +50,7 @@ echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Allow ed25
 echo "HostKey /etc/ssh/ssh_host_rsa_key" >> /etc/ssh/sshd_config #Allow RSA pubic key authentication
 echo "RSAAuthentication yes" >> >> /etc/ssh/sshd_config
 
-echo "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519" >> /etc/ssh/sshd_config  #Host keys the client should accepts
+echo "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/sshd_config  #Host keys the client should accepts
 echo "KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/sshd_config #Specifies the available KEX (Key Exchange) algorithms
 echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr" >> /etc/ssh/sshd_config   #Specifies the ciphers allowed
 echo "Macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256" >> /etc/ssh/sshd_config     #Specifies the available MAC alg.
