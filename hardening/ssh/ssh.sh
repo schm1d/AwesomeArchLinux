@@ -2,7 +2,7 @@
 
 ##########################################################################################
 #Script Name    : ssh.sh                                   
-#Description    : A super secure SSH set up for Arch Linux. You can use this script on other distros too.
+#Description    : A super secure SSH setup for Arch Linux. You can use this script on other distros too.
 #Author         : Bruno Schmid                                                
 #Email          : schmid.github@gmail.com
 #Twitter        : @brulliant
@@ -28,7 +28,7 @@ rm ssh_host_*key*
 echo -e "${BBlue}Creating ed25519, ras, ecdsa and dsa keys...${NC}"
 ssh-keygen -t ed25519 -b 4096 -f ssh_host_ed25519_key -N "" < /dev/null
 ssh-keygen -t rsa -b 4096 -f ssh_host_rsa_key -N "" < /dev/null
-ssh-keygen -t ecdsa -b 4096 -f ssh_host_ecdsa_key -N "" < /dev/null
+# ssh-keygen -t ecdsa -b 4096 -f ssh_host_ecdsa_key -N "" < /dev/null
 
 echo -e "${BBlue}Hardening \"/etc/ssh/sshd_config\"...${NC}"
 
@@ -42,16 +42,22 @@ echo "Port $SSH_PORT" >> /etc/ssh/sshd_config  #Listening port. default is port 
 
 echo "AuthenticationMethods password,publickey" >> /etc/ssh/sshd_config #Only public key authentication should be allowed.
 #echo "RequiredAuthentications2 publickey,password" >> /etc/ssh/sshd_config # Requires both a passphrase and a public key
+
 # to create a key: ssh-keygen -t ed25519 -C "$USER"
 echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config #Allow public key authentication
 echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config #Allow authorized keys in .ssh/authorized_keys
-echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Only allow ECDSA pubic key authentication
+echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Allow ed25519 pubic key authentication
+echo "HostKey /etc/ssh/ssh_host_rsa_key" >> /etc/ssh/sshd_config #Allow RSA pubic key authentication
+echo "RSAAuthentication yes" >> >> /etc/ssh/sshd_config
 
 echo "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519" >> /etc/ssh/sshd_config  #Host keys the client should accepts
 echo "KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/sshd_config #Specifies the available KEX (Key Exchange) algorithms
 echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr" >> /etc/ssh/sshd_config   #Specifies the ciphers allowed
 echo "Macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256" >> /etc/ssh/sshd_config     #Specifies the available MAC alg.
 echo "RevokedKeys $REVOKED_KEYS_FILE" >> /etc/ssh/sshd_config  #Specifies revoked public keys file
+
+echo "KeyRegenerationInterval 3600" >> /etc/ssh/sshd_config
+echo "ServerKeyBits 1024" >> /etc/ssh/sshd_config
 
 #Only allow incoming ECDSA and ed25519 sessions:
 echo "CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519" >> /etc/ssh/sshd_config
@@ -100,6 +106,16 @@ echo "UsePAM yes" >> /etc/ssh/ssh_config     #Enable PAM authentication
 
 echo -e "${BBlue}Hardening \"/etc/ssh/ssh_config\"...${NC}"
 echo "HashKnownHosts yes" > /etc/ssh/ssh_config #Hash the information in the knownHosts files
+echo "Host *" >> /etc/ssh/ssh_config
+echo "  ConnectTimeout 30" >> /etc/ssh/ssh_config
+echo "  HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/ssh_config
+echo "  KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/ssh_config
+echo "  MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com" >> /etc/ssh/ssh_config
+echo "  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr" >> /etc/ssh/ssh_config
+echo "  ServerAliveInterval 10" >> /etc/ssh/ssh_config
+echo "  ControlMaster auto" >> /etc/ssh/ssh_config
+echo "  ControlPersist yes" >> /etc/ssh/ssh_config
+echo "  ControlPath ~/.ssh/socket-%r@%h:%p" >> /etc/ssh/ssh_config
 
 echo -e "${BBlue}Hardening permissions...${NC}"
 chown root:root /etc/ssh/sshd_config
