@@ -125,6 +125,13 @@ rm ./boot.key
 echo -e "${BBlue}Adding tmpfs to fstab...${NC}" 
 echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0" >> /mnt/etc/fstab &&\
 
+echo -e "${BBlue}Adding proc to fstab and harndening it...${NC}" 
+echo "proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0" >> /etc/fstab &&\
+mkdir /etc/systemd/system/systemd-logind.service.d &&\
+touch /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+echo "[Service]" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+echo "SupplementaryGroups=proc" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+
 # Preparing the chroot script to be executed
 echo -e "${BBlue}Preparing the chroot script to be executed...${NC}" 
 cp ./chroot.sh /mnt &&\

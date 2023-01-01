@@ -97,14 +97,6 @@ grub-mkconfig -o /boot/grub/grub.cfg &&\
 chmod 600 $LUKS_KEYS
 chmod 700 /boot
 
-echo -e "${BBlue}Adding proc to fstab and harndening it...${NC}" 
-echo "proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0" >> /etc/fstab &&\
-
-mkdir /etc/systemd/system/systemd-logind.service.d
-touch /etc/systemd/system/systemd-logind.service.d/hidepid.conf
-echo "[Service]" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf
-echo "SupplementaryGroups=proc" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf
-
 echo -e "${BBlue}Setting root password...${NC}"
 passwd &&\
 
