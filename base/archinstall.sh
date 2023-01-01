@@ -35,7 +35,7 @@ SWAP_SIZE='8G' # Swap size in GB
 ROOT_SIZE='35G' # Root partition size in GB
 CRYPT_NAME='crypt_lvm' 
 LVM_NAME='lvm_arch'
-LUKS_KEYS='/mnt/etc/luksKeys' # Where you will store the root partition key
+LUKS_KEYS='/etc/luksKeys' # Where you will store the root partition key
 
 # Setting time correctly before installation
 timedatectl set-ntp true
@@ -117,14 +117,13 @@ echo -e "${BBlue}Generating fstab file...${NC}"
 genfstab -pU /mnt >> /mnt/etc/fstab &&\
 
 echo -e "${BBlue}Copying the $CRYPT_NAME key to $LUKS_KEYS ...${NC}" 
-mkdir --verbose $LUKS_KEYS
-cp ./boot.key $LUKS_KEYS/boot.key
+mkdir --verbose /mnt$LUKS_KEYS
+cp ./boot.key /mnt$LUKS_KEYS/boot.key
 rm ./boot.key
 
 # Add an entry to fstab so the new mountpoint will be mounted on boot
 echo -e "${BBlue}Adding tmpfs to fstab...${NC}" 
 echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0" >> /mnt/etc/fstab &&\
-
 
 # Preparing the chroot script to be executed
 echo -e "${BBlue}Preparing the chroot script to be executed...${NC}" 
