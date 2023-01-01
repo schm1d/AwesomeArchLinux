@@ -1,11 +1,13 @@
 ![Arch Linux Secure AF](./archLinux.png)
-## AwesomeArchLinux
-A collection of my shell scripts with hardened Arch Linux configuration, security tweaks and more.
-The idea is to make this repo a reliable and curated reference to Arch Linux hardened installations, hardening set ups, and configurations.
+## Awesome Arch Linux
+A collection of my shell scripts with hardened Arch Linux installation, configuration, security tweaks and more.
+The idea is to make this repo a reliable and curated reference to Arch Linux hardened installation, hardening set ups, and configurations.
+
+The encryption method use in the installation script is [LVM on LUKS with encrypted boot partition](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system#Encrypted_boot_partition_(GRUB))(Full disk encryption).
 
 First downaload Arch ISO [here](https://archlinux.org/download/)
 
-
+Boot the media on the target device you want install Arch linux.
 
 To run the base scripts on your machine, all you need to do is:
 
