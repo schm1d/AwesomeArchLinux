@@ -9,7 +9,7 @@ The script will prepare everything for you. No need to care about partitioning n
 
 First downaload Arch ISO [here](https://archlinux.org/download/)
 
-Boot the media on the target device you want install Arch linux.
+Boot the media on the target device you want install Arch linux. And copy the scripts **archinstall.sh** and **chroot.sh** to the live Arch system.
 
 To run the base scripts on your machine, all you need to do is:
 
