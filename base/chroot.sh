@@ -22,6 +22,7 @@ USERNAME='<user_name_goes_here>'
 HOSTNAME='<hostname_goes_here>'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump $DISK"3" | grep UUID | awk '{print $2}')
+CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -66,7 +67,6 @@ chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 
 # GRUB hardening setup and encryption
-
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
 sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
 sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
@@ -97,9 +97,22 @@ grub-mkconfig -o /boot/grub/grub.cfg &&\
 chmod 600 $LUKS_KEYS
 chmod 700 /boot
 
+echo -e "${BBlue}Installing CPU ucode...${NC}"
+# Use grep to check if the string 'Intel' is present in the CPU info
+if $CPU_VENDOR_ID == "GenuineIntel"; then
+    pacman -S intel-ucode --noconfirm
+elif
+    # If the string 'Intel' is not present, check if the string 'AMD' is present
+    $CPU_VENDOR_ID == "AuthenticAMD"; then
+    pacman -S amd-ucode --noconfirm
+else
+    # If neither 'Intel' nor 'AMD' is present, then it is an unknown CPU
+    echo "This is an unknown CPU."
+fi
+
 echo -e "${BBlue}Setting root password...${NC}"
 passwd &&\
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 rm /chroot.sh
-exit &&\
+exit
