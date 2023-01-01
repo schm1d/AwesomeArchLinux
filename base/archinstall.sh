@@ -30,10 +30,12 @@ BBlue='\033[1;34m'
 NC='\033[0m'
 
 # Change this to fit your environment
-DISK="<your_target_disk>" # Change this to your target disk.
-CRYPT_NAME="crypt_lvm"
-LVM_NAME="lvm_arch"
-LUKS_KEYS="/mnt/etc/luksKeys" # Where you will store the root partition key
+DISK='<your_target_disk>' # Change this to your target disk.
+SWAP_SIZE='8G' # Swap size in GB
+ROOT_SIZE='35G' # Root partition size in GB
+CRYPT_NAME='crypt_lvm' 
+LVM_NAME='lvm_arch'
+LUKS_KEYS='/mnt/etc/luksKeys' # Where you will store the root partition key
 
 # Setting time correctly before installation
 timedatectl set-ntp true
@@ -77,8 +79,8 @@ cryptsetup -v luksOpen $DISK"3" $CRYPT_NAME --key-file ./boot.key &&\
 echo -e "${BBlue}Creating LVM logical volumes on $LVM_NAME...${NC}"
 pvcreate --verbose /dev/mapper/$CRYPT_NAME &&\
 vgcreate --verbose $LVM_NAME /dev/mapper/$CRYPT_NAME &&\
-lvcreate --verbose -L 30G $LVM_NAME -n root &&\
-lvcreate --verbose -L 4G $LVM_NAME -n swap &&\
+lvcreate --verbose -L $ROOT_SIZE $LVM_NAME -n root &&\
+lvcreate --verbose -L $SWAP_SIZE $LVM_NAME -n swap &&\
 lvcreate --verbose -l 100%FREE $LVM_NAME -n home &&\
 
 # Format the partitions 
@@ -122,6 +124,7 @@ rm ./boot.key
 # Add an entry to fstab so the new mountpoint will be mounted on boot
 echo -e "${BBlue}Adding tmpfs to fstab...${NC}" 
 echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0" >> /mnt/etc/fstab &&\
+
 
 # Preparing the chroot script to be executed
 echo -e "${BBlue}Preparing the chroot script to be executed...${NC}" 
