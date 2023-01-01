@@ -1,6 +1,11 @@
-# AwesomeArchLinux
+![Arch Linux Secure AF](./archLinux.png)
+## AwesomeArchLinux
 A collection of my shell scripts with hardened Arch Linux configuration, security tweaks and more.
 The idea is to make this repo a reliable and curated reference to Arch Linux hardened installations, hardening set ups, and configurations.
+
+First downaload Arch ISO [here](https://archlinux.org/download/)
+
+
 
 To run the base scripts on your machine, all you need to do is:
 
