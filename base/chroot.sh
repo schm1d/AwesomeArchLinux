@@ -62,9 +62,9 @@ passwd $USERNAME &&\
 echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
 mkdir /home/$USERNAME/.ssh
 touch /home/$USERNAME/.ssh/authorized_keys &&\
-chown -R $USERNAME:$USERNAME /home/$USERNAME
 chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
+chown -R $USERNAME:$USERNAME /home/$USERNAME
 
 # GRUB hardening setup and encryption
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
