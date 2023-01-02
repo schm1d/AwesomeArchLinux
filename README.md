@@ -15,17 +15,17 @@ Boot the media on the target device you want install Arch linux.
 
 If there is no git running, you can install it with:
 
-    `pacman -Syy && pacman -S git`
+    pacman -Syy && pacman -S git
 
 Then on the live system do the following:
 
-    `git clone https://github.com/schm1d/AwesomeArchLinux.git`
-    `cd AwesomeArchLinux/base`
+    git clone https://github.com/schm1d/AwesomeArchLinux.git
+    cd AwesomeArchLinux/base
 
 Edit both scripts with your favorite editor (neovim, nano, vim)
 
-    `chmod *.sh`
-    `./archinstall.sh`
+    chmod *.sh
+    ./archinstall.sh
 
 #### Method 2
 Boot the media on the target device you want install Arch linux.
