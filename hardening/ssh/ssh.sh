@@ -48,16 +48,12 @@ echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config #Allow public key authen
 echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config #Allow authorized keys in .ssh/authorized_keys
 echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Allow ed25519 pubic key authentication
 echo "HostKey /etc/ssh/ssh_host_rsa_key" >> /etc/ssh/sshd_config #Allow RSA pubic key authentication
-echo "RSAAuthentication yes" >> >> /etc/ssh/sshd_config
 
 echo "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/sshd_config  #Host keys the client should accepts
 echo "KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/sshd_config #Specifies the available KEX (Key Exchange) algorithms
 echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr" >> /etc/ssh/sshd_config   #Specifies the ciphers allowed
 echo "Macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256" >> /etc/ssh/sshd_config     #Specifies the available MAC alg.
 echo "RevokedKeys $REVOKED_KEYS_FILE" >> /etc/ssh/sshd_config  #Specifies revoked public keys file
-
-echo "KeyRegenerationInterval 3600" >> /etc/ssh/sshd_config
-echo "ServerKeyBits 1024" >> /etc/ssh/sshd_config
 
 #Only allow incoming ECDSA and ed25519 sessions:
 echo "CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519" >> /etc/ssh/sshd_config
