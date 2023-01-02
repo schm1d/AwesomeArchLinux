@@ -110,8 +110,6 @@ else
     echo "This is an unknown CPU."
 fi
 
-chmod 700 /boot
-
 echo -e "${BBlue}Setting root password...${NC}"
 passwd &&\
 
