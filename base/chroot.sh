@@ -98,12 +98,10 @@ chmod 600 $LUKS_KEYS
 chmod 700 /boot
 
 echo -e "${BBlue}Installing CPU ucode...${NC}"
-# Use grep to check if the string 'Intel' is present in the CPU info
-if $CPU_VENDOR_ID == "GenuineIntel"; then
+if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
     pacman -S intel-ucode --noconfirm
-elif
+elif [[ $CPU_VENDOR_ID =~ "AuthenticAMD" ]]; then
     # If the string 'Intel' is not present, check if the string 'AMD' is present
-    $CPU_VENDOR_ID == "AuthenticAMD"; then
     pacman -S amd-ucode --noconfirm
 else
     # If neither 'Intel' nor 'AMD' is present, then it is an unknown CPU
