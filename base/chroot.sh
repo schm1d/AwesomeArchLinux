@@ -66,7 +66,7 @@ echo -e "${BBlue}Hardening sudo...${NC}"
 groupadd sudo
 
 # Set the secure path for sudo.
-echo "Defaults secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > /etc/sudoers
+echo "Defaults secure_path=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"" > /etc/sudoers
 
 # Disable the ability to run commands with root password.
 echo "Defaults !rootpw" >> /etc/sudoers
