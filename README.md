@@ -21,10 +21,7 @@ Then on the live system do the following:
 
     git clone https://github.com/schm1d/AwesomeArchLinux.git
     cd AwesomeArchLinux/base
-
-Edit the variables **archinstall.sh** with your favorite editor (neovim, nano, vim)
-
-    chmod *.sh
+    chmod +x *.sh
     ./archinstall.sh
 
 #### Method 2
@@ -36,6 +33,5 @@ Copy to a removable media and use it in the live system.
 To run the base scripts on your target machine, all you need to do is:
 
 1. Have both **archinstall.sh** and **chroot.sh** on the same directory.
-2. Edit the variables on **archinstall.sh**: your target disk, username, hostname... 
-3. chmod +x **archinstall.sh** and **chroot.sh**
-4. Then run **archinstall.sh** like so: `./archinstall.sh`
+2. chmod +x **archinstall.sh** and **chroot.sh**
+3. Then run **archinstall.sh** like so: `./archinstall.sh`
