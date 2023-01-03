@@ -1,14 +1,11 @@
 
 #!/bin/bash 
 
-##########################################################################################
-#Script Name    : archinstall.sh                                   
-#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script.                                                                                         
-#Author         : Bruno Schmid                                                
-#Email          : schmid.github@gmail.com
-#Twitter        : @brulliant
-#Linkedin       : https://www.linkedin.com/in/schmidbruno/                     
-###########################################################################################
+#Script Name    : chroot.sh                                   
+#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
+#               : This is the chroot which should be executed after the 'archinstall.sh'                                                 
+#Author         : @brulliant                                                
+#Linkedin       : https://www.linkedin.com/in/schmidbruno/
 
 # Set up the color variables
 BBlue='\033[1;34m'

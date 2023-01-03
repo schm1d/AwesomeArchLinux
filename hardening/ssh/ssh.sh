@@ -1,13 +1,10 @@
 #!/bin/bash
 
-##########################################################################################
-#Script Name    : ssh.sh                                   
-#Description    : A super secure SSH setup for Arch Linux. You can use this script on other distros too.
-#Author         : Bruno Schmid                                                
-#Email          : schmid.github@gmail.com
-#Twitter        : @brulliant
-#Linkedin       : https://www.linkedin.com/in/schmidbruno/                     
-############################################################################################
+#Script Name    : chroot.sh                                   
+#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
+#               : This is the chroot which should be executed after the 'archinstall.sh'                                                 
+#Author         : @brulliant                                                
+#Linkedin       : https://www.linkedin.com/in/schmidbruno/    
 
 BBlue='\033[1;34m'
 NC='\033[0m'
