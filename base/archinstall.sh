@@ -31,6 +31,8 @@ NC='\033[0m'
 
 # Change this to fit your environment
 DISK='<your_target_disk>' # Change this to your target disk.
+USERNAME='<user_name_goes_here>'
+HOSTNAME='<hostname_goes_here>'
 SWAP_SIZE='8G' # Swap size in GB
 ROOT_SIZE='35G' # Root partition size in GB
 CRYPT_NAME='crypt_lvm' 
@@ -133,7 +135,10 @@ echo "[Service]" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&
 echo "SupplementaryGroups=proc" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
 
 # Preparing the chroot script to be executed
-echo -e "${BBlue}Preparing the chroot script to be executed...${NC}" 
+echo -e "${BBlue}Preparing the chroot script to be executed...${NC}"
+sed -i "s|^DISK=.*|DISK='${DISK}'|g" ./chroot.sh
+sed -i "s|^USERNAME=.*|USERNAME='${USERNAME}'|g" ./chroot.sh
+sed -i "s|^HOSTNAME=.*|HOSTNAME='${HOSTNAME}'|g" ./chroot.sh
 cp ./chroot.sh /mnt &&\
 chmod +x /mnt/chroot.sh &&\
 rm ./chroot.sh
