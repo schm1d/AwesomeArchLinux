@@ -3,7 +3,7 @@
 ##########################################################################################
 #Script Name    : chroot.sh                                   
 #Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
-#               : This is the chroot which should be executed after the 'archinstall.sh'                                                                                        
+#               : This is the chroot which should be executed after the 'archinstall.sh'                                                 
 #Author         : Bruno Schmid                                                
 #Email          : schmid.github@gmail.com
 #Twitter        : @brulliant
@@ -14,10 +14,10 @@
 BBlue='\033[1;34m'
 NC='\033[0m'
 
-# change the below values to match with your configuration
-DISK='<your_target_disk>' # Should be the same as in the archInstall.sh script
-CRYPT_NAME='crypt_lvm' # Should be the same as in the archInstall.sh script
-LVM_NAME='lvm_arch' # Should be the same as in the archInstall.sh script
+#  The below values will be changed by ArchInstall.sh
+DISK='<your_target_disk>'
+CRYPT_NAME='crypt_lvm'
+LVM_NAME='lvm_arch'
 USERNAME='<user_name_goes_here>'
 HOSTNAME='<hostname_goes_here>'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
@@ -48,15 +48,64 @@ echo -e "${BBlue}Setting hostname...${NC}"
 echo $HOSTNAME > /etc/hostname &&\
 echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
 
+echo "sshd : ALL : ALLOW" > /etc/hosts.allow
+echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
+echo "ALL: ALL" > /etc/hosts.deny
+
+
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager &&\
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd &&\
 
+
+# Configure sudo
+echo -e "${BBlue}Hardening sudo...${NC}"
+# Create a group for sudo
+groupadd sudo
+
+# Set the secure path for sudo.
+echo "Defaults secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > /etc/sudoers
+
+# Disable the ability to run commands with root password.
+echo "Defaults !rootpw" >> /etc/sudoers
+
+# Set the default umask for sudo.
+echo "Defaults umask=077" >> /etc/sudoers
+
+# Set the default editor for sudo.
+echo "Defaults editor=/usr/bin/vim" >> /etc/sudoers
+
+# Set the default environment variables for sudo.
+echo "Defaults env_reset" >> /etc/sudoers
+echo "Defaults env_reset,env_keep=\"COLORS DISPLAY HOSTNAME HISTSIZE INPUTRC KDEDIR LS_COLORS\"" >> /etc/sudoers
+echo "Defaults env_keep += \"MAIL PS1 PS2 QTDIR USERNAME LANG LC_ADDRESS LC_CTYPE\"" >> /etc/sudoers
+echo "Defaults env_keep += \"LC_COLLATE LC_IDENTIFICATION LC_MEASUREMENT LC_MESSAGES\"" >> /etc/sudoers
+echo "Defaults env_keep += \"LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER LC_TELEPHONE\"" >> /etc/sudoers
+echo "Defaults env_keep += \"LC_TIME LC_ALL LANGUAGE LINGUAS _XKB_CHARSET XAUTHORITY\"" >> /etc/sudoers
+
+# Set the security tweaks for sudoers file
+echo "Defaults timestamp_timeout=30" >> /etc/sudoers
+echo "Defaults !visiblepw" >> /etc/sudoers
+echo "Defaults always_set_home" >> /etc/sudoers
+echo "Defaults match_group_by_gid" >> /etc/sudoers
+echo "Defaults always_query_group_plugin" >> /etc/sudoers
+echo "Defaults passwd_timeout=10" >> /etc/sudoers # 10 minutes before sudo times out
+echo "Defaults passwd_tries=3" >> /etc/sudoers # Nr of attempts to enter password
+echo "Defaults loglinelen=0" >> /etc/sudoers
+echo "Defaults insults" >> /etc/sudoers # Insults user when wrong password is entered
+echo "Defaults lecture=once" >> /etc/sudoers
+echo "Defaults requiretty" >> /etc/sudoers # Forces to use real tty and not cron or cgi-bin
+echo "Defaults logfile=/var/log/sudo.log" >> /etc/sudoers
+echo "Defaults log_input, log_output" >> /etc/sudoers # Log input and output of sudo commands
+echo "%sudo ALL=(ALL) ALL" >> /etc/sudoers
+echo "@includedir /etc/sudoers.d" >> /etc/sudoers
+
 # add a user
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
-useradd -g wheel -s /bin/zsh -m $USERNAME &&\
+groupadd $USERNAME
+useradd -g $USERNAME -G sudo,wheel -s /bin/zsh -m $USERNAME &&\
 passwd $USERNAME &&\
 
 echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
@@ -66,6 +115,10 @@ chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 chown -R $USERNAME:$USERNAME /home/$USERNAME
 
+# Set default ACLs on home directory 
+echo -e "${BBlue}Setting default ACLs on home directory${NC}"
+setfacl -d -m u::rwx,g::---,o::--- ~
+
 # GRUB hardening setup and encryption
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
 sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
@@ -74,7 +127,6 @@ mkinitcpio -p linux &&\
 
 echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
 sed -i '/GRUB_ENABLE_CRYPTODISK/s/^#//g' /etc/default/grub
-
 
 echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
 
@@ -96,7 +148,6 @@ grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --rec
 grub-mkconfig -o /boot/grub/grub.cfg &&\
 chmod 600 $LUKS_KEYS
 
-
 echo -e "${BBlue}Installing CPU ucode...${NC}"
 # Use grep to check if the string 'Intel' is present in the CPU info
 if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
@@ -113,7 +164,6 @@ fi
 echo -e "${BBlue}Setting permission on config files...${NC}"
 
 chmod 0700 /boot
-
 chmod 644 /etc/passwd
 chown root:root /etc/passwd
 chmod 644 /etc/group
@@ -131,14 +181,13 @@ chown root:root /boot/grub/grub.cfg
 chmod og-rwx /boot/grub/grub.cfg
 chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
-chmod 0440 /etc/sudoers
+chown -c root:root /etc/sudoers
+chmod -c 0440 /etc/sudoers
 chmod 02750 /bin/ping 
 chmod 02750 /usr/bin/w 
 chmod 02750 /usr/bin/who
 chmod 02750 /usr/bin/whereis
 chmod 0600 /etc/login.defs
-
-
 
 echo -e "${BBlue}Setting root password...${NC}"
 passwd &&\
