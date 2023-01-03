@@ -117,6 +117,57 @@ echo -e "${BBlue}Hardening permissions...${NC}"
 chown root:root /etc/ssh/sshd_config
 chmod 0600 /etc/ssh/sshd_config
 
+echo -e "${BBlue}Creating Banner (/etc/issue.net).${NC}"
+
+cat > /etc/issue.net << EOF
+                     .ed"""" """\$\$\$\$be.
+                   -"           ^""**\$\$\$e.
+                 ."                   '\$\$\$c
+                /                      "4\$\$b
+               d  3                     \$\$\$\$
+               \$  *                   .\$\$\$\$\$\$
+              .\$  ^c           \$\$\$\$\$e\$\$\$\$\$\$\$\$.
+              d\$L  4.         4\$\$\$\$\$\$\$\$\$\$\$\$\$\$b
+              \$\$\$\$b ^ceeeee.  4\$\$ECL.F*\$\$\$\$\$\$\$
+  e\$""=.      \$\$\$\$P d\$\$\$\$F \$ \$\$\$\$\$\$\$\$\$- \$\$\$\$\$\$
+ z\$\$b. ^c     3\$\$\$F "\$\$\$\$b   \$"\$\$\$\$\$\$\$  \$\$\$\$*"      .=""\$c
+4\$\$\$\$L   \     \$\$P"  "\$\$b   .\$ \$\$\$\$\$...e\$\$        .=  e\$\$\$.
+^*\$\$\$\$\$c  %..   *c    ..    \$\$ 3\$\$\$\$\$\$\$\$\$\$eF     zP  d\$\$\$\$\$
+  "**\$\$\$ec   "\   %ce""    \$\$\$  \$\$\$\$\$\$\$\$\$\$*    .r" =\$\$\$\$P""
+        "*\$b.  "c  *\$e.    *** d\$\$\$\$\$"L\$\$    .d"  e\$\$***"
+          ^*\$\$c ^\$c \$\$\$      4J\$\$\$\$\$% \$\$\$ .e*".eeP"
+             "\$\$\$\$\$\$"'\$=e....\$*\$\$**\$cz\$\$" "..d\$*"
+               "*\$\$\$  *=%4.\$ L L\$ P3\$\$\$F \$\$\$P"
+                  "\$   "%*ebJLzb\$e\$\$\$\$\$b \$P"
+                    %..      4\$\$\$\$\$\$\$\$\$\$ "
+                     \$\$\$e   z\$\$\$\$\$\$\$\$\$\$%
+                      "*\$c  "\$\$\$\$\$\$\$P"
+                       ."""*\$\$\$\$\$\$\$\$bc
+                    .-"    .\$***\$\$\$"""*e.
+                 .-"    .e\$"     "*\$c  ^*b.
+          .=*""""    .e\$*"          "*bc  "*\$e..
+        .\$"        .z*"               ^*\$e.   "*****e.
+        \$\$ee\$c   .d"                     "*\$.        3.
+        ^*\$E")\$..\$"                         *   .ee==d%
+           \$.d\$\$\$*                           *  J\$\$\$e*
+            """""                             "\$\$\$"
+
+********************************************************************
+*                                                                  *
+* This system is for the use of authorized users only. Usage of    *
+* this system may be monitored and recorded by system personnel.   *
+*                                                                  *
+* Anyone using this system expressly consents to such monitoring   *
+* and is advised that if such monitoring reveals possible          *
+* evidence of criminal activity, system personnel may provide the  *
+* evidence from such monitoring to law enforcement officials.      *
+*                                                                  *
+********************************************************************
+EOF
+
+chown root:root /etc/issue.net
+chmod 644 /etc/issue.net
+
 if [ $? -eq 0 ]; then
     echo -e "${BBlue}Restarting and enabling SSHD...${NC}"
     systemctl restart sshd.service
