@@ -8,8 +8,11 @@
 #Email          : schmid.github@gmail.com
 #Twitter        : @brulliant
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/                     
-############################################################################################
+###########################################################################################
 
+# Set up the color variables
+BBlue='\033[1;34m'
+NC='\033[0m'
 
 # Check if user is root
 if [ "$(id -u)" != "0" ]; then
@@ -22,21 +25,36 @@ if [ ! -d "/sys/firmware/efi/efivars" ]; then
   echo -e "${BBlue}UEFI is not supported.${NC}"
   exit 1
 else
-   echo -e "${BBlue}UEFI is supported, proceding...${NC}"
+   echo -e "${BBlue}\n UEFI is supported, proceding...\n${NC}"
 fi
 
-# Set up the variables
-BBlue='\033[1;34m'
-NC='\033[0m'
+# Get user input for the settings
+echo -e "${BBlue}The following disks are available on your system:\n${NC}"
+lsblk -d | grep -v 'rom' | grep -v 'loop'
+echo -e "\n"
 
-# Change this to fit your environment
-DISK='<your_target_disk>' # Change this to your target disk.
-USERNAME='<user_name_goes_here>'
-HOSTNAME='<hostname_goes_here>'
-SWAP_SIZE='8G' # Swap size in GB
-ROOT_SIZE='35G' # Root partition size in GB
-CRYPT_NAME='crypt_lvm' 
-LVM_NAME='lvm_arch'
+read -p 'Select the target disk: ' TARGET_DISK
+echo -e "\n"
+
+echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
+
+read -p 'Enter the new user: ' NEW_USER
+read -p 'Enter the new hostname: ' NEW_HOST
+echo -e "\n"
+
+echo -e "${BBlue}Set / and Swap patition size:\n${NC}"
+
+read -p 'Enter the size of SWAP in GB: ' SIZE_OF_SWAP
+read -p 'Enter the size of / in GB, the remaing space will be alocated to /home: ' SIZE_OF_ROOT
+echo -e "\n"
+
+DISK='/dev/'$TARGET_DISK
+USERNAME=$NEW_USER
+HOSTNAME=$NEW_HOST
+SWAP_SIZE=$SIZE_OF_SWAP'G' # Modern systems don't really need swap.
+ROOT_SIZE=$SIZE_OF_ROOT'G'
+CRYPT_NAME='crypt_lvm' # the name of the LUKS container.
+LVM_NAME='lvm_arch' # the name of the logical volume.
 LUKS_KEYS='/etc/luksKeys' # Where you will store the root partition key
 
 # Setting time correctly before installation
@@ -60,7 +78,9 @@ sgdisk -n 3:1130496:$(sgdisk -E $DISK) -t 3:8309 -c 3:"Linux LUKS" $DISK
 
 # Create the LUKS container
 echo -e "${BBlue}Creating the LUKS container...${NC}"
-# Encrypts withthe best key size.
+#read -ps 'Enter a password for the LUKS container: ' LUKS_PASS
+
+# Encrypts with the best key size.
 cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 3000 --use-random  luksFormat --type luks1 $DISK"3" &&\
 
 # Opening LUKS container to test
@@ -76,6 +96,7 @@ cryptsetup -v luksAddKey -i 1 $DISK"3" ./boot.key &&\
 # unlock LUKS container with the boot.key file
 echo -e "${BBlue}Testing the LUKS keys for $CRYPT_NAME...${NC}"
 cryptsetup -v luksOpen $DISK"3" $CRYPT_NAME --key-file ./boot.key &&\
+echo -e "\n"
 
 # Create the LVM physical volume, volume group and logical volume
 echo -e "${BBlue}Creating LVM logical volumes on $LVM_NAME...${NC}"
