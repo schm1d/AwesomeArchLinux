@@ -98,6 +98,11 @@ echo "Defaults log_input, log_output" >> /etc/sudoers # Log input and output of 
 echo "%sudo ALL=(ALL) ALL" >> /etc/sudoers
 echo "@includedir /etc/sudoers.d" >> /etc/sudoers
 
+# Set permissions for /etc/sudoers
+echo -e "${BBlue}Setting permissions for /etc/sudoers${NC}"
+chmod 440 /etc/sudoers 
+chown root:root /etc/sudoers
+
 # add a user
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
 groupadd $USERNAME
