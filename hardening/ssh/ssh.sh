@@ -1,8 +1,7 @@
 #!/bin/bash
 
-#Script Name    : chroot.sh                                   
-#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
-#               : This is the chroot which should be executed after the 'archinstall.sh'                                                 
+#Script Name    : ssh.sh                                   
+#Description    : A very secure sshd_config and ssh_config                                                 
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/    
 
