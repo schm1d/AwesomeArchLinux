@@ -49,5 +49,5 @@ echo "export EDITOR=neovim" >>~/.bashrc
 echo "export SHELL=/bin/bash" >>~/.bashrc
 
 # Set secure permissions on the config file
-sudo chown root:root ~/.config/nvim/init.vim
+sudo chown $USER:$USER ~/.config/nvim/init.vim
 sudo chmod 600 ~/.config/nvim/init.vim
