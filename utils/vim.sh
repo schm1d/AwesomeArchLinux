@@ -22,6 +22,7 @@ echo "Plug 'scrooloose/nerdtree'" >> ~/.vimrc
 echo "Plug 'tpope/vim-fugitive'" >> ~/.vimrc 
 echo "Plug 'airblade/vim-gitgutter'" >> ~/.vimrc
 echo "Plug 'tomlion/vim-solidity'" >> ~/.vimrc
+echo "Plug 'antenore/vim-safe'" >> ~/.vimrc
 echo "call plug#end()" >> ~/.vimrc 
 
  # Install plugins using vim-plug package manager 
