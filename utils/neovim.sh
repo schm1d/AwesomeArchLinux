@@ -16,7 +16,7 @@ mkdir -p ~/.config/nvim/secure-plugins
 chmod 700 ~/.config/nvim/secure-plugins
 
 # Install additional plugins for neovim, such as Syntastic and Ale, from the AUR
-yay -S neovim-syntastic neovim-git neovim-polyglot-git neovim-plug --noconfirm
+yay -S neovim-syntastic neovim-polyglot-git neovim-plug --noconfirm
 
 # Add secure aliases to the config file to prevent malicious code execution 
 echo "alias nvim='nvim --cmd \"set secure\"'" >> ~/.config/nvim/init.vim
