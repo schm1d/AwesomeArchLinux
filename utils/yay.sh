@@ -8,9 +8,6 @@
 # Update the repository
 sudo pacman -Syu
 
-# Install git and base-devel packages
-sudo pacman -S git base-devel
-
 # Clone the yay repo from github
 git clone https://aur.archlinux.org/yay.git
 
