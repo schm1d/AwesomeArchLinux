@@ -16,6 +16,7 @@ echo "set constantshow" >> ~/.nanorc
 echo "set set locking" >> ~/.nanorc
 echo "set nohelp" >> ~/.nanorc
 echo "set nonewlines" >> ~/.nanorc
+echo "set nowrap" >> ~/.nanorc
 echo "set minibar" >> ~/.nanorc
 echo "set wrap" >> ~/.nanorc
 echo "set zap" >> ~/.nanorc
