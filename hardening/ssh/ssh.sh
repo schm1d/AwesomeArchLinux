@@ -1,9 +1,9 @@
 #!/bin/bash
-
-#Script Name    : ssh.sh                                   
+                                 
 #Description    : A very secure sshd_config and ssh_config                                                 
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/    
+
 
 BBlue='\033[1;34m'
 NC='\033[0m'

@@ -1,6 +1,5 @@
 #!/bin/bash
-
-#Script Name    : chroot.sh                                   
+                                
 #Description    : This is the chroot which should be executed via 'archinstall.sh' 
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/                     

@@ -1,9 +1,9 @@
 #!/bin/bash 
-
-#Script Name    : sysctl.sh                                   
+                               
 #Description    : Script to harden sysctl.conf settings 
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/
+
 
 # Set up the color variables
 BBlue='\033[1;34m'
