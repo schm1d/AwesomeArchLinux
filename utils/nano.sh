@@ -13,7 +13,7 @@ curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh
 
 # Add the following settings to the nano configuration file to harden it
 echo "set constantshow" >> ~/.nanorc
-echo "set set locking" >> ~/.nanorc
+echo "set locking" >> ~/.nanorc
 echo "set nohelp" >> ~/.nanorc
 echo "set nonewlines" >> ~/.nanorc
 echo "set nowrap" >> ~/.nanorc
