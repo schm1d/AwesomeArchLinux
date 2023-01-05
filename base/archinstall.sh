@@ -1,10 +1,10 @@
 
 #!/bin/bash 
-
-#Script Name    : archInstall.sh                                   
+                                 
 #Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/
+
 
 # Set up the color variables
 BBlue='\033[1;34m'
