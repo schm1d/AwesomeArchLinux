@@ -1,5 +1,6 @@
 ![Arch Linux Secure AF](./archLinux.png)
 ## Awesome Arch Linux
+
 A collection of my shell scripts with hardened Arch Linux installation, configuration, security tweaks and more.
 The idea is to make this repo a reliable and curated reference to Arch Linux hardened installation, hardening set ups, and configurations.
 
@@ -37,3 +38,5 @@ To run the base scripts on your target machine, all you need to do is:
 1. Have both **archinstall.sh** and **chroot.sh** on the same directory.
 2. chmod +x **archinstall.sh** and **chroot.sh**
 3. Then run **archinstall.sh** like so: `./archinstall.sh`
+
+Arch Linux is a highly customizable, lightweight, and rolling release Linux distribution that is well-suited for experienced users who want to have complete control over their system. It gives users the ability to customize their system to meet their specific needs and preferences. Additionally, Arch Linux is known for its powerful package manager (Pacman), which allows users to quickly and easily install, remove, and update software packages with minimal effort. Furthermore, Arch Linux is well-supported by a large community of experienced users who are willing to help newcomers with any issues they may encounter.
