@@ -18,7 +18,6 @@ echo "set nohelp" >> ~/.nanorc
 echo "set nonewlines" >> ~/.nanorc
 echo "set nowrap" >> ~/.nanorc
 echo "set minibar" >> ~/.nanorc
-echo "set wrap" >> ~/.nanorc
 echo "set zap" >> ~/.nanorc
 echo "set linenumbers" >> ~/.nanorc
 echo "set tabsize 4" >> ~/.nanorc
