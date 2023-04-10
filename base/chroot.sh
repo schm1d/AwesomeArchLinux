@@ -1,59 +1,58 @@
 #!/bin/bash
-                                
-#Description    : This is the chroot which should be executed via 'archinstall.sh' 
-#Author         : @brulliant                                                
-#Linkedin       : https://www.linkedin.com/in/schmidbruno/                     
 
+# Description    : This is the chroot which should be executed via 'archinstall.sh'
+# Author         : @brulliant
+# Linkedin       : https://www.linkedin.com/in/schmidbruno/
 
 # Set up the variables
 BBlue='\033[1;34m'
 NC='\033[0m'
 
-#  The below values will be changed by ArchInstall.sh
+# The below values will be changed by ArchInstall.sh
 DISK='<your_target_disk>'
 CRYPT_NAME='crypt_lvm'
 LVM_NAME='lvm_arch'
 USERNAME='<user_name_goes_here>'
 HOSTNAME='<hostname_goes_here>'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
-UUID=$(cryptsetup luksDump $DISK"3" | grep UUID | awk '{print $2}')
+UUID=$(cryptsetup luksDump "$DISK""3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 
 pacman-key --init
 pacman-key --populate archlinux
 
-# set the timezone
-echo -e "${BBlue}Setting the timezone...${NC}" 
-ln -sf /usr/share/zoneinfo/Europe/Zurich /etc/localtime &&\
-hwclock --systohc --utc &&\
+# Set the timezone
+echo -e "${BBlue}Setting the timezone...${NC}"
+ln -sf /usr/share/zoneinfo/Europe/Zurich /etc/localtime &&
+  hwclock --systohc --utc
 
-# set up locale
+# Set up locale
 echo -e "${BBlue}Setting up locale...${NC}"
-sed -i '/#en_US.UTF-8/s/^#//g' /etc/locale.gen && locale-gen &&\
-echo 'LANG=en_US.UTF-8' > /etc/locale.conf &&\
-export LANG=en_US.UTF-8 &&\
+sed -i '/#en_US.UTF-8/s/^#//g' /etc/locale.gen &&
+  locale-gen &&
+  echo 'LANG=en_US.UTF-8' > /etc/locale.conf &&
+  export LANG=en_US.UTF-8
 
 echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
-echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&\
-echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&\
-echo 'FONT_MAP=8859-1_to_uni' >> etc/vconsole.conf &&\
+echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
+  echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
+  echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
-# set hostname
+# Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
-echo $HOSTNAME > /etc/hostname &&\
-echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
+echo "$HOSTNAME" > /etc/hostname &&
+  echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
 
 echo "sshd : ALL : ALLOW" > /etc/hosts.allow
 echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
 echo "ALL: ALL" > /etc/hosts.deny
 
-
+# Enable and configure necessary services
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
-systemctl enable NetworkManager &&\
+systemctl enable NetworkManager
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
-systemctl enable sshd &&\
-
+systemctl enable sshd
 
 # Configure sudo
 echo -e "${BBlue}Hardening sudo...${NC}"
