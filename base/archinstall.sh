@@ -1,10 +1,8 @@
+#!/bin/bash
 
-#!/bin/bash 
-                                 
-#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script. 
-#Author         : @brulliant                                                
+#Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script.
+#Author         : @brulliant
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/
-
 
 # Set up the color variables
 BBlue='\033[1;34m'
@@ -17,11 +15,11 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 # Take action if UEFI is supported.
-if [ ! -d "/sys/firmware/efi/efivars" ]; then 
+if [ ! -d "/sys/firmware/efi/efivars" ]; then
   echo -e "${BBlue}UEFI is not supported.${NC}"
   exit 1
 else
-   echo -e "${BBlue}\n UEFI is supported, proceding...\n${NC}"
+   echo -e "${BBlue}\n UEFI is supported, proceeding...\n${NC}"
 fi
 
 # Get user input for the settings
@@ -38,20 +36,22 @@ read -p 'Enter the new user: ' NEW_USER
 read -p 'Enter the new hostname: ' NEW_HOST
 echo -e "\n"
 
-echo -e "${BBlue}Set / and Swap patition size:\n${NC}"
+echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
 
 read -p 'Enter the size of SWAP in GB: ' SIZE_OF_SWAP
-read -p 'Enter the size of / in GB, the remaing space will be alocated to /home: ' SIZE_OF_ROOT
+read -p 'Enter the size of / in GB, the remaining space will be allocated to /home: ' SIZE_OF_ROOT
 echo -e "\n"
 
-DISK='/dev/'$TARGET_DISK
-USERNAME=$NEW_USER
-HOSTNAME=$NEW_HOST
-SWAP_SIZE=$SIZE_OF_SWAP'G' # Modern systems don't really need swap.
-ROOT_SIZE=$SIZE_OF_ROOT'G'
-CRYPT_NAME='crypt_lvm' # the name of the LUKS container.
+# Use the correct variable name for the target disk
+DISK="/dev/$TARGET_DISK"
+USERNAME="$NEW_USER"
+HOSTNAME="$NEW_HOST"
+SWAP_SIZE="${SIZE_OF_SWAP}G" # Modern systems don't really need swap.
+ROOT_SIZE="${SIZE_OF_ROOT}G"
+CRYPT_NAME='crypt_lvm' # the name of the LUKS container.
 LVM_NAME='lvm_arch' # the name of the logical volume.
 LUKS_KEYS='/etc/luksKeys' # Where you will store the root partition key
+
 
 # Setting time correctly before installation
 timedatectl set-ntp true
@@ -163,5 +163,5 @@ chmod +x /mnt/chroot.sh &&\
 rm ./chroot.sh
 
 # Chroot into new system and configure it 
-echo -e "${BBlue}Chrooting into new system and configuring it...${NC}" &&\
+echo -e "${BBlue}Chrooting into new system and configuring it...${NC}"
 arch-chroot /mnt /bin/bash ./chroot.sh
