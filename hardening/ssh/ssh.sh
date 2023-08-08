@@ -11,7 +11,7 @@ SSH_PORT='<custom_port>'
 ALLOWED_USERS='<users separated by space>'
 REVOKED_KEYS_FILE='/etc/ssh/revokedKeys'
 
-# Check if user is root
+# Check if the user is root
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root." 1>&2
    exit 1
@@ -19,7 +19,7 @@ fi
 
 echo -e "${BBlue}Cleaning old keys...${NC}"
 cd /etc/ssh
-rm ssh_host_*key*
+shred -u ssh_host_*key*
 
 echo -e "${BBlue}Creating ed25519, ras, ecdsa and dsa keys...${NC}"
 ssh-keygen -t ed25519 -b 4096 -f ssh_host_ed25519_key -N "" < /dev/null
@@ -95,6 +95,8 @@ echo "TCPKeepAlive no" >> /etc/ssh/sshd_config           #Do not use TCP keep al
 echo "AcceptEnv LANG LC_*" >> /etc/ssh/sshd_config       #Allow client to pass locale environment variables
 echo "Subsystem sftp /usr/lib/ssh/sftp-server -f AUTHPRIV -l INFO" >> /etc/ssh/sshd_config   #Enable sFTP subsystem over SSH
 echo "UsePAM yes" >> /etc/ssh/ssh_config     #Enable PAM authentication
+echo "UsePrivilegeSeparation yes" >> /etc/ssh/sshd_config #Separates privileges by creating an unprivileged child process to handle incoming connections.
+
 
 echo -e "${BBlue}Hardening \"/etc/ssh/ssh_config\"...${NC}"
 echo "HashKnownHosts yes" > /etc/ssh/ssh_config #Hash the information in the knownHosts files
@@ -169,5 +171,10 @@ if [ $? -eq 0 ]; then
     systemctl restart sshd.service
     systemctl status sshd.service
 fi
+
+echo -e "${BBlue}Rate Limiting with iptables to avoid brute-forcing...${NC}"
+iptables -A INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport $SSH_PORT -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+
 
 echo -e "${BBlue}SSH is running on port $SSH_PORT.${NC}"
