@@ -33,17 +33,17 @@ touch $REVOKED_KEYS_FILE
 echo "Protocol 2" > /etc/ssh/sshd_config  #Protocol 1 is fundamentally broken
 echo "StrictModes yes" >> /etc/ssh/sshd_config   #Protects from misconfiguration
 
-#echo "ListenAddress <IPs allowed here coma separated>" >> /etc/ssh/sshd_config  # If you need to limit the access to few IPs from a local network this will be ideal.
+#echo "ListenAddress <IPs allowed here coma separated>" >> /etc/ssh/sshd_config  # If you need to limit access to a few IPs from a local network, this will be ideal.
 echo "Port $SSH_PORT" >> /etc/ssh/sshd_config  #Listening port. default is port 22
 
 echo "AuthenticationMethods password,publickey" >> /etc/ssh/sshd_config #Only public key authentication should be allowed.
 #echo "RequiredAuthentications2 publickey,password" >> /etc/ssh/sshd_config # Requires both a passphrase and a public key
 
-# to create a key: ssh-keygen -t ed25519 -C "$USER"
+# To create a key: ssh-keygen -t ed25519 -C "$USER"
 echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config #Allow public key authentication
 echo "AuthorizedKeysFile .ssh/authorized_keys" >> /etc/ssh/sshd_config #Allow authorized keys in .ssh/authorized_keys
-echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Allow ed25519 pubic key authentication
-echo "HostKey /etc/ssh/ssh_host_rsa_key" >> /etc/ssh/sshd_config #Allow RSA pubic key authentication
+echo "HostKey /etc/ssh/ssh_host_ed25519_key" >> /etc/ssh/sshd_config #Allow ed25519 public key authentication
+echo "HostKey /etc/ssh/ssh_host_rsa_key" >> /etc/ssh/sshd_config #Allow RSA public key authentication
 
 echo "HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/sshd_config  #Host keys the client should accepts
 echo "KexAlgorithms curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/sshd_config #Specifies the available KEX (Key Exchange) algorithms
@@ -72,7 +72,7 @@ echo "X11Forwarding no" >> /etc/ssh/sshd_config          #Disable X11 forwarding
 
 echo "LogLevel VERBOSE" >> /etc/ssh/sshd_config          #Fingerprint details of failed login attempts
 echo "SyslogFacility AUTH" >> /etc/ssh/sshd_config       #Logging authentication and authorization related commands
-echo "UseDNS no" >> /etc/ssh/sshd_config                 #Client from a location without proper DNS generate a warning in the logs
+echo "UseDNS no" >> /etc/ssh/sshd_config                 #Client from a location without proper DNS generates a warning in the logs
 echo "Compression no" >> /etc/ssh/sshd_config
 
 echo "PermitTunnel no" >> /etc/ssh/sshd_config           #Only SSH connection and nothing else
@@ -99,15 +99,15 @@ echo "UsePAM yes" >> /etc/ssh/ssh_config     #Enable PAM authentication
 echo -e "${BBlue}Hardening \"/etc/ssh/ssh_config\"...${NC}"
 echo "HashKnownHosts yes" > /etc/ssh/ssh_config #Hash the information in the knownHosts files
 echo "Host *" >> /etc/ssh/ssh_config
-echo "  ConnectTimeout 30" >> /etc/ssh/ssh_config
-echo "  HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/ssh_config
-echo "  KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/ssh_config
-echo "  MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com" >> /etc/ssh/ssh_config
-echo "  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr" >> /etc/ssh/ssh_config
-echo "  ServerAliveInterval 10" >> /etc/ssh/ssh_config
-echo "  ControlMaster auto" >> /etc/ssh/ssh_config
-echo "  ControlPersist yes" >> /etc/ssh/ssh_config
-echo "  ControlPath ~/.ssh/socket-%r@%h:%p" >> /etc/ssh/ssh_config
+echo "ConnectTimeout 30" >> /etc/ssh/ssh_config
+echo "HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256" >> /etc/ssh/ssh_config
+echo "KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256" >> /etc/ssh/ssh_config
+echo "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com" >> /etc/ssh/ssh_config
+echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr" >> /etc/ssh/ssh_config
+echo "ServerAliveInterval 10" >> /etc/ssh/ssh_config
+echo "ControlMaster auto" >> /etc/ssh/ssh_config
+echo "ControlPersist yes" >> /etc/ssh/ssh_config
+echo "ControlPath ~/.ssh/socket-%r@%h:%p" >> /etc/ssh/ssh_config
 
 echo -e "${BBlue}Hardening permissions...${NC}"
 chown root:root /etc/ssh/sshd_config
