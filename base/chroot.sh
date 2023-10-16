@@ -35,14 +35,19 @@ sed -i '/#en_US.UTF-8/s/^#//g' /etc/locale.gen &&
 
 echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
 echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
-  echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
-  echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
+echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
+echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
 echo "$HOSTNAME" > /etc/hostname &&
-  echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
+echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
 
+# Create a new resolv.conf file with the following settings:
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf  
+
+# Hardening hosts.allow and hosts.deny
 echo "sshd : ALL : ALLOW" > /etc/hosts.allow
 echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
 echo "ALL: ALL" > /etc/hosts.deny
