@@ -8,7 +8,7 @@
 BBlue='\033[1;34m'
 NC='\033[0m'
 SSH_PORT='<custom_port>'
-ALLOWED_USERS='<users separated by space>'
+ALLOWED_USERS=$USER
 REVOKED_KEYS_FILE='/etc/ssh/revokedKeys'
 
 # Check if the user is root
