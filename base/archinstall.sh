@@ -77,21 +77,21 @@ echo -e "${BBlue}Creating the LUKS container...${NC}"
 #read -ps 'Enter a password for the LUKS container: ' LUKS_PASS
 
 # Encrypts with the best key size.
-cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 3000 --use-random  luksFormat --type luks1 $DISK"3" &&\
+cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 3000 --use-random  luksFormat --type luks1 $DISK"p3" &&\
 
 # Opening LUKS container to test
 echo -e "${BBlue}Opening the LUKS container to test password...${NC}"
-cryptsetup -v luksOpen $DISK"3" $CRYPT_NAME &&\
+cryptsetup -v luksOpen $DISK"p3" $CRYPT_NAME &&\
 cryptsetup -v luksClose $CRYPT_NAME
 
 # create a LUKS key of size 2048 and save it as boot.key
 echo -e "${BBlue}Creating the LUKS key for $CRYPT_NAME...${NC}"
 dd if=/dev/urandom of=./boot.key bs=2048 count=1 &&\
-cryptsetup -v luksAddKey -i 1 $DISK"3" ./boot.key &&\
+cryptsetup -v luksAddKey -i 1 $DISK"p3" ./boot.key &&\
 
 # unlock LUKS container with the boot.key file
 echo -e "${BBlue}Testing the LUKS keys for $CRYPT_NAME...${NC}"
-cryptsetup -v luksOpen $DISK"3" $CRYPT_NAME --key-file ./boot.key &&\
+cryptsetup -v luksOpen $DISK"p3" $CRYPT_NAME --key-file ./boot.key &&\
 echo -e "\n"
 
 # Create the LVM physical volume, volume group and logical volume
