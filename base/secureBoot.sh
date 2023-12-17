@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Description    : Script for setting up secure boot
+# Author         : @brulliant
+# Linked In       : https://www.linkedin.com/in/schmidbruno/
+
+
 # Ensure the script is run as root
 if [ "$(id -u)" -ne 0 ]; then
    echo "This script must be run as root"
