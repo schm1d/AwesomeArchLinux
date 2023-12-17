@@ -47,6 +47,14 @@ echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME"
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf  
 
+# Configure DNS to prevent leaks
+echo "Configuring DNS to prevent DNS leaks..."
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+echo "[Resolve]" > /etc/systemd/resolved.conf
+echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
+echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
+systemctl enable systemd-resolved.service
+
 # Hardening hosts.allow and hosts.deny
 echo "sshd : ALL : ALLOW" > /etc/hosts.allow
 echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
