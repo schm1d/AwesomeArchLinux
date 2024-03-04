@@ -17,6 +17,16 @@ HOSTNAME='<hostname_goes_here>'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
+EFI_PARTITION_UUID=$(lsblk -no UUID /dev/$DISK"p2")
+
+# Mount efi
+echo -e "${BBlue}Preparing the EFI partition...${NC}"
+mkfs.vfat -F32 $DISK"p2" &&\
+mkdir --verbose /efi &&\
+mount --verbose $DISK"p2" /efi &&\
+
+echo "UUID=$EFI_PARTITION_UUID  /efi  vfat   defaults,noatime" >> /etc/fstab
+
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -49,7 +59,6 @@ echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
 # Configure DNS to prevent leaks
 echo "Configuring DNS to prevent DNS leaks..."
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 echo "[Resolve]" > /etc/systemd/resolved.conf
 echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
 echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
