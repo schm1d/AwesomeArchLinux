@@ -141,7 +141,7 @@ echo -e "${BBlue}Setting default ACLs on home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 
 echo -e "${BBlue}Adding GRUB package...${NC}"
-pacman -S grub efibootmgr dosfstools os-prober
+pacman -S grub efibootmgr os-prober
 
 # GRUB hardening setup and encryption
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
