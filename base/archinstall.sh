@@ -118,9 +118,9 @@ mkdir --verbose -p /mnt/tmp &&\
 
 # Mount efi
 echo -e "${BBlue}Preparing the EFI partition...${NC}"
-mkfs.vfat -F32 $DISK"2" &&\
+mkfs.vfat -F32 $DISK"p2" &&\
 mkdir --verbose /mnt/efi &&\
-mount --verbose $DISK"2" /mnt/efi &&\
+mount --verbose $DISK"p2" /mnt/efi &&\
 
 # Update the keyring for the packages
 echo -e "${BBlue}Updating Arch Keyrings...${NC}" 
