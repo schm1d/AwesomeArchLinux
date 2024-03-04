@@ -140,6 +140,9 @@ chown -R $USERNAME:$USERNAME /home/$USERNAME
 echo -e "${BBlue}Setting default ACLs on home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 
+echo -e "${BBlue}Adding GRUB package...${NC}"
+pacman -s grub efibootmgr dosfstools os-prober
+
 # GRUB hardening setup and encryption
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
 sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
