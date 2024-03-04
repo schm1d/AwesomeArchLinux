@@ -169,7 +169,7 @@ else
 fi
 
 echo -e "${BBlue}Setting up GRUB...${NC}"
-grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck &&\
+grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck --verbose &&\
 grub-mkconfig -o /boot/grub/grub.cfg &&\
 chmod 600 $LUKS_KEYS
 
