@@ -181,8 +181,8 @@ else
 fi
 
 echo -e "${BBlue}Setting up GRUB...${NC}"
-grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck --verbose &&\
 grub-mkconfig -o /boot/grub/grub.cfg &&\
+grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --modules="part_gpt part_msdos btrfs fat luks lvm" --recheck /dev/$DISK &&\
 chmod 600 $LUKS_KEYS
 
 echo -e "${BBlue}Setting permission on config files...${NC}"
