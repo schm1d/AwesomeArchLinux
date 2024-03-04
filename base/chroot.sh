@@ -155,11 +155,6 @@ GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryp
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
 
-echo -e "${BBlue}Setting up GRUB...${NC}"
-grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck &&\
-grub-mkconfig -o /boot/grub/grub.cfg &&\
-chmod 600 $LUKS_KEYS
-
 echo -e "${BBlue}Installing CPU ucode...${NC}"
 # Use grep to check if the string 'Intel' is present in the CPU info
 if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
@@ -172,6 +167,11 @@ else
     # If neither 'Intel' nor 'AMD' is present, then it is an unknown CPU
     echo "This is an unknown CPU."
 fi
+
+echo -e "${BBlue}Setting up GRUB...${NC}"
+grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck &&\
+grub-mkconfig -o /boot/grub/grub.cfg &&\
+chmod 600 $LUKS_KEYS
 
 echo -e "${BBlue}Setting permission on config files...${NC}"
 
