@@ -109,18 +109,18 @@ mkfs.ext4 /dev/mapper/$LVM_NAME-home &&\
 mkswap /dev/mapper/$LVM_NAME-swap &&\
 swapon /dev/mapper/$LVM_NAME-swap &&\
 
-# Mount efi
-echo -e "${BBlue}Preparing the EFI partition...${NC}"
-mkfs.vfat -F32 $DISK"p2" &&\
-mkdir --verbose /mnt/efi &&\
-mount --verbose $DISK"p2" /mnt/efi &&\
-
 # Mount filesystem
 echo -e "${BBlue}Mounting filesystems...${NC}"
 mount --verbose /dev/mapper/$LVM_NAME-root /mnt &&\
 mkdir --verbose /mnt/home &&\
 mount --verbose /dev/mapper/$LVM_NAME-home /mnt/home &&\
 mkdir --verbose -p /mnt/tmp &&\
+
+# Mount efi
+echo -e "${BBlue}Preparing the EFI partition...${NC}"
+mkfs.vfat -F32 $DISK"p2" &&\
+mkdir --verbose /mnt/efi &&\
+mount --verbose $DISK"p2" /mnt/efi &&\
 
 # Update the keyring for the packages
 echo -e "${BBlue}Updating Arch Keyrings...${NC}" 
