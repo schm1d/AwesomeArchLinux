@@ -150,11 +150,11 @@ echo -e "${BBlue}Adding tmpfs to fstab...${NC}"
 echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0" >> /mnt/etc/fstab &&\
 
 echo -e "${BBlue}Adding proc to fstab and harndening it...${NC}" 
-echo "proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0" >> /etc/fstab &&\
-mkdir /etc/systemd/system/systemd-logind.service.d &&\
-touch /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
-echo "[Service]" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
-echo "SupplementaryGroups=proc" >> /etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+echo "proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0" >> /mnt/etc/fstab &&\
+mkdir /mnt/etc/systemd/system/systemd-logind.service.d &&\
+touch /mnt/etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+echo "[Service]" >> /mnt/etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
+echo "SupplementaryGroups=proc" >> /mnt/etc/systemd/system/systemd-logind.service.d/hidepid.conf &&\
 
 echo -e "${BBlue}Reloading fstab...${NC}"
 systemctl daemon-reload
