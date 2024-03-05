@@ -19,14 +19,6 @@ UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 EFI_PARTITION_UUID=$(lsblk -no UUID /dev/$DISK"p2")
 
-# Mount efi
-echo -e "${BBlue}Preparing the EFI partition...${NC}"
-mkfs.vfat -F32 $DISK"p2" &&\
-mkdir --verbose /efi &&\
-mount --verbose $DISK"p2" /efi &&\
-
-echo "UUID=$EFI_PARTITION_UUID  /efi  vfat   defaults,noatime" >> /etc/fstab
-
 
 pacman-key --init
 pacman-key --populate archlinux
