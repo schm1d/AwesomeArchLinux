@@ -67,6 +67,9 @@ systemctl enable NetworkManager
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
 
+echo -e "${BBlue}Enabling DHCP...${NC}"
+systemctl enable dhcpcd.service
+
 # Configure sudo
 echo -e "${BBlue}Hardening sudo...${NC}"
 # Create a group for sudo
