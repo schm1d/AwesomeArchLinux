@@ -129,7 +129,7 @@ pacman -Sy archlinux-keyring --noconfirm
 # Install Arch Linux base system. Add or remove packages as you wish.
 echo -e "${BBlue}Installing Arch Linux base system...${NC}" 
 echo -ne "\n\n\n" | pacstrap -i /mnt base base-devel archlinux-keyring linux linux-headers \
-                    linux-firmware zsh lvm2 mtools networkmanager wget curl git vim nano \
+                    linux-firmware zsh lvm2 mtools networkmanager iwd wget curl git vim nano \
                     openssh neovim unzip unrar p7zip zip unarj arj cabextract xz pbzip2 pixz \
                     lrzip cpio gdisk go rust nasm rsync dosfstools &&\
 
@@ -166,7 +166,7 @@ sed -i "s|^USERNAME=.*|USERNAME='${USERNAME}'|g" ./chroot.sh
 sed -i "s|^HOSTNAME=.*|HOSTNAME='${HOSTNAME}'|g" ./chroot.sh
 cp ./chroot.sh /mnt &&\
 chmod +x /mnt/chroot.sh &&\
-rm ./chroot.sh
+shred -u ./chroot.sh
 
 # Chroot into new system and configure it 
 echo -e "${BBlue}Chrooting into new system and configuring it...${NC}"
