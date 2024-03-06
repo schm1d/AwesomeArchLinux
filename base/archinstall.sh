@@ -129,9 +129,9 @@ pacman -Sy archlinux-keyring --noconfirm
 # Install Arch Linux base system. Add or remove packages as you wish.
 echo -e "${BBlue}Installing Arch Linux base system...${NC}" 
 echo -ne "\n\n\n" | pacstrap -i /mnt base base-devel archlinux-keyring linux linux-headers \
-                    linux-firmware zsh lvm2 mtools networkmanager iwd wget curl git vim nano \
+                    linux-firmware zsh lvm2 mtools networkmanager iwd dhcpcd wget curl git \
                     openssh neovim unzip unrar p7zip zip unarj arj cabextract xz pbzip2 pixz \
-                    lrzip cpio gdisk go rust nasm rsync dosfstools &&\
+                    lrzip cpio gdisk go rust nasm rsync  vim nano dosfstools &&\
 
 # Generate fstab file 
 echo -e "${BBlue}Generating fstab file...${NC}" 
