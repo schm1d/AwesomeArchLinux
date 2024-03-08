@@ -131,7 +131,8 @@ echo -e "${BBlue}Installing Arch Linux base system...${NC}"
 echo -ne "\n\n\n" | pacstrap -i /mnt base base-devel archlinux-keyring linux linux-headers \
                     linux-firmware zsh lvm2 mtools networkmanager iwd dhcpcd wget curl git \
                     openssh neovim unzip unrar p7zip zip unarj arj cabextract xz pbzip2 pixz \
-                    lrzip cpio gdisk go rust nasm rsync  vim nano dosfstools &&\
+                    alsa-firmware alsa-tools alsa-utils fuse3 ntfs-3g zsh-completions net-tools \
+                    lrzip cpio gdisk go rust nasm rsync vim nano dosfstools nano-syntax-highlighting
 
 # Generate fstab file 
 echo -e "${BBlue}Generating fstab file...${NC}" 
