@@ -18,7 +18,6 @@ LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 
-
 pacman-key --init
 pacman-key --populate archlinux
 
@@ -134,6 +133,8 @@ chown -R $USERNAME:$USERNAME /home/$USERNAME
 echo -e "${BBlue}Setting default ACLs on home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 
+mount -v /dev/$DISK"p2" /efi
+
 echo -e "${BBlue}Adding GRUB package...${NC}"
 pacman -S grub efibootmgr os-prober --noconfirm
 
@@ -150,12 +151,12 @@ echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
 
 # GRUBSEC Hardening explanation:
 # slab_nomerge: This disables slab merging, which significantly increases the difficulty of heap exploitation
-# init_on_alloc=1 init_on_free=1: enables zeroing of memory during allocation and free time, which can help mitigate use-after-free vulnerabilities and erase sensitive information in memory.
-# page_alloc.shuffle=1: randomises page allocator freelists, improving security by making page allocations less predictable. This also improves performance.
-# pti=on: enables Kernel Page Table Isolation, which mitigates Meltdown and prevents some KASLR bypasses.
-# randomize_kstack_offset=on:  randomises the kernel stack offset on each syscall, which makes attacks that rely on deterministic kernel stack layout significantly more difficult
-# vsyscall=none: disables vsyscalls, as they are obsolete and have been replaced with vDSO. vsyscalls are also at fixed addresses in memory, making them a potential target for ROP attacks.
-# lockdown=confidentiality: eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
+# init_on_alloc=1 Init_on_free=1: enables zeroing of memory during allocation and free time, which can help mitigate use-after-free vulnerabilities and erase sensitive information in memory.
+# page_alloc.shuffle=1: Randomises page allocator freelists, improving security by making page allocations less predictable. This also improves performance.
+# pti=on: Enables Kernel Page Table Isolation, which mitigates Meltdown and prevents some KASLR bypasses.
+# randomize_kstack_offset=on: Randomises the kernel stack offset on each syscall, which makes attacks that rely on deterministic kernel stack layout significantly more difficult
+# vsyscall=none: Disables vsyscalls, as they are obsolete and have been replaced with vDSO. vsyscalls are also at fixed addresses in memory, making them a potential target for ROP attacks.
+# lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
 GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none lockdown=confidentiality quiet loglevel=3\""
 GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
@@ -174,10 +175,36 @@ else
     echo "This is an unknown CPU."
 fi
 
+if lspci | grep -e VGA -e 3D | grep -i nvidia > /dev/null; then
+    NVIDIA_CARD=true
+    echo -e "${BBlue}Found Nvidia GPU...${NC}"
+else
+    NVIDIA_CARD=false
+fi
+
+if [[ "$NVIDIA_CARD" = true ]]; then
+    echo -e "${BBlue}Installing NVIDIA drivers...${NC}"
+    touch /etc/modprobe.d/blacklist-nouveau.conf
+    echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
+
+    pacman -Syu --needed nvidia-dkms nvidia-settings cuda # remove cuda if you don't need it
+
+    echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for Nvidia...${NC}"
+    sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_modeset)|g" /etc/mkinitcpio.conf
+    # Add legacy package if needed
+    mkinitcpio -p linux
+fi
+
+if [[ "$NVIDIA_CARD" = true ]]; then
+    echo -e "${BBlue}Adjusting /etc/default/grub for Nvidia...${NC}"
+    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="${GRUBSEC}|"/& nvidia_drm.modeset=1/' /etc/default/grub
+
+fi
+
 echo -e "${BBlue}Setting up GRUB...${NC}"
 mkdir /boot/grub
 grub-mkconfig -o /boot/grub/grub.cfg &&\
-grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --modules="part_gpt part_msdos btrfs fat luks lvm" --recheck &&\
+grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck &&\
 chmod 600 $LUKS_KEYS
 
 echo -e "${BBlue}Setting permission on config files...${NC}"
