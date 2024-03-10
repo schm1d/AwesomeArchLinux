@@ -190,7 +190,7 @@ if [[ "$NVIDIA_CARD" = true ]]; then
     touch /etc/modprobe.d/blacklist-nouveau.conf
     echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
 
-    pacman -Syu --needed nvidia-dkms nvidia-settings cuda # remove cuda if you don't need it
+    pacman -Syu --needed nvidia-dkms nvidia-settings cuda --noconfirm # remove cuda if you don't need it
 
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for Nvidia...${NC}"
     sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_modeset)|g" /etc/mkinitcpio.conf
