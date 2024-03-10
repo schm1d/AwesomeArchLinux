@@ -63,6 +63,9 @@ echo "ALL: ALL" > /etc/hosts.deny
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager
 
+echo -e "${BBlue}Enabling NetworkManager...${NC}"
+systemctl enable iwd
+
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
 
