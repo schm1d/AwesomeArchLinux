@@ -61,12 +61,13 @@ echo "kernel.unprivileged_bpf_disabled=1" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.panic = 10" >> /etc/sysctl.d/99-sysctl.conf # Wait given seconds before rebooting after a kernel panic. 0 means no reboot.
 echo "kernel.panic_on_oops = 1" >> /etc/sysctl.d/99-sysctl.conf # Specifies that a system must panic if a kernel oops occurs.
 
+echo "kernel.modules_disabled = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.randomize_va_space = 2" >> /etc/sysctl.d/99-sysctl.conf
 # echo "kernel.exec-shield = 1" >> /etc/sysctl.d/99-sysctl.conf #  Provide protection against buffer overflow attacks.
 echo "kernel.kptr_restrict = 2" >> /etc/sysctl.d/99-sysctl.conf # This setting aims to mitigate kernel pointer leaks.
 echo "kernel.yama.ptrace_scope = 2" >> /etc/sysctl.d/99-sysctl.conf #  This restricts usage of ptrace to only processes with the CAP_SYS_PTRACE capability. Alternatively, set the sysctl to 3 to disable ptrace entirely.
 echo "kernel.dmesg_restrict = 1" >> /etc/sysctl.d/99-sysctl.conf #  Restricts the kernel log to the CAP_SYSLOG capability.
-echo "kernel.perf_event_paranoid = 2" >> /etc/sysctl.d/99-sysctl.conf # Disallow all usage of performance events to the CAP_PERFMON 
+echo "kernel.perf_event_paranoid = 3" >> /etc/sysctl.d/99-sysctl.conf # Disallow all usage of performance events to the CAP_PERFMON 
 echo "kernel.core_uses_pid = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.shmall = 268435456"  >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.shmmax = 1073741824"  >> /etc/sysctl.d/99-sysctl.conf
