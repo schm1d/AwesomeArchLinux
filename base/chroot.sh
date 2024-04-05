@@ -109,6 +109,14 @@ sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /et
 echo -e "${BBlue}Setting HMAC Crypto Algorithm to SHA512...${NC}"
 sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
 
+echo -e "${BBlue}Setting password expiring dates...${NC}"
+sed -i '/^PASS_MAX_DAYS/c\PASS_MAX_DAYS 730' /etc/login.defs # modify here the amount of MAX days
+sed -i '/^PASS_MIN_DAYS/c\PASS_MIN_DAYS 2' /etc/login.defs
+
+# Logging Failed Login Attempts
+echo -e "${BBlue}Configuring PAM to Log Failed Attempts...${NC}"
+echo "auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900" >> /etc/pam.d/common-auth
+
 # Disable unwanted protocols
 echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
