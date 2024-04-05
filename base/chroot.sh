@@ -117,6 +117,11 @@ sed -i '/^PASS_MIN_DAYS/c\PASS_MIN_DAYS 2' /etc/login.defs
 echo -e "${BBlue}Configuring PAM to Log Failed Attempts...${NC}"
 echo "auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900" >> /etc/pam.d/common-auth
 
+# More umasking
+echo -e "${BBlue}Setting additional UMASK 027s...${NC}"
+echo "umask 027" | sudo tee -a /etc/profile
+echo "umask 027" | sudo tee -a /etc/bash.bashrc
+
 # Disable unwanted protocols
 echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
