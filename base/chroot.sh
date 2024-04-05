@@ -79,6 +79,7 @@ pacman -S usbguard
 sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
 systemctl enable usbguard.service
 
+# Hardening /etc/login.defs
 echo -e "${BBlue}Changing the value of UMASK from 022 to 027...${NC}"
 sed -i 's/^UMASK[[:space:]]\+022/UMASK\t\t027/' /etc/login.defs
 
@@ -105,6 +106,34 @@ sudo sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/
 
 echo -e "${BBlue}Setting HMAC Crypto Algorithm to SHA512...${NC}"
 sudo sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
+
+# Monitoring critical files
+echo -e "${BBlue}Installing Aide to Monitor Changes to Critical and Sensitive Files...${NC}"
+pacman -Sy aide
+aide --init
+mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+
+# Using NTP for better reliability
+echo -e "${BBlue}Using NTP Daemon or NTP Client to Prevent Time Issues...${NC}"
+pacman -Sy chrony
+pacman -Sy ntp
+systemctl enable --now chronyd
+systemctl enable --now ntpd
+
+# Process monitoring tool
+echo -e "${BBlue}Enabling Process Accounting...${NC}"
+pacman -Sy acct
+systemctl enable --now psacct
+
+# Sysstem monitoring tool
+echo -e "${BBlue}Enabling sysstat to Collect Accounting...${NC}"
+pacman -Sy sysstat
+systemctl enable --now sysstat
+
+# System auditing tool
+echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
+pacman -Sy audit
+systemctl enable --now auditd
 
 # Enable and configure necessary services
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
@@ -153,7 +182,7 @@ echo "Defaults always_query_group_plugin" >> /etc/sudoers
 echo "Defaults passwd_timeout=10" >> /etc/sudoers # 10 minutes before sudo times out
 echo "Defaults passwd_tries=3" >> /etc/sudoers # Nr of attempts to enter password
 echo "Defaults loglinelen=0" >> /etc/sudoers
-echo "Defaults insults" >> /etc/sudoers # Insults user when wrong password is entered
+echo "Defaults insults" >> /etc/sudoers # Insults user when wrong password is entered :)
 echo "Defaults lecture=once" >> /etc/sudoers
 echo "Defaults requiretty" >> /etc/sudoers # Forces to use real tty and not cron or cgi-bin
 echo "Defaults logfile=/var/log/sudo.log" >> /etc/sudoers
@@ -213,6 +242,7 @@ GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryp
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
 
+# Checking for CPU model
 echo -e "${BBlue}Installing CPU ucode...${NC}"
 # Use grep to check if the string 'Intel' is present in the CPU info
 if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
@@ -226,6 +256,7 @@ else
     echo "This is an unknown CPU."
 fi
 
+# Checking for NVIDIA GPUs
 if lspci | grep -e VGA -e 3D | grep -i nvidia > /dev/null; then
     NVIDIA_CARD=true
     echo -e "${BBlue}Found Nvidia GPU...${NC}"
