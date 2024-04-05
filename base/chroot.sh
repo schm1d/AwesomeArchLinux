@@ -67,6 +67,7 @@ echo -e "${BBlue}Installing and configuring haveged...${NC}"
 pacman -S haveged
 systemctl enable haveged.service
 
+# ClamAV anti-virus
 echo -e "${BBlue}Installing and configuring clamav...${NC}"
 pacman -S clamav
 
@@ -106,6 +107,9 @@ sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /et
 
 echo -e "${BBlue}Setting HMAC Crypto Algorithm to SHA512...${NC}"
 sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
+
+# Disabling core dump. Comment if you need it.
+echo "* hard core 0" >> /etc/security/limits.conf
 
 # Monitoring critical files
 echo -e "${BBlue}Installing Aide to Monitor Changes to Critical and Sensitive Files...${NC}"
