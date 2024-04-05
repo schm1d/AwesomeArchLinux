@@ -108,6 +108,12 @@ sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /et
 echo -e "${BBlue}Setting HMAC Crypto Algorithm to SHA512...${NC}"
 sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
 
+# Disable unwanted protocols
+echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
+echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
+echo "install rds /bin/true" >> /etc/modprobe.d/disable-protocols.conf
+echo "install tipc /bin/true" >> /etc/modprobe.d/disable-protocols.conf
+
 # Disabling core dump. Comment if you need it.
 echo "* hard core 0" >> /etc/security/limits.conf
 
