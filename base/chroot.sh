@@ -302,6 +302,8 @@ chmod 600 $LUKS_KEYS
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
 
 cat > /etc/issue.net << EOF
+Arch Linux \r (\l)
+
                      .ed"""" """\$\$\$\$be.
                    -"           ^""**\$\$\$e.
                  ."                   '\$\$\$c
