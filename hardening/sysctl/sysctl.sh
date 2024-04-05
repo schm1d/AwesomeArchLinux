@@ -74,7 +74,7 @@ echo "kernel.shmmax = 1073741824"  >> /etc/sysctl.d/99-sysctl.conf
 
 
 # Network related settings
-
+echo "net.core.bpf_jit_harden = 2" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.dev_weight = 64" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.neigh.default.gc_thresh1 = 32" >> /etc/sysctl.d/99-sysctl.conf
