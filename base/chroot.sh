@@ -52,6 +52,7 @@ echo "Configuring DNS to prevent DNS leaks..."
 echo "[Resolve]" > /etc/systemd/resolved.conf
 echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
 echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
+echo "DNSSEC=yes" >> /etc/systemd/resolved.conf # Change to DNSSEC=allow-downgrade if needed
 systemctl enable systemd-resolved.service
 
 # Hardening hosts.allow and hosts.deny
