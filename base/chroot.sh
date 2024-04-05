@@ -87,25 +87,25 @@ echo -e "${BBlue}Configuring Password Hashing Rounds...${NC}"
 sed -i '/#SHA_CRYPT_MIN_ROUNDS 5000/s/^#//;/#SHA_CRYPT_MAX_ROUNDS 5000/s/^#//' /etc/login.defs
 
 echo -e "${BBlue}Increasing Fail Delay to 5 Seconds...${NC}"
-sudo sed -i 's/^FAIL_DELAY[[:space:]]\+3/FAIL_DELAY\t\t5/' /etc/login.defs
+sed -i 's/^FAIL_DELAY[[:space:]]\+3/FAIL_DELAY\t\t5/' /etc/login.defs
 
 echo -e "${BBlue}Lowering Login Retries to 3...${NC}"
-sudo sed -i 's/^LOGIN_RETRIES[[:space:]]\+5/LOGIN_RETRIES\t\t3/' /etc/login.defs
+sed -i 's/^LOGIN_RETRIES[[:space:]]\+5/LOGIN_RETRIES\t\t3/' /etc/login.defs
 
 echo -e "${BBlue}Reducing Login Timeout to 30 Seconds...${NC}"
-sudo sed -i 's/^LOGIN_TIMEOUT[[:space:]]\+60/LOGIN_TIMEOUT\t\t30/' /etc/login.defs
+sed -i 's/^LOGIN_TIMEOUT[[:space:]]\+60/LOGIN_TIMEOUT\t\t30/' /etc/login.defs
 
 echo -e "${BBlue}Ensuring the Strongest Encryption Method is Used...${NC}"
-sudo sed -i 's/^ENCRYPT_METHOD[[:space:]]\+.*$/ENCRYPT_METHOD YESCRYPT/' /etc/login.defs
+sed -i 's/^ENCRYPT_METHOD[[:space:]]\+.*$/ENCRYPT_METHOD YESCRYPT/' /etc/login.defs
 
 echo -e "${BBlue}Increasing YESCRYPT Cost Factor...${NC}"
-sudo sed -i 's/^#YESCRYPT_COST_FACTOR[[:space:]]\+.*$/YESCRYPT_COST_FACTOR 7/' /etc/login.defs
+sed -i 's/^#YESCRYPT_COST_FACTOR[[:space:]]\+.*$/YESCRYPT_COST_FACTOR 7/' /etc/login.defs
 
 echo -e "${BBlue}Setting Maximum Members Per Group...${NC}"
-sudo sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /etc/login.defs
+sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /etc/login.defs
 
 echo -e "${BBlue}Setting HMAC Crypto Algorithm to SHA512...${NC}"
-sudo sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
+sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
 
 # Monitoring critical files
 echo -e "${BBlue}Installing Aide to Monitor Changes to Critical and Sensitive Files...${NC}"
