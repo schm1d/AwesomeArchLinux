@@ -18,6 +18,11 @@ LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 
+# Define the URL of the auditd rules to download
+RULES_URL="https://raw.githubusercontent.com/bfuzzy1/auditd-attack/master/auditd-attack/auditd-attack.rules"
+# Specify the path to the local auditd rules file
+LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
+
 pacman-key --init
 pacman-key --populate archlinux
 
@@ -157,6 +162,42 @@ systemctl enable --now sysstat
 # System auditing tool
 echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
 pacman -Sy audit
+
+# Ensure the script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "This script must be run as root" >&2
+  exit 1
+fi
+
+# Check if wget is installed
+if ! command -v wget &> /dev/null; then
+    echo "wget could not be found, please install wget and try again."
+    exit 1
+fi
+
+# Download the auditd rules
+echo "Downloading auditd rules from $RULES_URL..."
+wget -O "$LOCAL_RULES_FILE" "$RULES_URL"
+
+# Verify download success
+if [ $? -ne 0 ]; then
+    echo "Failed to download auditd rules."
+    exit 1
+else
+    echo "Auditd rules downloaded successfully."
+fi
+
+# Restart auditd to apply the new rules
+echo "Restarting auditd to apply the new rules..."
+systemctl restart auditd
+
+if [ $? -ne 0 ]; then
+    echo "Failed to restart auditd. Check the service status for details."
+    exit 1
+else
+    echo "Auditd restarted successfully. New rules are now active."
+fi
+
 systemctl enable --now auditd
 
 # Enable and configure necessary services
