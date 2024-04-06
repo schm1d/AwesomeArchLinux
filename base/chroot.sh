@@ -88,6 +88,9 @@ iptables -A INPUT -p tcp --dpt $SSH_PORT -m conntrack --ctstate NEW -j DROP
 # Drop invalid packets
 iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
+# Save rules for persistency
+iptables-save > /etc/iptables/rules.v4
+
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S rng-tools
