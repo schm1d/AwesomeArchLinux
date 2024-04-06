@@ -77,6 +77,12 @@ systemctl enable haveged.service
 echo -e "${BBlue}Installing and configuring clamav...${NC}"
 pacman -S clamav
 
+# Rootkit Hunter
+echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
+pacman -S rkhunter
+rkhunter --update
+rkhunter --propupd
+
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
 pacman -s arpwatch
 
