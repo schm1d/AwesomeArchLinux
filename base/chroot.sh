@@ -22,6 +22,7 @@ CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
 RULES_URL="https://raw.githubusercontent.com/bfuzzy1/auditd-attack/master/auditd-attack/auditd-attack.rules"
 # Specify the path to the local auditd rules file
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
+SSH_PORT=22 # Change to the  desired port.
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -64,6 +65,29 @@ systemctl enable systemd-resolved.service
 echo "sshd : ALL : ALLOW" > /etc/hosts.allow
 echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
 echo "ALL: ALL" > /etc/hosts.deny
+
+echo -e "${BBlue}Configuring IPtables...${NC}"
+# Set default policies
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# Allow loopback interface traffic (localhost communication)
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Allow established and related incoming connections
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow SSH on custom port (39458) with rate limiting
+iptables -A INPUT -p tcp --dpt $SSH_PORT -m conntrack --ctstate NEW -m limit --limit 2/min --limit-burst 5 -j ACCEPT
+
+# Drop any other new connections to the custom SSH port beyond the rate limit
+iptables -A INPUT -p tcp --dpt $SSH_PORT -m conntrack --ctstate NEW -j DROP
+
+# Drop invalid packets
+iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S rng-tools
@@ -133,6 +157,7 @@ echo -e "${BBlue}Setting additional UMASK 027s...${NC}"
 echo "umask 027" | sudo tee -a /etc/profile
 echo "umask 027" | sudo tee -a /etc/bash.bashrc
 
+echo -e "${BBlue}Disabling unwanted protocols...${NC}"
 # Disable unwanted protocols
 echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
