@@ -7,7 +7,7 @@
 
 BBlue='\033[1;34m'
 NC='\033[0m'
-SSH_PORT='<custom_port>'
+SSH_PORT=22
 ALLOWED_USERS=$USER
 REVOKED_KEYS_FILE='/etc/ssh/revokedKeys'
 
@@ -21,10 +21,10 @@ echo -e "${BBlue}Cleaning old keys...${NC}"
 cd /etc/ssh
 shred -u ssh_host_*key*
 
-echo -e "${BBlue}Creating ed25519, ras, ecdsa and dsa keys...${NC}"
-ssh-keygen -t ed25519 -b 4096 -f ssh_host_ed25519_key -N "" < /dev/null
-ssh-keygen -t rsa -b 4096 -f ssh_host_rsa_key -N "" < /dev/null
-# ssh-keygen -t ecdsa -b 4096 -f ssh_host_ecdsa_key -N "" < /dev/null
+echo -e "${BBlue}Creating ed25519, RSA, and ecdsa keys...${NC}"
+ssh-keygen -t ed25519 -b 4096 -f ssh_host_ed25519_key -N "$USER" < /dev/null
+ssh-keygen -t rsa -b 4096 -f ssh_host_rsa_key -N "$USER" < /dev/null
+#ssh-keygen -t ecdsa -b 4096 -f ssh_host_ecdsa_key -N "$USER" < /dev/null
 
 echo -e "${BBlue}Hardening \"/etc/ssh/sshd_config\"...${NC}"
 
