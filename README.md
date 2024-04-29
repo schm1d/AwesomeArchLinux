@@ -6,7 +6,7 @@ The idea is to make this repo a reliable and curated reference to Arch Linux har
 
 The encryption method used in the installation script is [LVM on LUKS with encrypted boot partition](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system#Encrypted_boot_partition_(GRUB))(Full disk encryption (GRUB) for UEFI systems).
 
-The script will prepare everything for you. No need to care about partitioning nor encrypting process. It will also configure GRUB to use the encryption keys. All you have to do, is to change the variable values according to your system, give a password to encrypt the disk, the username and hostname. :)
+The script will prepare everything for you. No need to care about partitioning nor encrypting process. It will also configure GRUB to use the encryption keys. All you have to do, is to change the variable values according to your system, give a password to encrypt the disk, the username and hostname. If you are using Nvidia GPUs the script will install that as well. :)
 
 You will get a very clean, solid and secure base installation.
 
