@@ -8,6 +8,12 @@
 BBlue='\033[1;34m'
 NC='\033[0m'
 
+# Ensure the script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "This script must be run as root" >&2
+  exit 1
+fi
+
 # The below values will be changed by ArchInstall.sh
 DISK='<your_target_disk>'
 CRYPT_NAME='crypt_lvm'
@@ -17,12 +23,13 @@ HOSTNAME='<hostname_goes_here>'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
+kernel=$(uname -r)
 
 # Define the URL of the auditd rules to download
 RULES_URL="https://raw.githubusercontent.com/bfuzzy1/auditd-attack/master/auditd-attack/auditd-attack.rules"
 # Specify the path to the local auditd rules file
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
-SSH_PORT=22 # Change to the  desired port.
+SSH_PORT=22 # Change to the desired port.
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -30,14 +37,14 @@ pacman-key --populate archlinux
 # Set the timezone
 echo -e "${BBlue}Setting the timezone...${NC}"
 ln -sf /usr/share/zoneinfo/Europe/Zurich /etc/localtime &&
-  hwclock --systohc --utc
+hwclock --systohc --utc
 
 # Set up locale
 echo -e "${BBlue}Setting up locale...${NC}"
 sed -i '/#en_US.UTF-8/s/^#//g' /etc/locale.gen &&
-  locale-gen &&
-  echo 'LANG=en_US.UTF-8' > /etc/locale.conf &&
-  export LANG=en_US.UTF-8
+locale-gen &&
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf &&
+export LANG=en_US.UTF-8
 
 echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
 echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
@@ -196,12 +203,6 @@ systemctl enable --now sysstat
 # System auditing tool
 echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
 pacman -Sy audit
-
-# Ensure the script is run as root
-if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root" >&2
-  exit 1
-fi
 
 # Check if wget is installed
 if ! command -v wget &> /dev/null; then
@@ -368,7 +369,40 @@ if [[ "$NVIDIA_CARD" = true ]]; then
     touch /etc/modprobe.d/blacklist-nouveau.conf
     echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
 
-    pacman -Syu --needed nvidia-dkms nvidia-settings cuda --noconfirm # remove cuda if you don't need it
+    # Detect NVIDIA GPU model
+gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
+
+echo "Detected GPU: $gpu_model"
+echo "Running Kernel: $kernel"
+
+# Function to install packages
+install_packages() {
+    echo "Installing packages: $*"
+    sudo pacman -S --noconfirm $*
+}
+
+# Determine the driver based on the GPU model and kernel
+case $gpu_model in
+    *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
+        install_packages nvidia-340xx-dkms nvidia-340xx-utils lib32-nvidia-340xx-utils
+        ;;
+    *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
+        install_packages nvidia-390xx-dkms nvidia-390xx-utils lib32-nvidia-390xx-utils
+        ;;
+    *"Kepler"*|"*NVE0"*)
+        install_packages nvidia-470xx-dkms nvidia-470xx-utils lib32-nvidia-470xx-utils
+        ;;
+    *"Maxwell"*|"*NV110"*|*"newer"*)
+        if [[ $kernel == *"linux-lts"* || $kernel == *"linux"* ]]; then
+            install_packages nvidia nvidia-utils lib32-nvidia-utils
+        else
+            install_packages nvidia-dkms nvidia-utils lib32-nvidia-utils
+        fi
+        ;;
+    *)
+        echo "No supported NVIDIA GPU detected."
+        ;;
+esac
 
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for Nvidia...${NC}"
     sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_modeset)|g" /etc/mkinitcpio.conf
