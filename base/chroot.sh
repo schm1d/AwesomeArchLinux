@@ -4,6 +4,8 @@
 # Author         : @brulliant
 # Linkedin       : https://www.linkedin.com/in/schmidbruno/
 
+set -euo pipefail
+
 # Set up the variables
 BBlue='\033[1;34m'
 NC='\033[0m'
