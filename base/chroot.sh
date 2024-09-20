@@ -104,7 +104,11 @@ iptables-save > /etc/iptables/rules.v4
 
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
-pacman -S rng-tools
+pacman -S --noconfirm rng-tools
+if ! pacman -S --noconfirm rng-tools; then
+  echo "Failed to install rng-tools" >&2
+  exit 1
+fi
 systemctl enable rngd
 
 echo -e "${BBlue}Installing and configuring haveged...${NC}"
@@ -122,7 +126,7 @@ rkhunter --update
 rkhunter --propupd
 
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
-pacman -s arpwatch
+pacman -S --noconfirm arpwatch
 
 echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S usbguard
@@ -351,10 +355,10 @@ echo -e "${BBlue}Installing CPU ucode...${NC}"
 # Use grep to check if the string 'Intel' is present in the CPU info
 if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
     pacman -S intel-ucode --noconfirm
-elif
-    # If the string 'Intel' is not present, check if the string 'AMD' is present
-    [[ $CPU_VENDOR_ID =~ "AuthenticAMD" ]]; then
-    pacman -S amd-ucode --noconfirm
+    
+     # If the string 'Intel' is not present, check if the string 'AMD' is present
+elif [[ $CPU_VENDOR_ID =~ "AuthenticAMD" ]]; then
+      pacman -S amd-ucode --noconfirm
 else
     # If neither 'Intel' nor 'AMD' is present, then it is an unknown CPU
     echo "This is an unknown CPU."
