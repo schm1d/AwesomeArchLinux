@@ -23,6 +23,7 @@ LVM_NAME='lvm_arch'
 USERNAME='<user_name_goes_here>'
 HOSTNAME='<hostname_goes_here>'
 TIMEZONE='Europe/Zurich'
+LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
@@ -43,11 +44,11 @@ ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc --utc
 
 # Set up locale
-echo -e "${BBlue}Setting up locale...${NC}"
-sed -i '/#en_US.UTF-8/s/^#//g' /etc/locale.gen &&
-locale-gen &&
-echo 'LANG=en_US.UTF-8' > /etc/locale.conf &&
-export LANG=en_US.UTF-8
+echo -e "${BBlue}Setting up locale to $LOCALE...${NC}"
+sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+export LANG="$LOCALE"
 
 echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
 echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
