@@ -4,23 +4,33 @@
 #Author         : @brulliant
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/
 
+set -euo pipefail
+
 # Set up the color variables
 BBlue='\033[1;34m'
 NC='\033[0m'
 
 # Check if user is root
 if [ "$(id -u)" != "0" ]; then
-   echo "This script must be run as root." 1>&2
+   echo "This script must be run as root." >&2
    exit 1
 fi
 
-# Take action if UEFI is supported.
+# Check if UEFI is supported
 if [ ! -d "/sys/firmware/efi/efivars" ]; then
   echo -e "${BBlue}UEFI is not supported.${NC}"
   exit 1
 else
-   echo -e "${BBlue}\n UEFI is supported, proceeding...\n${NC}"
+  echo -e "${BBlue}\nUEFI is supported, proceeding...\n${NC}"
 fi
+
+# Function to validate numeric input
+validate_numeric_input() {
+  if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+    echo "Invalid input: $1. Please enter a positive number." >&2
+    exit 1
+  fi
+}
 
 # Get user input for the settings
 echo -e "${BBlue}The following disks are available on your system:\n${NC}"
