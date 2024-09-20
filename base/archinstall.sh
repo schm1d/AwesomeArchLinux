@@ -87,7 +87,7 @@ echo -e "${BBlue}Creating the LUKS container...${NC}"
 #read -ps 'Enter a password for the LUKS container: ' LUKS_PASS
 
 # Encrypts with the best key size.
-cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 3000 --use-random  luksFormat --type luks1 $DISK"p3" &&\
+cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 --iter-time 3000 --use-random --type luks1 luksFormat $DISK"p3"
 
 # Opening LUKS container to test
 echo -e "${BBlue}Opening the LUKS container to test password...${NC}"
