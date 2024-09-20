@@ -34,33 +34,37 @@ validate_numeric_input() {
 
 # Get user input for the settings
 echo -e "${BBlue}The following disks are available on your system:\n${NC}"
-lsblk -d | grep -v 'rom' | grep -v 'loop'
+lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
 echo -e "\n"
 
-read -p 'Select the target disk: ' TARGET_DISK
+read -p 'Select the target disk (e.g., sda): ' TARGET_DISK
+DISK="/dev/$TARGET_DISK"
+if [ ! -b "$DISK" ]; then
+  echo "Disk $DISK does not exist." >&2
+  exit 1
+fi
+
 echo -e "\n"
 
 echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
 
-read -p 'Enter the new user: ' NEW_USER
-read -p 'Enter the new hostname: ' NEW_HOST
+read -p 'Enter the new username: ' USERNAME
+read -p 'Enter the new hostname: ' HOSTNAME
 echo -e "\n"
 
 echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
 
 read -p 'Enter the size of SWAP in GB: ' SIZE_OF_SWAP
+validate_numeric_input "$SIZE_OF_SWAP"
 read -p 'Enter the size of / in GB, the remaining space will be allocated to /home: ' SIZE_OF_ROOT
+validate_numeric_input "$SIZE_OF_ROOT"
 echo -e "\n"
 
-# Use the correct variable name for the target disk
-DISK="/dev/$TARGET_DISK"
-USERNAME="$NEW_USER"
-HOSTNAME="$NEW_HOST"
-SWAP_SIZE="${SIZE_OF_SWAP}G" # Modern systems don't really need swap.
+SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
-CRYPT_NAME='crypt_lvm' # the name of the LUKS container.
-LVM_NAME='lvm_arch' # the name of the logical volume.
-LUKS_KEYS='/etc/luksKeys' # Where you will store the root partition key
+CRYPT_NAME='crypt_lvm'
+LVM_NAME='lvm_arch'
+LUKS_KEYS='/etc/luksKeys'
 
 
 # Setting time correctly before installation
@@ -129,9 +133,9 @@ mkdir --verbose -p /mnt/tmp &&\
 # Mount efi
 echo -e "${BBlue}Preparing the EFI partition...${NC}"
 mkfs.vfat -F32 $DISK"p2"
-sleep 2
+
 mkdir --verbose /mnt/efi
-sleep 1
+
 mount --verbose $DISK"p2" /mnt/efi
 
 # Update the keyring for the packages
