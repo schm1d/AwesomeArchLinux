@@ -22,6 +22,7 @@ CRYPT_NAME='crypt_lvm'
 LVM_NAME='lvm_arch'
 USERNAME='<user_name_goes_here>'
 HOSTNAME='<hostname_goes_here>'
+TIMEZONE='Europe/Zurich'
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
 CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
@@ -37,8 +38,8 @@ pacman-key --init
 pacman-key --populate archlinux
 
 # Set the timezone
-echo -e "${BBlue}Setting the timezone...${NC}"
-ln -sf /usr/share/zoneinfo/Europe/Zurich /etc/localtime &&
+echo -e "${BBlue}Setting the timezone to $TIMEZONE...${NC}"
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc --utc
 
 # Set up locale
