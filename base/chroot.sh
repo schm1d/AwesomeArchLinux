@@ -323,6 +323,62 @@ echo -e "${BBlue}Setting permissions for /etc/sudoers${NC}"
 chmod 440 /etc/sudoers 
 chown root:root /etc/sudoers
 
+# Harden Compilers by Restricting Access to Root User Only
+echo -e "${BBlue}Restricting access to compilers...${NC}"
+for compiler in gcc g++ clang make as ld; do
+    if command -v $compiler &> /dev/null; then
+        chmod 700 $(which $compiler)
+    fi
+done
+
+# Alternative approach using a 'compilers' group
+# groupadd compilers
+# usermod -aG compilers $USERNAME
+# for compiler in gcc g++ clang make as ld; do
+#     if command -v $compiler &> /dev/null; then
+#         chown root:compilers $(which $compiler)
+#         chmod 750 $(which $compiler)
+#     fi
+# done
+
+# Install arch-audit to Determine Vulnerable Packages
+echo -e "${BBlue}Installing arch-audit for vulnerability scanning...${NC}"
+pacman -S --noconfirm arch-audit
+
+# Create a script to run arch-audit and log results
+cat <<EOF > /usr/local/bin/arch-audit-check
+#!/bin/bash
+arch-audit | tee /var/log/arch-audit.log
+EOF
+chmod +x /usr/local/bin/arch-audit-check
+
+# Create a systemd service for arch-audit
+cat <<EOF > /etc/systemd/system/arch-audit.service
+[Unit]
+Description=Arch Audit Service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arch-audit-check
+EOF
+
+# Create a systemd timer to run daily
+cat <<EOF > /etc/systemd/system/arch-audit.timer
+[Unit]
+Description=Run arch-audit daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Enable and start the timer
+systemctl enable arch-audit.timer
+systemctl start arch-audit.timer
+
 # Add the user
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
