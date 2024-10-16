@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Description    : This is the chroot which should be executed via 'archinstall.sh'
-# Author         : @brulliant
-# Linkedin       : https://www.linkedin.com/in/schmidbruno/
+# Description: This is the chroot which should be executed via 'archinstall.sh'
+# Author: Bruno Schmid @brulliant
+# LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# The below values will be changed by ArchInstall.sh
+# The below values will be changed by archinstall.sh
 DISK='<your_target_disk>'
 CRYPT_NAME='crypt_lvm'
 LVM_NAME='lvm_arch'
@@ -25,15 +25,29 @@ HOSTNAME='<hostname_goes_here>'
 TIMEZONE='Europe/Zurich'
 LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
-UUID=$(cryptsetup luksDump "$DISK""p3" | grep UUID | awk '{print $2}')
-CPU_VENDOR_ID=$(lscpu | grep Vendor | awk '{print $3}')
-kernel=$(uname -r)
 
 # Define the URL of the auditd rules to download
 RULES_URL="https://raw.githubusercontent.com/bfuzzy1/auditd-attack/master/auditd-attack/auditd-attack.rules"
 # Specify the path to the local auditd rules file
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
-SSH_PORT=22 # Change to the desired port.
+SSH_PORT=22 # Change to the desired SSH port.
+
+# Determine the partition suffix (p for NVMe devices)
+if [[ "$DISK" =~ [0-9]$ ]]; then
+    PART_SUFFIX="p"
+else
+    PART_SUFFIX=""
+fi
+
+PARTITION1="${DISK}${PART_SUFFIX}1"
+PARTITION2="${DISK}${PART_SUFFIX}2"
+PARTITION3="${DISK}${PART_SUFFIX}3"
+
+# Retrieve the UUID of the LUKS partition
+UUID=$(cryptsetup luksUUID "$PARTITION3")
+
+CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
+kernel=$(uname -r)
 
 pacman-key --init
 pacman-key --populate archlinux
@@ -57,7 +71,7 @@ echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
-echo "$HOSTNAME" > /etc/hostname &&
+echo "$HOSTNAME" > /etc/hostname
 echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
 
 # Create a new resolv.conf file with the following settings:
@@ -90,11 +104,11 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # Allow established and related incoming connections
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Allow SSH on custom port (39458) with rate limiting
-iptables -A INPUT -p tcp --dpt $SSH_PORT -m conntrack --ctstate NEW -m limit --limit 2/min --limit-burst 5 -j ACCEPT
+# Allow SSH on custom port ($SSH_PORT) with rate limiting
+iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -m limit --limit 2/min --limit-burst 5 -j ACCEPT
 
 # Drop any other new connections to the custom SSH port beyond the rate limit
-iptables -A INPUT -p tcp --dpt $SSH_PORT -m conntrack --ctstate NEW -j DROP
+iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
 
 # Drop invalid packets
 iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
@@ -102,6 +116,9 @@ iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 # Save rules for persistency
 iptables-save > /etc/iptables/rules.v4
 
+echo -e "${BBlue}Installing and configuring logrotate...${NC}"
+pacman -S --noconfirm logrotate
+systemctl enable logrotate.timer
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
@@ -112,24 +129,22 @@ fi
 systemctl enable rngd
 
 echo -e "${BBlue}Installing and configuring haveged...${NC}"
-pacman -S haveged
+pacman -S --noconfirm haveged
 systemctl enable haveged.service
 
 # ClamAV anti-virus
 echo -e "${BBlue}Installing and configuring clamav...${NC}"
-pacman -S clamav
+pacman -S --noconfirm clamav
 
 # Rootkit Hunter
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
-pacman -S rkhunter
-rkhunter --update
-rkhunter --propupd
+pacman -S --noconfirm rkhunter
 
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
 pacman -S --noconfirm arpwatch
 
 echo -e "${BBlue}Configuring usbguard...${NC}"
-pacman -S usbguard
+pacman -S --noconfirm usbguard
 
 sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
 systemctl enable usbguard.service
@@ -175,42 +190,33 @@ echo -e "${BBlue}Setting additional UMASK 027s...${NC}"
 echo "umask 027" | sudo tee -a /etc/profile
 echo "umask 027" | sudo tee -a /etc/bash.bashrc
 
-echo -e "${BBlue}Disabling unwanted protocols...${NC}"
 # Disable unwanted protocols
+echo -e "${BBlue}Disabling unwanted protocols...${NC}"
 echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install rds /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install tipc /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 
 # Disabling core dump. Comment if you need it.
+echo -e "${BBlue}Disabling core dump...${NC}"
 echo "* hard core 0" >> /etc/security/limits.conf
 
-# Monitoring critical files
-echo -e "${BBlue}Installing Aide to Monitor Changes to Critical and Sensitive Files...${NC}"
-pacman -Sy aide
-aide --init
-mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
 
 # Using NTP for better reliability
 echo -e "${BBlue}Using NTP Daemon or NTP Client to Prevent Time Issues...${NC}"
-pacman -Sy chrony
-pacman -Sy ntp
-systemctl enable --now chronyd
-systemctl enable --now ntpd
-
-# Process monitoring tool
-echo -e "${BBlue}Enabling Process Accounting...${NC}"
-pacman -Sy acct
-systemctl enable --now psacct
+pacman -S --noconfirm chrony
+pacman -S --noconfirm ntp
+systemctl enable chronyd
+systemctl enable ntpd
 
 # Sysstem monitoring tool
 echo -e "${BBlue}Enabling sysstat to Collect Accounting...${NC}"
-pacman -Sy sysstat
-systemctl enable --now sysstat
+pacman -S --noconfirm sysstat
+systemctl enable sysstat
 
 # System auditing tool
 echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
-pacman -Sy audit
+pacman -S --noconfirm audit
 
 # Check if wget is installed
 if ! command -v wget &> /dev/null; then
@@ -241,7 +247,7 @@ else
     echo "Auditd restarted successfully. New rules are now active."
 fi
 
-systemctl enable --now auditd
+systemctl enable auditd
 
 # Enable and configure necessary services
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
@@ -255,6 +261,20 @@ systemctl enable sshd
 
 echo -e "${BBlue}Enabling DHCP...${NC}"
 systemctl enable dhcpcd.service
+
+# Installing Fail2ban
+echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
+pacman -S --noconfirm fail2ban
+systemctl enable fail2ban
+
+cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
+[sshd]
+enabled = true
+port    = $SSH_PORT
+logpath = %(sshd_log)s
+maxretry = 5
+EOF
+systemctl restart fail2ban
 
 # Configure sudo
 echo -e "${BBlue}Hardening sudo...${NC}"
@@ -303,15 +323,23 @@ echo -e "${BBlue}Setting permissions for /etc/sudoers${NC}"
 chmod 440 /etc/sudoers 
 chown root:root /etc/sudoers
 
-# add a user
+# Add the user
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
-groupadd $USERNAME
-useradd -g $USERNAME -G sudo,wheel -s /bin/zsh -m $USERNAME &&\
-passwd $USERNAME &&\
+if ! id -u "$USERNAME" >/dev/null 2>&1; then
+    useradd -m -G sudo,wheel -s /bin/zsh "$USERNAME"
+    echo -e "${BBlue}User $USERNAME created.${NC}"
+
+else
+    echo "User $USERNAME already exists." >&2
+fi
+
+echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
+echo -e "${BBlue}Password should be at least 12 characters long, contain 1 symbol, 1 number, upper and lowercase letters.${NC}"
+passwd "$USERNAME"
 
 echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
 mkdir /home/$USERNAME/.ssh
-touch /home/$USERNAME/.ssh/authorized_keys &&\
+touch /home/$USERNAME/.ssh/authorized_keys
 chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 chown -R $USERNAME:$USERNAME /home/$USERNAME
@@ -319,8 +347,6 @@ chown -R $USERNAME:$USERNAME /home/$USERNAME
 # Set default ACLs on home directory 
 echo -e "${BBlue}Setting default ACLs on home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
-
-mount -v /dev/$DISK"p2" /efi
 
 echo -e "${BBlue}Adding GRUB package...${NC}"
 pacman -S grub efibootmgr os-prober --noconfirm
@@ -426,7 +452,19 @@ fi
 echo -e "${BBlue}Setting up GRUB...${NC}"
 mkdir /boot/grub
 grub-mkconfig -o /boot/grub/grub.cfg &&\
-grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck &&\
+grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
+
+# Set GRUB Password
+echo -e "${BBlue}Setting GRUB password...${NC}"
+grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
+GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
+rm /tmp/grubpass
+cat <<EOF >> /etc/grub.d/40_custom
+set superusers="$USERNAME"
+password_pbkdf2 $USERNAME $GRUB_PASS
+EOF
+grub-mkconfig -o /boot/grub/grub.cfg
+
 chmod 600 $LUKS_KEYS
 
 # Creating a cool /etc/issue
@@ -512,8 +550,51 @@ chown root:root /etc/issue
 chmod 644 /etc/issue
 
 echo -e "${BBlue}Setting root password...${NC}"
-passwd &&\
+passwd root
+
+# Remove deprecated PAM modules
+echo -e "${BBlue}Removing deprecated pam_tally2.so references...${NC}"
+sed -i '/pam_tally2.so/d' /etc/pam.d/system-auth
+rm -f /etc/pam.d/common-auth
+
+# Install necessary PAM modules
+echo -e "${BBlue}Installing necessary PAM modules...${NC}"
+pacman -S --noconfirm pambase pam libpwquality
+
+# Configure account lockout with pam_faillock
+echo -e "${BBlue}Configuring account lockout policy with pam_faillock...${NC}"
+
+# Backup the original system-auth file
+cp /etc/pam.d/system-auth /etc/pam.d/system-auth.bak
+
+# Insert pam_faillock.so lines with escaped square brackets
+sed -i '/^auth.*required.*pam_unix\.so/i auth required pam_faillock.so preauth silent deny=5 unlock_time=900' /etc/pam.d/system-auth
+sed -i '/^auth.*include.*system-auth/i auth \[default=die\] pam_faillock.so authfail deny=5 unlock_time=900' /etc/pam.d/system-auth
+
+# Add account required pam_faillock.so
+sed -i '/^account.*required.*pam_unix\.so/a account required pam_faillock.so' /etc/pam.d/system-auth
+
+
+# Configure password quality requirements
+echo -e "${BBlue}Configuring password quality requirements...${NC}"
+
+# Update /etc/security/pwquality.conf
+cp /etc/security/pwquality.conf /etc/security/pwquality.conf.bak
+cat <<EOF > /etc/security/pwquality.conf
+minlen = 12
+dcredit = -1
+ucredit = -1
+ocredit = -1
+lcredit = -1
+difok = 5
+enforce_for_root
+EOF
+
+# Ensure pam_pwquality.so is included
+if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
+    sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
+fi
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
-rm /chroot.sh
+shred -u /chroot.sh
 exit
