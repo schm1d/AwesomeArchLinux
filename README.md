@@ -143,6 +143,8 @@ To run the base scripts on your target machine, all you need to do is:
 - **Sudo Hardening**: Configures `/etc/sudoers` with secure defaults, logging, and environment restrictions.
 - **Bootloader Security**: Sets a GRUB password and restricts boot options to prevent unauthorized changes.
 - **Banner Creation**: Adds a security banner in `/etc/issue` to warn unauthorized users.
+- **Compiler Access Restriction**: Restricts access to compilers like `gcc`, `g++`, and `clang` to the root user to prevent unauthorized code compilation.
+- **Vulnerability Scanning**: Installs `arch-audit` to detect vulnerable packages and sets up a daily scan using a systemd timer.
 
 ### Customization
 
