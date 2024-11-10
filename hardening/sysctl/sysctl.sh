@@ -28,7 +28,7 @@ echo "fs.suid_dumpable = 0" >> /etc/sysctl.d/99-sysctl.conf # Restrict core dump
 echo "fs.protected_hardlinks = 1" >> /etc/sysctl.d/99-sysctl.conf # Protect hard links
 echo "fs.protected_symlinks = 1" >> /etc/sysctl.d/99-sysctl.conf # Protect symbolic links
 
-# ASLR is a common exploit mitigation which randomises the position of critical parts of a process in memory.
+# ASLR is a common exploit mitigation that randomizes the position of critical parts of a process in memory.
 # The above settings increase the bits of entropy used for mmap ASLR, improving its effectiveness. Values are compatible with x86, but other architectures may differ.
 echo "vm.mmap_rnd_bits=32" >> /etc/sysctl.d/99-sysctl.conf
 echo "vm.mmap_rnd_compat_bits=16" >> /etc/sysctl.d/99-sysctl.conf
@@ -68,9 +68,12 @@ echo "kernel.dmesg_restrict = 1" >> /etc/sysctl.d/99-sysctl.conf #  Restricts th
 echo "kernel.perf_event_paranoid = 3" >> /etc/sysctl.d/99-sysctl.conf # Disallow all usage of performance events to the CAP_PERFMON 
 echo "kernel.shmall = 268435456"  >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.shmmax = 1073741824"  >> /etc/sysctl.d/99-sysctl.conf
+echo "kernel.kexec_load_disabled = 1" >> /etc/sysctl.d/99-sysctl.conf
 
 
 # Network-related settings
+echo "net.ipv4.conf.all.arp_ignore = 1" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.ipv4.conf.all.arp_announce = 2" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.bpf_jit_harden = 2" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.dev_weight = 64" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
@@ -90,7 +93,7 @@ echo "net.ipv4.conf.all.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
 
 # By enabling reverse path filtering, the kernel will do source validation of the packets received from all the interfaces on the machine.
-# This can protect from attackers that are using IP spoofing methods to do harm.
+# This can protect from attackers using IP spoofing methods to harm.
 echo "net.ipv4.conf.all.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
 
@@ -158,7 +161,7 @@ echo "net.core.netdev_max_backlog = 16384" >> /etc/sysctl.d/99-sysctl.conf
 # Increase the maximum connections
 echo "net.core.somaxconn = 8192" >> /etc/sysctl.d/99-sysctl.conf
 
-# Increase the memory dedicated to the network interfaces (increase more in case of large amount of memory)
+# Increase the memory dedicated to the network interfaces (increase more in case of a large amount of memory)
 echo "net.core.rmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.rmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.wmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
@@ -175,12 +178,12 @@ echo "net.ipv4.udp_wmem_min = 8192" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_challenge_ack_limit=2147483647" >> /etc/sysctl.d/99-sysctl.conf
 
 # In the event of a synflood DOS attack, this queue can fill up pretty quickly,
-# at which point TCP SYN cookies will kick in allowing your system to continue to respond to legitimate traffic, and allowing you to gain access to block malicious IPs.
+# at which point TCP SYN cookies will kick in, allowing your system to continue to respond to legitimate traffic and allowing you to gain access to block malicious IPs.
 # If the server suffers from overloads at peak times, you may want to increase this value
 echo "net.ipv4.tcp_max_syn_backlog = 20480" >> /etc/sysctl.d/99-sysctl.conf
 
 # tcp_max_tw_buckets is the maximum number of sockets in the TIME_WAIT state.
-# After reaching this number the system will start destroying the sockets that are in this state.
+# After reaching this number the system will start destroying the sockets in this state.
 # Increase this to prevent simple DOS attacks
 echo "net.ipv4.tcp_max_tw_buckets = 2000000" >> /etc/sysctl.d/99-sysctl.conf
 
@@ -198,7 +201,7 @@ echo "net.ipv4.tcp_slow_start_after_idle = 0" >> /etc/sysctl.d/99-sysctl.conf
 # TCP will send the keepalive probe that contains null data to the network peer several times after a period of idle time.
 # The socket will be closed automatically if the peer does not respond.
 # By default, the TCP keepalive process waits for two hours (7200 secs) for socket activity before sending the first keepalive probe,
-# and then resending it every 75 seconds. As long as active TCP/IP socket communications exist, no keepalive packets are needed.
+# and then resending it every 75 seconds. As active TCP/IP socket communications exist, no keepalive packets are needed.
 # With the following settings, your application will detect dead TCP connections after 120 seconds (60s + 10s + 10s + 10s + 10s + 10s + 10s).
 echo "net.ipv4.tcp_keepalive_time = 60" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_keepalive_intvl = 10" >> /etc/sysctl.d/99-sysctl.conf
