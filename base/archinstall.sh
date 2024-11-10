@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Description    : Fully encrypted LVM2 on LUKS with UEFI Arch installation script.
-# Author         : Bruno Schmid @brulliant 
-# LinkedIn       : https://www.linkedin.com/in/schmidbruno/
+# Description: Fully encrypted LVM2 on LUKS with UEFI Arch installation script.
+# Author: Bruno Schmid @brulliant 
+# LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ set -euo pipefail
 BBlue='\033[1;34m'
 NC='\033[0m'
 
-# Check if user is root
+# Check if the user is root.
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root." >&2
    exit 1
@@ -69,7 +69,7 @@ echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
 
 read -p 'Enter the size of SWAP in GB: ' SIZE_OF_SWAP
 validate_numeric_input "$SIZE_OF_SWAP"
-read -p 'Enter the size of / in GB, the remaining space will be allocated to /home: ' SIZE_OF_ROOT
+read -p 'Enter the size of / in GB. The remaining space will be allocated to /home: ' SIZE_OF_ROOT
 validate_numeric_input "$SIZE_OF_ROOT"
 echo -e "\n"
 
@@ -96,18 +96,22 @@ timedatectl set-ntp true
 # Partition the disk
 echo -e "${BBlue}Preparing disk $DISK for UEFI and Encryption...${NC}"
 sgdisk -og "$DISK"
+partprobe $DISK
 
 # Create a 1MiB BIOS boot partition
 echo -e "${BBlue}Creating a 1MiB BIOS boot partition...${NC}"
 sgdisk -n 1:2048:4095 -t 1:ef02 -c 1:"BIOS boot Partition" "$DISK"
+partprobe $DISK
 
 # Create a UEFI partition
 echo -e "${BBlue}Creating a UEFI partition...${NC}"
 sgdisk -n 2:4096:1130495 -t 2:ef00 -c 2:"EFI" "$DISK"
+partprobe $DISK
 
 # Create a LUKS partition
 echo -e "${BBlue}Creating a LUKS partition...${NC}"
 sgdisk -n 3:1130496:$(sgdisk -E "$DISK") -t 3:8309 -c 3:"Linux LUKS" "$DISK"
+partprobe $DISK
 
 # Create the LUKS container
 echo -e "${BBlue}Creating the LUKS container...${NC}"
@@ -209,6 +213,6 @@ cp ./chroot.sh /mnt
 chmod +x /mnt/chroot.sh
 shred -u ./chroot.sh
 
-# Chroot into new system and configure it 
+# Chroot into the new system and configure it 
 echo -e "${BBlue}Chrooting into new system and configuring it...${NC}"
 arch-chroot /mnt /bin/bash ./chroot.sh
