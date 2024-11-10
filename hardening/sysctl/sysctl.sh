@@ -211,10 +211,11 @@ echo "net.ipv4.tcp_mtu_probing = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.default_qdisc = cake" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-sysctl.conf
 
-# This disables TCP SACK. SACK is commonly exploited and unnecessary in many circumstances.
-echo "net.ipv4.tcp_sack=0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_dsack=0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_fack=0" >> /etc/sysctl.d/99-sysctl.conf
+# Enable TCP SACK. Modern kernels have patched vulnerabilities related to SACK.
+echo "net.ipv4.tcp_sack=1" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.ipv4.tcp_dsack=1" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.ipv4.tcp_fack=1" >> /etc/sysctl.d/99-sysctl.conf
+
 
 sysctl --load=/etc/sysctl.d/99-sysctl.conf
 
