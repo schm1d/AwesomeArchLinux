@@ -163,8 +163,8 @@ echo "net.core.somaxconn = 8192" >> /etc/sysctl.d/99-sysctl.conf
 
 # Increase the memory dedicated to the network interfaces (increase more in case of a large amount of memory)
 echo "net.core.rmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.rmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.wmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.core.rmem_default = 8388608" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.core.wmem_default = 8388608" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.wmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.optmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_rmem = 4096 25165824 25165824" >> /etc/sysctl.d/99-sysctl.conf
@@ -222,4 +222,5 @@ echo "net.ipv4.tcp_fack=1" >> /etc/sysctl.d/99-sysctl.conf
 
 sysctl --load=/etc/sysctl.d/99-sysctl.conf
 
-echo -e "${BBlue}Sysctl is now hardened.${NC}"
+echo -e "${BBlue}Sysctl settings have been hardened and applied.${NC}"
+
