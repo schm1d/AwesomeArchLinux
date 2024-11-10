@@ -49,10 +49,8 @@ echo "kernel.pid_max = 65535" >> /etc/sysctl.d/99-sysctl.conf # Allow for more P
 
 # The contents of /proc/<pid>/maps and smaps files are only visible to
 
-echo "kernel.randomize_va_space = 2" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.msgmnb = 65535" >> /etc/sysctl.d/99-sysctl.conf # Controls the maximum size of a message, in bytes
 echo "kernel.msgmax = 65535" >> /etc/sysctl.d/99-sysctl.conf # Controls the default maximum size of a message queue
-echo "kernel.kptr_restrict = 2" >> /etc/sysctl.d/99-sysctl.conf # Hide exposed kernel pointers
 
 # Those options prevents those information leaks. This must be used in combination with "net.core.bpf_jit_harden=2"
 echo "kernel.printk=3 3 3 3" >> /etc/sysctl.d/99-sysctl.conf
@@ -68,12 +66,11 @@ echo "kernel.kptr_restrict = 2" >> /etc/sysctl.d/99-sysctl.conf # This setting a
 echo "kernel.yama.ptrace_scope = 2" >> /etc/sysctl.d/99-sysctl.conf #  This restricts usage of ptrace to only processes with the CAP_SYS_PTRACE capability. Alternatively, set the sysctl to 3 to disable ptrace entirely.
 echo "kernel.dmesg_restrict = 1" >> /etc/sysctl.d/99-sysctl.conf #  Restricts the kernel log to the CAP_SYSLOG capability.
 echo "kernel.perf_event_paranoid = 3" >> /etc/sysctl.d/99-sysctl.conf # Disallow all usage of performance events to the CAP_PERFMON 
-echo "kernel.core_uses_pid = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.shmall = 268435456"  >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.shmmax = 1073741824"  >> /etc/sysctl.d/99-sysctl.conf
 
 
-# Network related settings
+# Network-related settings
 echo "net.core.bpf_jit_harden = 2" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.dev_weight = 64" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
@@ -88,14 +85,14 @@ echo "net.ipv4.ip_forward = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.accept_source_route = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.accept_source_route = 0" >> /etc/sysctl.d/99-sysctl.conf
 
-# Often martian and the unroutable packets may be used for a dangerous purpose. Logging these packets for further inspection.
+# Often, martian and unroutable packets may be used for a dangerous purpose. Logging these packets for further inspection.
 echo "net.ipv4.conf.all.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
 
 # By enabling reverse path filtering, the kernel will do source validation of the packets received from all the interfaces on the machine.
 # This can protect from attackers that are using IP spoofing methods to do harm.
 echo "net.ipv4.conf.all.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.rp_filter= 1" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.ipv4.conf.default.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
 
 # Protect against TCP time-wait assassination hazards, drop RST packets for sockets in the time-wait state.
 echo "net.ipv4.tcp_rfc1337 = 1" >> /etc/sysctl.d/99-sysctl.conf
@@ -104,7 +101,7 @@ echo "net.ipv4.tcp_rfc1337 = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 
-# Ignore all ICMP requests to avoid Smurf attacks, make the device more difficult to enumerate on the network and prevent clock fingerprinting through ICMP timestamps.
+# Ignore all ICMP requests to avoid Smurf attacks, make the device more difficult to enumerate on the network, and prevent clock fingerprinting through ICMP timestamps.
 echo "net.ipv4.icmp_echo_ignore_all = 1" >> /etc/sysctl.d/99-sysctl.conf
 
 # Enable ignoring broadcasts request
@@ -124,8 +121,9 @@ echo "net.ipv4.tcp_syncookies = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_syn_retries = 5" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_synack_retries = 2" >> /etc/sysctl.d/99-sysctl.conf
 
-# Some IPV6 security improvments and tunnings here.
-
+# Some IPV6 security improvements and tunings are here.
+echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.d/99-sysctl.conf
 # Malicious IPv6 router advertisements can result in a man-in-the-middle attack, so they should be disabled.
 echo "net.ipv6.conf.all.accept_ra = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv6.conf.default.accept_ra = 0" >> /etc/sysctl.d/99-sysctl.conf
@@ -134,7 +132,8 @@ echo "net.ipv6.conf.default.accept_ra = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv6.conf.all.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv6.conf.default.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 
-# Source routing is a mechanism that allows users to redirect network traffic. As this can be used to perform man-in-the-middle attacks we disable it.
+# Source routing is a mechanism that allows users to redirect network traffic. 
+# As this can be used to perform man-in-the-middle attacks, we disable it.
 echo "net.ipv6.conf.all.accept_source_route=0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv6.conf.default.accept_source_route=0" >> /etc/sysctl.d/99-sysctl.conf
 
@@ -160,10 +159,9 @@ echo "net.core.netdev_max_backlog = 16384" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.somaxconn = 8192" >> /etc/sysctl.d/99-sysctl.conf
 
 # Increase the memory dedicated to the network interfaces (increase more in case of large amount of memory)
-echo "net.core.rmem_default = 1048576" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.rmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.rmem_default = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.wmem_default = 65536" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.core.rmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
+echo "net.core.wmem_default = 262144" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.wmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.core.optmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_rmem = 4096 25165824 25165824" >> /etc/sysctl.d/99-sysctl.conf
@@ -198,9 +196,9 @@ echo "net.ipv4.tcp_fin_timeout = 20" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_slow_start_after_idle = 0" >> /etc/sysctl.d/99-sysctl.conf
 
 # TCP will send the keepalive probe that contains null data to the network peer several times after a period of idle time.
-# If the peer does not respond, the socket will be closed automatically.
+# The socket will be closed automatically if the peer does not respond.
 # By default, the TCP keepalive process waits for two hours (7200 secs) for socket activity before sending the first keepalive probe,
-# and then resend it every 75 seconds. As long as there are TCP/IP socket communications going on and active, no keepalive packets are needed.
+# and then resending it every 75 seconds. As long as active TCP/IP socket communications exist, no keepalive packets are needed.
 # With the following settings, your application will detect dead TCP connections after 120 seconds (60s + 10s + 10s + 10s + 10s + 10s + 10s).
 echo "net.ipv4.tcp_keepalive_time = 60" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.tcp_keepalive_intvl = 10" >> /etc/sysctl.d/99-sysctl.conf
