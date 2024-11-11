@@ -1,8 +1,8 @@
 #!/bin/bash
                                  
-#Description    : A very secure sshd_config and ssh_config                                                 
-#Author         : @brulliant                                                
-#Linkedin       : https://www.linkedin.com/in/schmidbruno/    
+#Description: A very secure sshd_config and ssh_config                                                 
+#Author: @brulliant                                                
+#Linkedin: https://www.linkedin.com/in/schmidbruno/    
 
 
 BBlue='\033[1;34m'
@@ -78,6 +78,7 @@ echo "Compression no" >> /etc/ssh/sshd_config
 echo "PermitTunnel no" >> /etc/ssh/sshd_config           #Only SSH connection and nothing else
 echo "AllowTcpForwarding no" >> /etc/ssh/sshd_config     #Disablow tunneling out via SSH
 echo "AllowStreamLocalForwarding no" >> /etc/ssh/sshd_config  #Disablow tunneling out via SSH
+echo "StreamLocalBindUnlink yes" >> /etc/ssh/sshd_config
 echo "GatewayPorts no" >> /etc/ssh/sshd_config           #Disablow tunneling out via SSH
 echo "DisableForwarding no" >> /etc/ssh/sshd_config      #Disables all forwarding features
 echo "AllowAgentForwarding no" >> /etc/ssh/sshd_config   #Do not allow agent forwardng
@@ -94,7 +95,7 @@ echo "TCPKeepAlive no" >> /etc/ssh/sshd_config           #Do not use TCP keep al
 
 echo "AcceptEnv LANG LC_*" >> /etc/ssh/sshd_config       #Allow client to pass locale environment variables
 echo "Subsystem sftp /usr/lib/ssh/sftp-server -f AUTHPRIV -l INFO" >> /etc/ssh/sshd_config   #Enable sFTP subsystem over SSH
-echo "UsePAM yes" >> /etc/ssh/ssh_config     #Enable PAM authentication
+echo "UsePAM yes" >> /etc/ssh/sshd_config                 #Enable PAM authentication
 echo "UsePrivilegeSeparation yes" >> /etc/ssh/sshd_config #Separates privileges by creating an unprivileged child process to handle incoming connections.
 
 
@@ -113,7 +114,8 @@ echo "ControlPath ~/.ssh/socket-%r@%h:%p" >> /etc/ssh/ssh_config
 
 echo -e "${BBlue}Hardening permissions...${NC}"
 chown root:root /etc/ssh/sshd_config
-chmod 0600 /etc/ssh/sshd_config
+# SSHD requires the config file to be readable.
+chmod 644 /etc/ssh/sshd_config
 
 echo -e "${BBlue}Creating Banner (/etc/issue.net).${NC}"
 
