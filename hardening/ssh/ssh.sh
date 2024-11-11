@@ -91,7 +91,7 @@ echo "RekeyLimit 512M 1h" >> /etc/ssh/sshd_config
 
 echo "ClientAliveInterval 300" >> /etc/ssh/sshd_config   #Client timeout (15 minutes)
 echo "ClientAliveCountMax 0" >> /etc/ssh/sshd_config     #This way enforces timeouts on the server side
-echo "LoginGraceTime 30" >> /etc/ssh/sshd_config         #Authenticatin must happen within 30 seconds
+echo "LoginGraceTime 60" >> /etc/ssh/sshd_config         #Authenticatin must happen within 60 seconds
 echo "MaxStartups 2" >> /etc/ssh/sshd_config             #Max concurrent SSH sessions
 echo "TCPKeepAlive no" >> /etc/ssh/sshd_config           #Do not use TCP keep alive
 
