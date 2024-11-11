@@ -62,13 +62,15 @@ echo "MaxAuthTries 3" >> /etc/ssh/sshd_config            #Maximum allowed authen
 echo "MaxSessions 2" >> /etc/ssh/sshd_config             #Maximum allowed sessions by the user
 
 echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config   #No username password authentication
-echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config   #No empty password authentcation allowed
+echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config   #No empty password authentication allowed
 echo "IgnoreRhosts yes" >> /etc/ssh/sshd_config          #Dont read users rhost files
 echo "HostbasedAuthentication no" >> /etc/ssh/sshd_config   #Disable host-based authentication
 echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config   #Unused authentication scheme172.16.136.141
 echo "KerberosAuthentication no" >> /etc/ssh/sshd_config   # Disable kerberos authentication
 echo "GSSAPIAuthentication no" >> /etc/ssh/sshd_config   # Disable GSSAP authentication 
-echo "X11Forwarding no" >> /etc/ssh/sshd_config          #Disable X11 forwarding
+echo "X11Forwarding no" >> /etc/ssh/sshd_config          # Disable X11 forwarding
+echo "PermitUserEnvironment no" >> /etc/ssh/sshd_config  # Prevents users from modifying their environment to affect SSH sessions.
+
 
 echo "LogLevel VERBOSE" >> /etc/ssh/sshd_config          #Fingerprint details of failed login attempts
 echo "SyslogFacility AUTH" >> /etc/ssh/sshd_config       #Logging authentication and authorization related commands
