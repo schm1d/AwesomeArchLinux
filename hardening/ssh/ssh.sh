@@ -30,7 +30,6 @@ echo -e "${BBlue}Hardening \"/etc/ssh/sshd_config\"...${NC}"
 
 touch $REVOKED_KEYS_FILE
 
-echo "Protocol 2" > /etc/ssh/sshd_config  #Protocol 1 is fundamentally broken
 echo "StrictModes yes" >> /etc/ssh/sshd_config   #Protects from misconfiguration
 
 #echo "ListenAddress <IPs allowed here coma separated>" >> /etc/ssh/sshd_config  # If you need to limit access to a few IPs from a local network, this will be ideal.
@@ -98,8 +97,6 @@ echo "TCPKeepAlive no" >> /etc/ssh/sshd_config           #Do not use TCP keep al
 echo "AcceptEnv LANG LC_*" >> /etc/ssh/sshd_config       #Allow client to pass locale environment variables
 echo "Subsystem sftp /usr/lib/ssh/sftp-server -f AUTHPRIV -l INFO" >> /etc/ssh/sshd_config   #Enable sFTP subsystem over SSH
 echo "UsePAM yes" >> /etc/ssh/sshd_config                 #Enable PAM authentication
-echo "UsePrivilegeSeparation yes" >> /etc/ssh/sshd_config #Separates privileges by creating an unprivileged child process to handle incoming connections.
-
 
 echo -e "${BBlue}Hardening \"/etc/ssh/ssh_config\"...${NC}"
 echo "HashKnownHosts yes" > /etc/ssh/ssh_config #Hash the information in the knownHosts files
