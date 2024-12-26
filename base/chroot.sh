@@ -27,7 +27,7 @@ LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
 
 # Define the URL of the auditd rules to download
-RULES_URL="https://raw.githubusercontent.com/bfuzzy1/auditd-attack/master/auditd-attack/auditd-attack.rules"
+RULES_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules"
 # Specify the path to the local auditd rules file
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_PORT=22 # Change to the desired SSH port.
