@@ -465,28 +465,23 @@ gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
 echo "Detected GPU: $gpu_model"
 echo "Running Kernel: $kernel"
 
-# Function to install packages
-install_packages() {
-    echo "Installing packages: $*"
-    sudo pacman -S --noconfirm $*
-}
 
 # Determine the driver based on the GPU model and kernel
 case $gpu_model in
     *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
-        install_packages nvidia-340xx-dkms nvidia-340xx-utils lib32-nvidia-340xx-utils
+        pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils lib32-nvidia-340xx-utils
         ;;
     *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
-        install_packages nvidia-390xx-dkms nvidia-390xx-utils lib32-nvidia-390xx-utils
+        pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils lib32-nvidia-390xx-utils
         ;;
     *"Kepler"*|"*NVE0"*)
-        install_packages nvidia-470xx-dkms nvidia-470xx-utils lib32-nvidia-470xx-utils
+        pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils lib32-nvidia-470xx-utils
         ;;
     *"Maxwell"*|"*NV110"*|*"newer"*)
         if [[ $kernel == *"linux-lts"* || $kernel == *"linux"* ]]; then
-            install_packages nvidia nvidia-utils lib32-nvidia-utils
+            pacman -S --noconfirm nvidia nvidia-utils lib32-nvidia-utils
         else
-            install_packages nvidia-dkms nvidia-utils lib32-nvidia-utils
+            pacman -S --noconfirm nvidia-dkms nvidia-utils lib32-nvidia-utils
         fi
         ;;
     *)
