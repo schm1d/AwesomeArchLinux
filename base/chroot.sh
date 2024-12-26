@@ -500,6 +500,20 @@ if [[ "$NVIDIA_CARD" = true ]]; then
     sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=0"|g' /etc/default/grub
 fi
 
+# 1) For GRUB_GFXMODE
+if grep -q '^GRUB_GFXMODE=' /etc/default/grub; then
+  sed -i 's/^GRUB_GFXMODE=.*/GRUB_GFXMODE=1024x768x32/' /etc/default/grub
+else
+  echo "GRUB_GFXMODE=1024x768x32" >> /etc/default/grub
+fi
+
+# 2) For GRUB_GFXPAYLOAD_LINUX
+if grep -q '^GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
+  sed -i 's/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=keep/' /etc/default/grub
+else
+  echo "GRUB_GFXPAYLOAD_LINUX=keep" >> /etc/default/grub
+fi
+
 echo -e "${BBlue}Setting up GRUB...${NC}"
 mkdir /boot/grub
 grub-mkconfig -o /boot/grub/grub.cfg &&\
