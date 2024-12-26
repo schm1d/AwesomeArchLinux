@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Description: This is the chroot which should be executed via 'archinstall.sh'
+# Description: This is the chroot, which should be executed via 'archinstall.sh'.
 # Author: Bruno Schmid @brulliant
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
@@ -500,6 +500,7 @@ if [[ "$NVIDIA_CARD" = true ]]; then
     sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=0"|g' /etc/default/grub
 fi
 
+echo -e "${BBlue}Improving GRUB screen performance...${NC}"
 # 1) For GRUB_GFXMODE
 if grep -q '^GRUB_GFXMODE=' /etc/default/grub; then
   sed -i 's/^GRUB_GFXMODE=.*/GRUB_GFXMODE=1024x768x32/' /etc/default/grub
