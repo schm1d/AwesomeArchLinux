@@ -477,7 +477,7 @@ case $gpu_model in
     *"Kepler"*|"*NVE0"*)
         pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils lib32-nvidia-470xx-utils
         ;;
-    *"Maxwell"*|"*NV110"*|*"newer"*)
+    *"Maxwell"*|"*NV110"*|*"GA102"*)
         if [[ $kernel == *"linux-lts"* || $kernel == *"linux"* ]]; then
             pacman -S --noconfirm nvidia nvidia-utils lib32-nvidia-utils
         else
