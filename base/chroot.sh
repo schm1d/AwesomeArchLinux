@@ -469,19 +469,19 @@ echo "Running Kernel: $kernel"
 # Determine the driver based on the GPU model and kernel
 case $gpu_model in
     *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
-        pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils lib32-nvidia-340xx-utils
+        pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils
         ;;
     *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
-        pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils lib32-nvidia-390xx-utils
+        pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils
         ;;
     *"Kepler"*|"*NVE0"*)
-        pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils lib32-nvidia-470xx-utils
+        pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils
         ;;
     *"Maxwell"*|"*NV110"*|*"GA102"*)
         if [[ $kernel == *"linux-lts"* || $kernel == *"linux"* ]]; then
-            pacman -S --noconfirm nvidia nvidia-utils lib32-nvidia-utils
+            pacman -S --noconfirm nvidia nvidia-utils
         else
-            pacman -S --noconfirm nvidia-dkms nvidia-utils lib32-nvidia-utils
+            pacman -S --noconfirm nvidia-dkms nvidia-utils
         fi
         ;;
     *)
