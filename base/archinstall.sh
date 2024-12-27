@@ -244,6 +244,8 @@ sed -i "s|^USERNAME=.*|USERNAME='${USERNAME}'|g" ./chroot.sh
 sed -i "s|^HOSTNAME=.*|HOSTNAME='${HOSTNAME}'|g" ./chroot.sh
 cp ./chroot.sh /mnt
 chmod +x /mnt/chroot.sh
+cp ../hardening/sysctl/sysctl.sh /mnt
+chmod +x /mnt/sysctl.sh
 shred -u ./chroot.sh
 
 # Chroot into the new system and configure it 
