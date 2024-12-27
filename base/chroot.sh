@@ -838,7 +838,7 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
 fi
 
 echo -e "${BBlue}Hardening sysctl settings...${NC}"
-sh /sysctl.sh
+/sysctl.sh
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 shred -u /chroot.sh
