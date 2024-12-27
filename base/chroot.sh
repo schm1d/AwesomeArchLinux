@@ -242,13 +242,15 @@ systemctl start clamav-daemon.service || true
 #  yay -S --noconfirm clamav-unofficial-sigs
 #fi
 
+
+################################################################################
+# ClamAV Unofficial Signatures (Malware Patrol)
+################################################################################
 # 8) Enable & start the unofficial sigs timer
-################################################################################
-# ClamAV Unofficial Signatures (Malware Patrol + clamav-unofficial-sigs)
-################################################################################
-echo "Enabling clamav-unofficial-sigs.timer..."
-systemctl enable clamav-unofficial-sigs.timer
-systemctl start clamav-unofficial-sigs.timer || true
+# This will need an AUR packages, and we don't do that in the clean install ;)
+#echo "Enabling clamav-unofficial-sigs.timer..."
+#systemctl enable clamav-unofficial-sigs.timer
+#systemctl start clamav-unofficial-sigs.timer || true
 
 
 echo -e "${BBlue}Installing clamav-unofficial-sigs (extremeshok) and Malware Patrol configurations...${NC}"
