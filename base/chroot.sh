@@ -253,7 +253,7 @@ systemctl start clamav-daemon.service || true
 #systemctl start clamav-unofficial-sigs.timer || true
 
 
-echo -e "${BBlue}Installing clamav-unofficial-sigs (extremeshok) and Malware Patrol configurations...${NC}"
+echo -e "${BBlue}Installing Malware Patrol configurations...${NC}"
 
 # 1) Ensure we have needed packages for downloading / extracting.
 pacman -S --noconfirm curl rsync unzip
