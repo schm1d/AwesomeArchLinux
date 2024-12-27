@@ -133,8 +133,11 @@ pacman -S --noconfirm haveged
 systemctl enable haveged.service
 
 # ClamAV anti-virus
-echo -e "${BBlue}Installing and configuring clamav...${NC}"
+echo -e "${BBlue}Installing and configuring Clamav...${NC}"
 pacman -S --noconfirm clamav
+
+echo -e "${BBlue}Updating Clamav signatures...${NC}"
+freshclam
 
 # Rootkit Hunter
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
