@@ -73,6 +73,16 @@ read -p 'Enter the size of / in GB. The remaining space will be allocated to /ho
 validate_numeric_input "$SIZE_OF_ROOT"
 echo -e "\n"
 
+# Ask the user if they want a separate /var partition
+read -p 'Do you want a separate /var partition? (y/n): ' CREATE_VAR_PART
+if [[ "$CREATE_VAR_PART" =~ ^[Yy]$ ]]; then
+  read -p 'Enter the size of /var in GB: ' SIZE_OF_VAR
+  validate_numeric_input "$SIZE_OF_VAR"
+  VAR_SIZE="${SIZE_OF_VAR}G"
+else
+  VAR_SIZE=""
+fi
+
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
 CRYPT_NAME='crypt_lvm'
@@ -137,9 +147,19 @@ echo -e "\n"
 echo -e "${BBlue}Creating LVM logical volumes on $LVM_NAME...${NC}"
 pvcreate --verbose "/dev/mapper/$CRYPT_NAME"
 vgcreate --verbose "$LVM_NAME" "/dev/mapper/$CRYPT_NAME"
+
 lvcreate --verbose -L "$ROOT_SIZE" "$LVM_NAME" -n root
 lvcreate --verbose -L "$SWAP_SIZE" "$LVM_NAME" -n swap
-lvcreate --verbose -l 100%FREE "$LVM_NAME" -n home
+
+# If the user wants a separate /var, create it
+if [[ -n "$VAR_SIZE" ]]; then
+  lvcreate --verbose -L "$VAR_SIZE" "$LVM_NAME" -n var
+  # The remaining space goes to /home
+  lvcreate --verbose -l 100%FREE "$LVM_NAME" -n home
+else
+  # Allocate all remaining space to /home if no separate /var
+  lvcreate --verbose -l 100%FREE "$LVM_NAME" -n home
+fi
 
 # Format the partitions 
 echo -e "${BBlue}Formatting filesystems...${NC}"
@@ -148,11 +168,24 @@ mkfs.ext4 "/dev/mapper/${LVM_NAME}-home"
 mkswap "/dev/mapper/${LVM_NAME}-swap"
 swapon "/dev/mapper/${LVM_NAME}-swap"
 
+# Format /var if created
+if [[ -n "$VAR_SIZE" ]]; then
+  mkfs.ext4 "/dev/mapper/${LVM_NAME}-var"
+fi
+
 # Mount filesystem
 echo -e "${BBlue}Mounting filesystems...${NC}"
 mount --verbose "/dev/mapper/${LVM_NAME}-root" /mnt
+
 mkdir --verbose /mnt/home
 mount --verbose "/dev/mapper/${LVM_NAME}-home" /mnt/home
+
+# Mount /var if created
+if [[ -n "$VAR_SIZE" ]]; then
+  mkdir --verbose /mnt/var
+  mount --verbose "/dev/mapper/${LVM_NAME}-var" /mnt/var
+fi
+
 mkdir --verbose -p /mnt/tmp
 
 # Prepare the EFI partition
