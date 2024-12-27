@@ -837,6 +837,9 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
 
+echo -e "${BBlue}Hardening sysctl settings...${NC}"
+sh /sysctl.sh
+
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 shred -u /chroot.sh
 exit
