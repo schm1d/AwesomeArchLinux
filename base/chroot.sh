@@ -242,69 +242,6 @@ systemctl start clamav-daemon.service || true
 #  yay -S --noconfirm clamav-unofficial-sigs
 #fi
 
-
-################################################################################
-# ClamAV Unofficial Signatures (Malware Patrol)
-################################################################################
-# 8) Enable & start the unofficial sigs timer
-# This will need an AUR packages, and we don't do that in the clean install ;)
-#echo "Enabling clamav-unofficial-sigs.timer..."
-#systemctl enable clamav-unofficial-sigs.timer
-#systemctl start clamav-unofficial-sigs.timer || true
-
-
-echo -e "${BBlue}Installing Malware Patrol configurations...${NC}"
-
-# 1) Ensure we have needed packages for downloading / extracting.
-pacman -S --noconfirm curl rsync unzip
-
-# 2) Download the clamav-unofficial-sigs script from GitHub (master branch).
-cd /tmp || exit 1
-wget -O clamav-unofficial-sigs.zip 'https://github.com/extremeshok/clamav-unofficial-sigs/archive/master.zip'
-
-# 3) Unzip the script and copy the main file to /usr/local/bin/.
-unzip /tmp/clamav-unofficial-sigs.zip
-cp /tmp/clamav-unofficial-sigs-master/clamav-unofficial-sigs.sh /usr/local/bin/
-chmod 755 /usr/local/bin/clamav-unofficial-sigs.sh
-
-# 4) Create /etc/clamav-unofficial-sigs directory and copy default configs.
-mkdir -p /etc/clamav-unofficial-sigs
-cp /tmp/clamav-unofficial-sigs-master/config/master.conf /etc/clamav-unofficial-sigs/
-cp /tmp/clamav-unofficial-sigs-master/config/user.conf /etc/clamav-unofficial-sigs/
-
-# 5) Modify master.conf to enable Malware Patrol and input your receipt/product info.
-#    Adjust the lines below to match your actual receipt code, product code, and list.
-sed -i 's/^malwarepatrol_enabled="no"/malwarepatrol_enabled="yes"/' /etc/clamav-unofficial-sigs/master.conf
-sed -i 's/^malwarepatrol_receipt_code=".*"/malwarepatrol_receipt_code="YOUR-RECEIPT-NUMBER"/' /etc/clamav-unofficial-sigs/master.conf
-sed -i 's/^malwarepatrol_product_code=".*"/malwarepatrol_product_code="41"/' /etc/clamav-unofficial-sigs/master.conf
-sed -i 's/^malwarepatrol_list=".*"/malwarepatrol_list="clamav_basic"/' /etc/clamav-unofficial-sigs/master.conf
-sed -i 's/^malwarepatrol_free="yes"/malwarepatrol_free="no"/' /etc/clamav-unofficial-sigs/master.conf
-
-# 6) For safety, confirm that user_configuration_complete is set to yes
-sed -i 's/^user_configuration_complete="no"/user_configuration_complete="yes"/' /etc/clamav-unofficial-sigs/master.conf
-
-# 7) Clean up the /tmp files.
-rm -rf /tmp/clamav-unofficial-sigs*
-
-# 8) Run the first update of unofficial signatures
-echo "Running the first clamav-unofficial-sigs update..."
-/usr/local/bin/clamav-unofficial-sigs.sh
-
-# 9) Set up a cron job or systemd timer (Malware Patrol’s instructions mention cron):
-#    Example: run every hour at minute 20. (Adjust as needed.)
-#    crontab -l | { cat; echo "20 * * * * /usr/local/bin/clamav-unofficial-sigs.sh"; } | crontab -
-#
-#    Or create /etc/cron.d/clamav-unofficial-sigs with:
-#       20 * * * * root /usr/local/bin/clamav-unofficial-sigs.sh
-#
-#    For systemd, you could create your own .timer unit. Example:
-#       systemctl enable clamav-unofficial-sigs.timer
-#       systemctl start clamav-unofficial-sigs.timer
-
-echo -e "${BBlue}clamav-unofficial-sigs setup with Malware Patrol completed!${NC}"
-################################################################################
-
-
 # 9) Final check of ClamAV config
 echo -e "${BBlue}Running clamconf to check ClamAV configuration...${NC}"
 clamconf
