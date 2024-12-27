@@ -233,8 +233,8 @@ freshclam
 
 # 7) Enable and start clamd for on-demand scanning
 echo "Enabling and starting clamd.service..."
-systemctl enable clamd.service
-systemctl start clamd.service || true
+systemctl enable clamav-daemon.service
+systemctl start clamav-daemon.service || true
 
 # If it's not in the official repos, install from AUR (requires e.g. yay):
 #if ! pacman -Qi clamav-unofficial-sigs &>/dev/null; then
