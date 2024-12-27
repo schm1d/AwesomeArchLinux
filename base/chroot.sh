@@ -132,12 +132,185 @@ echo -e "${BBlue}Installing and configuring haveged...${NC}"
 pacman -S --noconfirm haveged
 systemctl enable haveged.service
 
+###############################################################################
+# CLAMAV CONFIGURATION
+###############################################################################
+
 # ClamAV anti-virus
 echo -e "${BBlue}Installing and configuring Clamav...${NC}"
 pacman -S --noconfirm clamav
 
-echo -e "${BBlue}Updating Clamav signatures...${NC}"
+echo -e "${BBlue}Configuring ClamAV...${NC}"
+
+# 1) Generate default configuration files if they do not exist.
+#    clamconf creates freshclam.conf, clamd.conf, and clamav-milter.conf
+#    into the current directory. Then we can move them to /etc/clamav/.
+if [ ! -f /etc/clamav/freshclam.conf ]; then
+  echo "Generating /etc/clamav/freshclam.conf..."
+  clamconf -g freshclam.conf > freshclam.conf
+  mv freshclam.conf /etc/clamav/freshclam.conf
+fi
+
+if [ ! -f /etc/clamav/clamd.conf ]; then
+  echo "Generating /etc/clamav/clamd.conf..."
+  clamconf -g clamd.conf > clamd.conf
+  mv clamd.conf /etc/clamav/clamd.conf
+fi
+
+if [ ! -f /etc/clamav/clamav-milter.conf ]; then
+  echo "Generating /etc/clamav/clamav-milter.conf..."
+  clamconf -g clamav-milter.conf > clamav-milter.conf
+  mv clamav-milter.conf /etc/clamav/clamav-milter.conf
+fi
+
+# 2) Update /etc/clamav/clamd.conf with recommended settings.
+#    You can fine-tune or remove options you do not need.
+CLAMD_CONF="/etc/clamav/clamd.conf"
+
+# Helper function to ensure a line is present in /etc/clamav/clamd.conf
+ensure_clamd_option() {
+  local KEY="$1"
+  local VALUE="$2"
+  # If the key exists, replace it; otherwise, append it
+  if grep -Eq "^#?\s*${KEY}\s" "$CLAMD_CONF"; then
+    sed -i "s|^#\?\s*${KEY}.*|${KEY} ${VALUE}|" "$CLAMD_CONF"
+  else
+    echo "${KEY} ${VALUE}" >> "$CLAMD_CONF"
+  fi
+}
+
+# Apply recommended options (comment out any you do not need)
+ensure_clamd_option LogTime "yes"
+ensure_clamd_option ExtendedDetectionInfo "yes"
+ensure_clamd_option User "clamav"
+ensure_clamd_option MaxDirectoryRecursion "20"
+
+ensure_clamd_option DetectPUA "yes"
+ensure_clamd_option HeuristicAlerts "yes"
+ensure_clamd_option ScanPE "yes"
+ensure_clamd_option ScanELF "yes"
+ensure_clamd_option ScanOLE2 "yes"
+ensure_clamd_option ScanPDF "yes"
+ensure_clamd_option ScanSWF "yes"
+ensure_clamd_option ScanXMLDOCS "yes"
+ensure_clamd_option ScanHWP3 "yes"
+ensure_clamd_option ScanOneNote "yes"
+ensure_clamd_option ScanMail "yes"
+ensure_clamd_option ScanHTML "yes"
+ensure_clamd_option ScanArchive "yes"
+ensure_clamd_option Bytecode "yes"
+ensure_clamd_option AlertBrokenExecutables "yes"
+ensure_clamd_option AlertBrokenMedia "yes"
+ensure_clamd_option AlertEncrypted "yes"
+ensure_clamd_option AlertEncryptedArchive "yes"
+ensure_clamd_option AlertEncryptedDoc "yes"
+ensure_clamd_option AlertOLE2Macros "yes"
+ensure_clamd_option AlertPartitionIntersection "yes"
+
+# 3) Create freshclam log file and lock down permissions
+echo "Creating and securing /var/log/clamav/freshclam.log..."
+mkdir -p /var/log/clamav
+touch /var/log/clamav/freshclam.log
+chmod 600 /var/log/clamav/freshclam.log
+chown clamav:clamav /var/log/clamav/freshclam.log
+
+# 4) Enable daily updates of virus definitions.
+#    You can choose either:
+#       - 'clamav-freshclam.service': runs as a daemon every 2 hours (12/day).
+#       - 'clamav-freshclam-once.timer': runs once a day (24h).
+#
+# Uncomment whichever you prefer. For example:
+systemctl enable clamav-freshclam.service
+# systemctl enable clamav-freshclam-once.timer
+
+# 5) (Optional) Start the freshclam service so definitions update immediately
+echo "Starting clamav-freshclam.service..."
+systemctl start clamav-freshclam.service || true
+
+# 6) Update definitions manually now (optional)
+echo "Updating ClamAV definitions once..."
 freshclam
+
+# 7) Enable and start clamd for on-demand scanning
+echo "Enabling and starting clamd.service..."
+systemctl enable clamd.service
+systemctl start clamd.service || true
+
+# If it's not in the official repos, install from AUR (requires e.g. yay):
+#if ! pacman -Qi clamav-unofficial-sigs &>/dev/null; then
+#  echo "Installing clamav-unofficial-sigs from AUR..."
+#  yay -S --noconfirm clamav-unofficial-sigs
+#fi
+
+# 8) Enable & start the unofficial sigs timer
+################################################################################
+# ClamAV Unofficial Signatures (Malware Patrol + clamav-unofficial-sigs)
+################################################################################
+echo "Enabling clamav-unofficial-sigs.timer..."
+systemctl enable clamav-unofficial-sigs.timer
+systemctl start clamav-unofficial-sigs.timer || true
+
+
+echo -e "${BBlue}Installing clamav-unofficial-sigs (extremeshok) and Malware Patrol configurations...${NC}"
+
+# 1) Ensure we have needed packages for downloading / extracting.
+pacman -S --noconfirm curl rsync unzip
+
+# 2) Download the clamav-unofficial-sigs script from GitHub (master branch).
+cd /tmp || exit 1
+wget -O clamav-unofficial-sigs.zip 'https://github.com/extremeshok/clamav-unofficial-sigs/archive/master.zip'
+
+# 3) Unzip the script and copy the main file to /usr/local/bin/.
+unzip /tmp/clamav-unofficial-sigs.zip
+cp /tmp/clamav-unofficial-sigs-master/clamav-unofficial-sigs.sh /usr/local/bin/
+chmod 755 /usr/local/bin/clamav-unofficial-sigs.sh
+
+# 4) Create /etc/clamav-unofficial-sigs directory and copy default configs.
+mkdir -p /etc/clamav-unofficial-sigs
+cp /tmp/clamav-unofficial-sigs-master/config/master.conf /etc/clamav-unofficial-sigs/
+cp /tmp/clamav-unofficial-sigs-master/config/user.conf /etc/clamav-unofficial-sigs/
+
+# 5) Modify master.conf to enable Malware Patrol and input your receipt/product info.
+#    Adjust the lines below to match your actual receipt code, product code, and list.
+sed -i 's/^malwarepatrol_enabled="no"/malwarepatrol_enabled="yes"/' /etc/clamav-unofficial-sigs/master.conf
+sed -i 's/^malwarepatrol_receipt_code=".*"/malwarepatrol_receipt_code="YOUR-RECEIPT-NUMBER"/' /etc/clamav-unofficial-sigs/master.conf
+sed -i 's/^malwarepatrol_product_code=".*"/malwarepatrol_product_code="41"/' /etc/clamav-unofficial-sigs/master.conf
+sed -i 's/^malwarepatrol_list=".*"/malwarepatrol_list="clamav_basic"/' /etc/clamav-unofficial-sigs/master.conf
+sed -i 's/^malwarepatrol_free="yes"/malwarepatrol_free="no"/' /etc/clamav-unofficial-sigs/master.conf
+
+# 6) For safety, confirm that user_configuration_complete is set to yes
+sed -i 's/^user_configuration_complete="no"/user_configuration_complete="yes"/' /etc/clamav-unofficial-sigs/master.conf
+
+# 7) Clean up the /tmp files.
+rm -rf /tmp/clamav-unofficial-sigs*
+
+# 8) Run the first update of unofficial signatures
+echo "Running the first clamav-unofficial-sigs update..."
+/usr/local/bin/clamav-unofficial-sigs.sh
+
+# 9) Set up a cron job or systemd timer (Malware Patrol’s instructions mention cron):
+#    Example: run every hour at minute 20. (Adjust as needed.)
+#    crontab -l | { cat; echo "20 * * * * /usr/local/bin/clamav-unofficial-sigs.sh"; } | crontab -
+#
+#    Or create /etc/cron.d/clamav-unofficial-sigs with:
+#       20 * * * * root /usr/local/bin/clamav-unofficial-sigs.sh
+#
+#    For systemd, you could create your own .timer unit. Example:
+#       systemctl enable clamav-unofficial-sigs.timer
+#       systemctl start clamav-unofficial-sigs.timer
+
+echo -e "${BBlue}clamav-unofficial-sigs setup with Malware Patrol completed!${NC}"
+################################################################################
+
+
+# 9) Final check of ClamAV config
+echo -e "${BBlue}Running clamconf to check ClamAV configuration...${NC}"
+clamconf
+echo -e "${BBlue}ClamAV + Unofficial Signatures configuration completed!\n${NC}"
+
+###############################################################################
+# END OF CLAMAV CONFIGURATION
+###############################################################################
 
 # Rootkit Hunter
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
