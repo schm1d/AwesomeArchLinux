@@ -439,22 +439,22 @@ chmod 440 /etc/sudoers
 chown root:root /etc/sudoers
 
 # Harden Compilers by Restricting Access to Root User Only
-echo -e "${BBlue}Restricting access to compilers...${NC}"
-for compiler in gcc g++ clang make as ld; do
-    if command -v $compiler &> /dev/null; then
-        chmod 700 $(which $compiler)
-    fi
-done
-
-# Alternative approach using a 'compilers' group
-# groupadd compilers
-# usermod -aG compilers $USERNAME
+echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
 # for compiler in gcc g++ clang make as ld; do
 #     if command -v $compiler &> /dev/null; then
-#         chown root:compilers $(which $compiler)
-#         chmod 750 $(which $compiler)
+#         chmod 700 $(which $compiler)
 #     fi
 # done
+
+# Alternative approach using a 'compilers' group
+groupadd compilers
+usermod -aG compilers $USERNAME
+for compiler in gcc g++ clang make as ld; do
+    if command -v $compiler &> /dev/null; then
+        chown root:compilers $(which $compiler)
+        chmod 750 $(which $compiler)
+    fi
+done
 
 # Install arch-audit to Determine Vulnerable Packages
 echo -e "${BBlue}Installing arch-audit for vulnerability scanning...${NC}"
