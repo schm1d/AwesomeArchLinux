@@ -19,8 +19,18 @@ fi
 # ==============================
 # 2. Install Required Packages
 # ==============================
-echo -e "${BBlue}[+] Installing Firehol and dependencies...${NC}"
-pacman -Syu --noconfirm firehol wget git cronie
+echo -e "${BBlue}[+] Installing dependencies...${NC}"
+pacman -Syu --noconfirm wget git cronie
+
+echo -e "${BBlue}[+] Installing Firehol from AUR...${NC}"
+if ! command -v yay &> /dev/null; then
+    echo -e "${BBlue}[+] Installing yay AUR helper...${NC}"
+    git clone https://aur.archlinux.org/yay.git /tmp/yay
+    cd /tmp/yay || exit 1
+    makepkg -si --noconfirm
+    cd - || exit 1
+fi
+yay -S --noconfirm firehol
 
 # ==============================
 # 3. Configure Firehol Rules
