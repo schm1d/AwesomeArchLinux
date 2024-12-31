@@ -19,18 +19,21 @@ fi
 # ==============================
 # 2. Install Required Packages
 # ==============================
+
 echo -e "${BBlue}[+] Installing dependencies...${NC}"
 pacman -Syu --noconfirm wget git cronie
 
 echo -e "${BBlue}[+] Installing Firehol from AUR...${NC}"
 if ! command -v yay &> /dev/null; then
     echo -e "${BBlue}[+] Installing yay AUR helper...${NC}"
-    git clone https://aur.archlinux.org/yay.git /tmp/yay
+    su $USER -c git clone https://aur.archlinux.org/yay.git /tmp/yay
     cd /tmp/yay || exit 1
-    makepkg -si --noconfirm
+    su $USER -c makepkg -si --noconfirm
     cd - || exit 1
 fi
 yay -S --noconfirm firehol
+
+exit 
 
 # ==============================
 # 3. Configure Firehol Rules
@@ -65,31 +68,13 @@ EOF
 
 chmod 600 "$FIREHOL_CONF"
 
-# ==============================
-# 4. Download Firehol Blocklists
-# ==============================
-BLOCKLIST_DIR="/etc/firehol/ipsets"
-BLOCKLIST_FETCHER="https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/update-ipsets.sh"
-
-echo -e "${BBlue}[+] Setting up Firehol IP sets...${NC}"
-
-mkdir -p "$BLOCKLIST_DIR"
-cd "$BLOCKLIST_DIR" || exit 1
-
-# Download the blocklist update script
-wget -O update-ipsets.sh "$BLOCKLIST_FETCHER"
-chmod +x update-ipsets.sh
 
 # ==============================
 # 5. Automate Blocklist Updates
 # ==============================
-echo -e "${BBlue}[+] Scheduling automatic updates via cron...${NC}"
-CRON_JOB="0 2 * * * root /etc/firehol/ipsets/update-ipsets.sh && firehol restart"
+echo -e "${BBlue}[+] Scheduling automatic updates via cron, every 10 minutes...${NC}"
+CRON_JOB="*/10 * * * * root /sbin/update-ipsets && firehol restart"
 CRON_FILE="/etc/cron.d/firehol-ipsets"
-
-if [ -f "$CRON_FILE" ]; then
-    mv "$CRON_FILE" "$CRON_FILE.bak"
-fi
 
 cat <<EOF > "$CRON_FILE"
 $CRON_JOB
@@ -111,11 +96,26 @@ firehol status
 systemctl status firehol --no-pager
 
 # ==============================
-# 8. Verify IP Sets (Optional)
+# 8. Adding and updating ipsets 
+# ==============================
+echo -e "${BBlue}[+] Using update-ipsets to add ipsets blocklists...${NC}"
+
+update-ipsets enable firehol_level1
+update-ipsets enable iblocklist_ads
+update-ipsets enable iblocklist_badpeers
+update-ipsets enable iblocklist_spamhaus_drop
+update-ipsets enable esentire_emptyarray_ru
+update-ipsets enable esentire_auth_update_ru
+update-ipsets enable coinbl_hosts
+update-ipsets enable alienvault_reputation
+update-ipsets enable iblocklist_pedophiles
+update-ipsets enable iblocklist_spyware
+update-ipsets enable firehol_webserver
+
+# ==============================
+# 9. Verify IP Sets (Optional)
 # ==============================
 echo -e "${BBlue}[+] Testing IP sets (after download).${NC}"
 cd "$BLOCKLIST_DIR" || exit 1
-./update-ipsets.sh
 ipset list
-
 exit 0
