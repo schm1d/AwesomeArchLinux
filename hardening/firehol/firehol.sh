@@ -26,9 +26,9 @@ pacman -Syu --noconfirm wget git cronie
 echo -e "${BBlue}[+] Installing Firehol from AUR...${NC}"
 if ! command -v yay &> /dev/null; then
     echo -e "${BBlue}[+] Installing yay AUR helper...${NC}"
-    su $USER -c git clone https://aur.archlinux.org/yay.git /tmp/yay
+    su - $USER -c git clone https://aur.archlinux.org/yay.git /tmp/yay
     cd /tmp/yay || exit 1
-    su $USER -c makepkg -si --noconfirm
+    su - $USER -c makepkg -si --noconfirm
     cd - || exit 1
 fi
 yay -S --noconfirm firehol
