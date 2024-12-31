@@ -31,7 +31,7 @@ if ! command -v yay &> /dev/null; then
     su - $USER -c makepkg -si --noconfirm
     cd - || exit 1
 fi
-yay -S --noconfirm firehol
+su - $USER -c yay -S --noconfirm firehol
 
 exit 
 
