@@ -32,7 +32,14 @@ if ! command -v yay &> /dev/null; then
     cd - || exit 1
     rm -rf $HOME/yay
 fi
+
+mount -o remount,exec /tmp
+systemctl daemon-reload
+
 su - $USER -c "yay -S --noconfirm firehol"
+
+mount -o remount,noexec /tmp
+systemctl daemon-reload
 
 exit 
 
