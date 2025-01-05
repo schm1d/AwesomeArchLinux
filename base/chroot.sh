@@ -605,14 +605,14 @@ case $gpu_model in
 esac
 
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for Nvidia...${NC}"
-    sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_modeset)|g" /etc/mkinitcpio.conf
+    sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|g" /etc/mkinitcpio.conf
     # Add legacy package if needed
     mkinitcpio -p linux
 fi
 
 if [[ "$NVIDIA_CARD" = true ]]; then
     echo -e "${BBlue}Adjusting /etc/default/grub for Nvidia...${NC}"
-    sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=0"|g' /etc/default/grub
+    sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=1"|g' /etc/default/grub
 fi
 
 echo -e "${BBlue}Improving GRUB screen performance...${NC}"
