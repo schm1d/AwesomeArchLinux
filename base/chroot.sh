@@ -561,58 +561,121 @@ else
     echo "This is an unknown CPU."
 fi
 
-# Checking for NVIDIA GPUs
-if lspci | grep -e VGA -e 3D | grep -i nvidia > /dev/null; then
+#!/usr/bin/env bash
+
+# --- Colors for echoing status/info ---
+BBlue="\e[1;34m"
+NC="\e[0m"
+
+# --- Variables ---
+NVIDIA_CARD=false
+AMD_CARD=false
+KERNEL="$(uname -r)"
+
+# --- Detect NVIDIA ---
+if lspci | grep -E "VGA|3D" | grep -i nvidia &>/dev/null; then
     NVIDIA_CARD=true
-    echo -e "${BBlue}Found Nvidia GPU...${NC}"
-else
-    NVIDIA_CARD=false
+    echo -e "${BBlue}Found an NVIDIA GPU...${NC}"
 fi
 
-if [[ "$NVIDIA_CARD" = true ]]; then
+# --- If NVIDIA is found, handle NVIDIA drivers ---
+if [[ "$NVIDIA_CARD" == true ]]; then
     echo -e "${BBlue}Installing NVIDIA drivers...${NC}"
+    # Blacklist nouveau
+    mkdir -p /etc/modprobe.d
     touch /etc/modprobe.d/blacklist-nouveau.conf
-    echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
+    if ! grep -q "blacklist nouveau" /etc/modprobe.d/blacklist-nouveau.conf; then
+        echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
+    fi
+    
+    gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
+    echo "Detected GPU: $gpu_model"
+    echo "Running Kernel: $KERNEL"
 
-    # Detect NVIDIA GPU model
-gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
-
-echo "Detected GPU: $gpu_model"
-echo "Running Kernel: $kernel"
-
-
-# Determine the driver based on the GPU model and kernel
-case $gpu_model in
-    *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
-        pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils
-        ;;
-    *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
-        pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils
-        ;;
-    *"Kepler"*|"*NVE0"*)
-        pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils
-        ;;
-    *"Maxwell"*|"*NV110"*|*"GA102"*)
-        if [[ $kernel == *"linux-lts"* || $kernel == *"linux"* ]]; then
+    # Choose correct NVIDIA driver package based on model:
+    case $gpu_model in
+        *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
+            pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils
+            ;;
+        *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
+            pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils
+            ;;
+        *"Kepler"*|"*NVE0"*)
+            pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils
+            ;;
+        # Maxwell, Pascal, Turing, Ampere, Ada, etc.:
+        *"Maxwell"*|*"NV110"*|*"GA102"*)  # Maxwell fallback: Usually the standard driver works
+            if [[ "$KERNEL" == *"lts"* || "$KERNEL" == *"linux"* ]]; then
+                pacman -S --noconfirm nvidia nvidia-utils
+            else
+                pacman -S --noconfirm nvidia-dkms nvidia-utils
+            fi
+            ;;
+        *"Pascal"*|*"GTX 10"*|*"GP10"*|*"Turing"*|*"RTX 20"*|*"TU10"*|\
+         *"Ampere"*|*"RTX 30"*|*"GA10"*|*"Ada"*|*"RTX 40"*|*"AD10"*|*"RTX 50"* )
+            if [[ "$KERNEL" == *"lts"* || "$KERNEL" == *"linux"* ]]; then
+                pacman -S --noconfirm nvidia nvidia-utils
+            else
+                pacman -S --noconfirm nvidia-dkms nvidia-utils
+            fi
+            ;;
+        *)
+            echo "No matching NVIDIA driver found for: $gpu_model"
+            echo "Installing standard nvidia driver as a fallback..."
             pacman -S --noconfirm nvidia nvidia-utils
-        else
-            pacman -S --noconfirm nvidia-dkms nvidia-utils
-        fi
-        ;;
-    *)
-        echo "No supported NVIDIA GPU detected."
-        ;;
-esac
+            ;;
+    esac
 
-    echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for Nvidia...${NC}"
-    sed -i "s|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|g" /etc/mkinitcpio.conf
-    # Add legacy package if needed
-    mkinitcpio -p linux
+    # Adjust mkinitcpio.conf
+    echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
+    sed -i 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
+    # Re-generate initramfs
+    mkinitcpio -P  # -P regenerates all presets for all installed kernels
+
+    # Adjust GRUB
+    echo -e "${BBlue}Adjusting /etc/default/grub for NVIDIA...${NC}"
+    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia_drm.modeset=1\2|' /etc/default/grub
+
+    # Update GRUB config
+    if [[ -f /boot/grub/grub.cfg ]]; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+    fi
 fi
 
-if [[ "$NVIDIA_CARD" = true ]]; then
-    echo -e "${BBlue}Adjusting /etc/default/grub for Nvidia...${NC}"
-    sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=1"|g' /etc/default/grub
+# --- If not NVIDIA, check for AMD/Radeon ---
+if [[ "$NVIDIA_CARD" == false ]]; then
+    if lspci | grep -E "VGA|3D" | grep -Ei 'amd|radeon' &>/dev/null; then
+        AMD_CARD=true
+        echo -e "${BBlue}Found an AMD/Radeon GPU...${NC}"
+    fi
+
+    if [[ "$AMD_CARD" == true ]]; then
+        # Extract AMD GPU model
+        gpu_model=$(lspci | grep -Ei 'vga|3d|2d' | grep -Ei 'amd|radeon' | cut -d ':' -f3)
+        echo "Detected GPU: $gpu_model"
+
+        # A simple case for AMD/Radeon
+        case "$gpu_model" in
+            *"Radeon"*|*"RX 500"*|*"RX Vega"*|*"RDNA"*|*"RX 6000"*|*"RX 7000"*)
+                pacman -S --noconfirm xf86-video-amdgpu mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon
+                ;;
+            *"APU"*|*"Ryzen"*|*"Athlon"*|*"PRO"*)
+                # Typically these APUs work fine with mesa + integrated AMD driver
+                pacman -S --noconfirm mesa lib32-mesa
+                ;;
+            *)
+                echo "Unknown AMD GPU. Installing default AMD drivers (xf86-video-amdgpu, mesa)."
+                pacman -S --noconfirm xf86-video-amdgpu mesa
+                ;;
+        esac
+    fi
+fi
+
+# --- If neither NVIDIA nor AMD/Radeon was found, install basic drivers ---
+if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
+    echo -e "${BBlue}No supported NVIDIA or AMD GPU detected. Installing basic drivers...${NC}"
+    pacman -S --noconfirm xf86-video-vesa mesa
+    # Do NOT touch mkinitcpio or grub in this fallback.
 fi
 
 echo -e "${BBlue}Improving GRUB screen performance...${NC}"
