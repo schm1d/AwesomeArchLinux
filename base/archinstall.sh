@@ -32,12 +32,12 @@ fi
 ask_for_disk() {
 
     local disk
+
+    echo -e "${BBlue}The following disks are available on your system:\n${NC}"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+    echo
     
     while true; do
-        echo -e "${BBlue}The following disks are available on your system:\n${NC}"
-        lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
-        echo
-
         read -p "Select the target disk (e.g., sda, nvme0n1): " disk
         if [[ -b "/dev/$disk" ]]; then
             echo "$disk"
