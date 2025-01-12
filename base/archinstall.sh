@@ -128,7 +128,7 @@ echo -e "${BBlue}The following disks are available on your system:\n${NC}"
 TARGET_DISK=$(ask_for_disk)
 
 # Prompt for partition sizes
-echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
+echo -e "${BBlue}Set swap, /, /home and /var partition size:\n${NC}"
 SIZE_OF_SWAP=$(ask_for_numeric "Enter the size of SWAP in GB:")
 SIZE_OF_ROOT=$(ask_for_numeric "Enter the size of / in GB (remaining space goes to /home):")
 # Ask about /var
