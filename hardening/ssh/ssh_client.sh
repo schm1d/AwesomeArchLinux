@@ -3,8 +3,15 @@
 # Description: This script configures a client machine to connect to a hardened SSH server.
 # It generates an SSH key pair, configures SSH client settings, and assists in copying
 # the public key to the server.
+# Author: Bruno Schmid @brulliant
+# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+
 
 set -euo pipefail
+
+# Set up the variables
+BBlue='\033[1;34m'
+NC='\033[0m'
 
 # Variables (adjust as needed)
 SSH_PORT=22                  # Replace with the SSH port of the server if different
