@@ -127,10 +127,6 @@ ask_luks_password_until_success() {
 # 2. GATHER USER INPUT
 # -----------------------
 
-# Prompt for disk (only once)
-TARGET_DISK=$(ask_for_disk)
-DISK="/dev/$TARGET_DISK"
-echo -e "\nSelected disk: $DISK\n"
 
 # Prompt for username and hostname
 echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
@@ -159,6 +155,17 @@ CRYPT_NAME='crypt_lvm'
 LVM_NAME='lvm_arch'
 LUKS_KEYS='/etc/luksKeys'
 
+
+
+# -----------------------
+# 3. PARTITION & LUKS SETUP
+# -----------------------
+
+# Prompt for disk (only once)
+TARGET_DISK=$(ask_for_disk)
+DISK="/dev/$TARGET_DISK"
+echo -e "\nSelected disk: $DISK\n"
+
 # Determine the partition suffix (p for NVMe devices)
 # If the disk name ends with a digit, we typically need 'p' before the partition number
 #if [[ "$DISK" =~ [0-9]$ ]]; then
@@ -171,9 +178,6 @@ PARTITION1="${DISK}1"  # BIOS boot partition
 PARTITION2="${DISK}2"  # EFI partition
 PARTITION3="${DISK}3"  # LUKS partition
 
-# -----------------------
-# 3. PARTITION & LUKS SETUP
-# -----------------------
 
 echo -e "${BBlue}Preparing disk $DISK for UEFI and Encryption...${NC}"
 # Clear the partition table and create a fresh GPT
