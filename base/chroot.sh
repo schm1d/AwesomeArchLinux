@@ -486,9 +486,20 @@ else
     echo "User $USERNAME already exists." >&2
 fi
 
-echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
-echo -e "${BBlue}Password should be at least 12 characters long, contain 1 symbol, 1 number, upper and lowercase letters.${NC}"
-passwd "$USERNAME"
+# Set password for user (with loop for incorrect input)
+set +e # Disable 'exit on error' temporarily
+while true; do
+    echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
+    echo -e "${BBlue}Password should be at least 12 characters long, contain 1 symbol, 1 number, upper and lowercase letters.${NC}"
+    passwd "$USERNAME"
+    if [ $? -eq 0 ]; then
+        break # Exit loop if password change successful
+    else
+        echo -e "${BBlue}Password change failed. Please try again.${NC}"
+        sleep 1
+    fi
+done
+set -e # Re-enable 'exit on error'
 
 echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
 mkdir /home/$USERNAME/.ssh
