@@ -31,12 +31,12 @@ fi
 # Prompt user for a valid block device (e.g., sda, nvme0n1, etc.)
 ask_for_disk() {
 
-   echo -e "${BBlue}The following disks are available on your system:\n${NC}"
-   lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
-   echo
     local disk
     
     while true; do
+        echo -e "${BBlue}The following disks are available on your system:\n${NC}"
+        lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+        echo
 
         read -p "Select the target disk (e.g., sda, nvme0n1): " disk
         if [[ -b "/dev/$disk" ]]; then
@@ -161,15 +161,15 @@ LUKS_KEYS='/etc/luksKeys'
 
 # Determine the partition suffix (p for NVMe devices)
 # If the disk name ends with a digit, we typically need 'p' before the partition number
-if [[ "$DISK" =~ [0-9]$ ]]; then
-    PART_SUFFIX="p"
-else
-    PART_SUFFIX=""
-fi
+#if [[ "$DISK" =~ [0-9]$ ]]; then
+#    PART_SUFFIX="p"
+#else
+#    PART_SUFFIX=""
+#fi
 
-PARTITION1="${DISK}${PART_SUFFIX}1"  # BIOS boot partition
-PARTITION2="${DISK}${PART_SUFFIX}2"  # EFI partition
-PARTITION3="${DISK}${PART_SUFFIX}3"  # LUKS partition
+PARTITION1="${DISK}1"  # BIOS boot partition
+PARTITION2="${DISK}2"  # EFI partition
+PARTITION3="${DISK}3"  # LUKS partition
 
 # -----------------------
 # 3. PARTITION & LUKS SETUP
