@@ -32,11 +32,6 @@ fi
 ask_for_disk() {
 
     local disk
-
-    echo -e "${BBlue}The following disks are available on your system:\n${NC}"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
-    echo
-    
     while true; do
         read -p "Select the target disk (e.g., sda, nvme0n1): " disk
         if [[ -b "/dev/$disk" ]]; then
@@ -127,6 +122,15 @@ ask_luks_password_until_success() {
 # 2. GATHER USER INPUT
 # -----------------------
 
+echo -e "${BBlue}The following disks are available on your system:\n${NC}"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+    echo
+TARGET_DISK=$(ask_for_disk)
+
+# Prompt for partition sizes
+echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
+SIZE_OF_SWAP=$(ask_for_numeric "Enter the size of SWAP in GB:")
+SIZE_OF_ROOT=$(ask_for_numeric "Enter the size of / in GB (remaining space goes to /home):")
 
 # Prompt for username and hostname
 echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
@@ -134,11 +138,6 @@ USERNAME=$(ask_for_username)
 HOSTNAME=$(ask_for_hostname)
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME\n"
-
-# Prompt for partition sizes
-echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
-SIZE_OF_SWAP=$(ask_for_numeric "Enter the size of SWAP in GB:")
-SIZE_OF_ROOT=$(ask_for_numeric "Enter the size of / in GB (remaining space goes to /home):")
 
 # Ask about /var
 echo
@@ -156,23 +155,21 @@ LVM_NAME='lvm_arch'
 LUKS_KEYS='/etc/luksKeys'
 
 
-
 # -----------------------
 # 3. PARTITION & LUKS SETUP
 # -----------------------
 
 # Prompt for disk (only once)
-TARGET_DISK=$(ask_for_disk)
 DISK="/dev/$TARGET_DISK"
 echo -e "\nSelected disk: $DISK\n"
 
 # Determine the partition suffix (p for NVMe devices)
 # If the disk name ends with a digit, we typically need 'p' before the partition number
-#if [[ "$DISK" =~ [0-9]$ ]]; then
-#    PART_SUFFIX="p"
-#else
-#    PART_SUFFIX=""
-#fi
+if [[ "$DISK" =~ [0-9]$ ]]; then
+    PART_SUFFIX="p"
+else
+    PART_SUFFIX=""
+fi
 
 PARTITION1="${DISK}1"  # BIOS boot partition
 PARTITION2="${DISK}2"  # EFI partition
