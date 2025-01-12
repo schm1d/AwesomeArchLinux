@@ -438,24 +438,6 @@ echo -e "${BBlue}Setting permissions for /etc/sudoers${NC}"
 chmod 440 /etc/sudoers 
 chown root:root /etc/sudoers
 
-# Harden Compilers by Restricting Access to Root User Only
-echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
-# for compiler in gcc g++ clang make as ld; do
-#     if command -v $compiler &> /dev/null; then
-#         chmod 700 $(which $compiler)
-#     fi
-# done
-
-# Alternative approach using a 'compilers' group
-groupadd compilers
-usermod -aG compilers $USERNAME
-for compiler in gcc g++ clang make as ld; do
-    if command -v $compiler &> /dev/null; then
-        chown root:compilers $(which $compiler)
-        chmod 750 $(which $compiler)
-    fi
-done
-
 # Install arch-audit to Determine Vulnerable Packages
 echo -e "${BBlue}Installing arch-audit for vulnerability scanning...${NC}"
 pacman -S --noconfirm arch-audit
@@ -514,6 +496,24 @@ touch /home/$USERNAME/.ssh/authorized_keys
 chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 chown -R $USERNAME:$USERNAME /home/$USERNAME
+
+# Harden Compilers by Restricting Access to Root User Only
+echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
+# for compiler in gcc g++ clang make as ld; do
+#     if command -v $compiler &> /dev/null; then
+#         chmod 700 $(which $compiler)
+#     fi
+# done
+
+# Alternative approach using a 'compilers' group
+groupadd compilers
+usermod -aG compilers $USERNAME
+for compiler in gcc g++ clang make as ld; do
+    if command -v $compiler &> /dev/null; then
+        chown root:compilers $(which $compiler)
+        chmod 750 $(which $compiler)
+    fi
+done
 
 # Set default ACLs on home directory 
 echo -e "${BBlue}Setting default ACLs on home directory${NC}"
