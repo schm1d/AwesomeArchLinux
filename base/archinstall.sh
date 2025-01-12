@@ -131,14 +131,6 @@ TARGET_DISK=$(ask_for_disk)
 echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
 SIZE_OF_SWAP=$(ask_for_numeric "Enter the size of SWAP in GB:")
 SIZE_OF_ROOT=$(ask_for_numeric "Enter the size of / in GB (remaining space goes to /home):")
-
-# Prompt for username and hostname
-echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
-USERNAME=$(ask_for_username)
-HOSTNAME=$(ask_for_hostname)
-echo -e "\nUsername: $USERNAME"
-echo -e "Hostname: $HOSTNAME\n"
-
 # Ask about /var
 echo
 CREATE_VAR_PART=$(ask_yes_no "Do you want a separate /var partition?")
@@ -147,6 +139,14 @@ if [[ "$CREATE_VAR_PART" == "y" ]]; then
     SIZE_OF_VAR=$(ask_for_numeric "Enter the size of /var in GB:")
     VAR_SIZE="${SIZE_OF_VAR}G"
 fi
+
+# Prompt for username and hostname
+echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
+USERNAME=$(ask_for_username)
+HOSTNAME=$(ask_for_hostname)
+echo -e "\nUsername: $USERNAME"
+echo -e "Hostname: $HOSTNAME\n"
+
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
