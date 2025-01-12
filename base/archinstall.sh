@@ -6,17 +6,17 @@
 
 set -euo pipefail
 
-# Set up the color variables
+# --- Color variables ---
 BBlue='\033[1;34m'
 NC='\033[0m'
 
-# Check if the user is root.
+# --- Check if user is root ---
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root." >&2
    exit 1
 fi
 
-# Check if UEFI is supported
+# --- Check if UEFI is supported ---
 if [ ! -d "/sys/firmware/efi/efivars" ]; then
   echo -e "${BBlue}UEFI is not supported.${NC}"
   exit 1
@@ -24,64 +24,133 @@ else
   echo -e "${BBlue}\nUEFI is supported, proceeding...\n${NC}"
 fi
 
-# Function to validate numeric input
-validate_numeric_input() {
-  if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-    echo "Invalid input: $1. Please enter a positive number." >&2
-    exit 1
-  fi
+# -----------------------
+# 1. HELPER FUNCTIONS
+# -----------------------
+
+# Prompt user for a valid block device (e.g., sda, nvme0n1, etc.)
+ask_for_disk() {
+    local disk
+    while true; do
+        echo -e "${BBlue}The following disks are available on your system:\n${NC}"
+        lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+        echo
+
+        read -p "Select the target disk (e.g., sda): " disk
+        if [[ -b "/dev/$disk" ]]; then
+            echo "$disk"
+            return 0
+        else
+            echo -e "Error: Disk /dev/$disk does not exist or is not a block device. Please try again.\n" >&2
+        fi
+    done
 }
 
-# Get user input for the settings
-echo -e "${BBlue}The following disks are available on your system:\n${NC}"
-lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
-echo -e "\n"
+# Prompt user for a numeric input (like size in GB).
+ask_for_numeric() {
+    local prompt_msg="$1"
+    local input_val
+    while true; do
+        read -p "$prompt_msg " input_val
+        # Check if strictly numeric
+        if [[ "$input_val" =~ ^[0-9]+$ ]]; then
+            echo "$input_val"
+            return 0
+        else
+            echo -e "Invalid input: '$input_val'. Please enter a positive number.\n" >&2
+        fi
+    done
+}
 
-read -p 'Select the target disk (e.g., sda): ' TARGET_DISK
+# Prompt user for a valid username (basic validation).
+ask_for_username() {
+    local username
+    while true; do
+        read -p "Enter the new username: " username
+        if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo "$username"
+            return 0
+        else
+            echo -e "Invalid username: '$username'. Must begin with [a-z_] and contain only [a-z0-9_-].\n" >&2
+        fi
+    done
+}
+
+# Prompt user for a valid hostname.
+ask_for_hostname() {
+    local hostname
+    while true; do
+        read -p "Enter the new hostname: " hostname
+        if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]*$ ]]; then
+            echo "$hostname"
+            return 0
+        else
+            echo -e "Invalid hostname: '$hostname'. Must begin with alphanumeric and contain only alphanumerics, dots, or hyphens.\n" >&2
+        fi
+    done
+}
+
+# Prompt user yes/no question.
+ask_yes_no() {
+    local prompt_msg="$1"
+    local choice
+    while true; do
+        read -p "$prompt_msg (y/n): " choice
+        case "$choice" in
+            [Yy]) echo "y"; return 0 ;;
+            [Nn]) echo "n"; return 0 ;;
+            *) echo -e "Invalid choice. Please type 'y' or 'n'.\n" >&2 ;;
+        esac
+    done
+}
+
+# Loop until cryptsetup open succeeds (or user cancels).
+ask_luks_password_until_success() {
+    local partition="$1"
+    local crypt_name="$2"
+
+    while true; do
+        echo -e "${BBlue}\nOpening the LUKS container to test password...${NC}"
+        if cryptsetup -v luksOpen "$partition" "$crypt_name"; then
+            # If it opens successfully, close it and break the loop
+            cryptsetup -v luksClose "$crypt_name"
+            break
+        else
+            echo -e "\nWrong password or operation canceled. Please try again.\n" >&2
+        fi
+    done
+}
+
+# -----------------------
+# 2. GATHER USER INPUT
+# -----------------------
+
+# Prompt for disk
+TARGET_DISK=$(ask_for_disk)
 DISK="/dev/$TARGET_DISK"
-if [ ! -b "$DISK" ]; then
-  echo "Disk $DISK does not exist." >&2
-  exit 1
-fi
+echo -e "\nSelected disk: $DISK\n"
 
-echo -e "\n"
-
+# Prompt for username and hostname
 echo -e "${BBlue}Choosing a username and a hostname:\n${NC}"
+USERNAME=$(ask_for_username)
+HOSTNAME=$(ask_for_hostname)
+echo -e "\nUsername: $USERNAME"
+echo -e "Hostname: $HOSTNAME\n"
 
-read -p 'Enter the new username: ' USERNAME
-read -p 'Enter the new hostname: ' HOSTNAME
-echo -e "\n"
-
-# Validate USERNAME and HOSTNAME
-# Ensure USERNAME is valid
-if ! [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-  echo "Invalid username: $USERNAME" >&2
-  exit 1
-fi
-
-# Ensure HOSTNAME is valid
-if ! [[ "$HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
-  echo "Invalid hostname: $HOSTNAME" >&2
-  exit 1
-fi
-
+# Prompt for partition sizes
 echo -e "${BBlue}Set / and Swap partition size:\n${NC}"
+SIZE_OF_SWAP=$(ask_for_numeric "Enter the size of SWAP in GB:")
+SIZE_OF_ROOT=$(ask_for_numeric "Enter the size of / in GB (the remaining space will go to /home):")
 
-read -p 'Enter the size of SWAP in GB: ' SIZE_OF_SWAP
-validate_numeric_input "$SIZE_OF_SWAP"
-read -p 'Enter the size of / in GB. The remaining space will be allocated to /home: ' SIZE_OF_ROOT
-validate_numeric_input "$SIZE_OF_ROOT"
-echo -e "\n"
-
-# Ask the user if they want a separate /var partition
-read -p 'Do you want a separate /var partition? (y/n): ' CREATE_VAR_PART
-if [[ "$CREATE_VAR_PART" =~ ^[Yy]$ ]]; then
-  read -p 'Enter the size of /var in GB: ' SIZE_OF_VAR
-  validate_numeric_input "$SIZE_OF_VAR"
-  VAR_SIZE="${SIZE_OF_VAR}G"
-else
-  VAR_SIZE=""
+# Ask about /var
+echo
+CREATE_VAR_PART=$(ask_yes_no "Do you want a separate /var partition?")
+VAR_SIZE=""
+if [[ "$CREATE_VAR_PART" == "y" ]]; then
+    SIZE_OF_VAR=$(ask_for_numeric "Enter the size of /var in GB:")
+    VAR_SIZE="${SIZE_OF_VAR}G"
 fi
+
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -123,25 +192,28 @@ echo -e "${BBlue}Creating a LUKS partition...${NC}"
 sgdisk -n 3:1130496:$(sgdisk -E "$DISK") -t 3:8309 -c 3:"Linux LUKS" "$DISK"
 partprobe $DISK
 
-# Create the LUKS container
-echo -e "${BBlue}Creating the LUKS container...${NC}"
+# -----------------------
+# 3. LUKS OPERATIONS
+# -----------------------
+
+PARTITION3="/dev/${TARGET_DISK}3"       # Example usage, adapt to your partition layout
+CRYPT_NAME="cryptroot"
+
+echo -e "${BBlue}\nCreating the LUKS container on $PARTITION3...${NC}"
 cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 \
   --iter-time 3000 --use-random --type luks1 luksFormat "$PARTITION3"
 
-# Opening LUKS container to test
-echo -e "${BBlue}Opening the LUKS container to test password...${NC}"
-cryptsetup -v luksOpen "$PARTITION3" "$CRYPT_NAME"
-cryptsetup -v luksClose "$CRYPT_NAME"
+# Prompt repeatedly for the correct LUKS passphrase
+ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
 
 # Create a LUKS key of size 2048 and save it as boot.key
-echo -e "${BBlue}Creating the LUKS key for $CRYPT_NAME...${NC}"
+echo -e "${BBlue}\nCreating the LUKS key for $CRYPT_NAME...${NC}"
 dd if=/dev/urandom of=./boot.key bs=2048 count=1
 cryptsetup -v luksAddKey -i 1 "$PARTITION3" ./boot.key
 
-# Unlock LUKS container with the boot.key file
-echo -e "${BBlue}Testing the LUKS keys for $CRYPT_NAME...${NC}"
+# Test the LUKS key
+echo -e "${BBlue}\nTesting the LUKS key for $CRYPT_NAME...${NC}"
 cryptsetup -v luksOpen "$PARTITION3" "$CRYPT_NAME" --key-file ./boot.key
-echo -e "\n"
 
 # Create the LVM physical volume, volume group and logical volumes
 echo -e "${BBlue}Creating LVM logical volumes on $LVM_NAME...${NC}"
