@@ -499,6 +499,18 @@ while true; do
         sleep 1
     fi
 done
+
+# Set password for root (with loop for incorrect input)
+while true; do
+    echo -e "${BBlue}Setting root password...${NC}"
+    passwd root
+    if [ $? -eq 0 ]; then
+        break # Exit loop if password change successful
+    else
+        echo -e "${BBlue}Root password change failed. Please try again.${NC}"
+        sleep 1
+    fi
+done
 set -e # Re-enable 'exit on error'
 
 echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
@@ -710,10 +722,21 @@ grub-mkconfig -o /boot/grub/grub.cfg &&\
 grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
 
 # Set GRUB Password
-echo -e "${BBlue}Setting GRUB password...${NC}"
-grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
-GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
-rm /tmp/grubpass
+set +e  # Temporarily disable 'exit on error'
+while true; do
+  echo -e "${BBlue}Setting GRUB password...${NC}"
+  grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
+  GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
+  rm /tmp/grubpass
+  if [[ -n "$GRUB_PASS" ]]; then
+     break # Exit loop if the password was correctly created
+  else
+      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
+      sleep 1 # Add a delay
+  fi
+done
+set -e # Re-enable 'exit on error'
+
 cat <<EOF >> /etc/grub.d/40_custom
 set superusers="$USERNAME"
 password_pbkdf2 $USERNAME $GRUB_PASS
