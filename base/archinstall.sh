@@ -171,9 +171,9 @@ else
     PART_SUFFIX=""
 fi
 
-PARTITION1="${DISK}1"  # BIOS boot partition
-PARTITION2="${DISK}2"  # EFI partition
-PARTITION3="${DISK}3"  # LUKS partition
+PARTITION1="${DISK}${PART_SUFFIX}1"  # BIOS boot partition
+PARTITION2="${DISK}${PART_SUFFIX}2"  # EFI partition
+PARTITION3="${DISK}${PART_SUFFIX}3"  # LUKS partition
 
 
 echo -e "${BBlue}Preparing disk $DISK for UEFI and Encryption...${NC}"
