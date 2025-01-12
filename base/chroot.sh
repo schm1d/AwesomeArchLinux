@@ -827,9 +827,6 @@ chmod 0600 /etc/login.defs
 chown root:root /etc/issue
 chmod 644 /etc/issue
 
-echo -e "${BBlue}Setting root password...${NC}"
-passwd root
-
 # Remove deprecated PAM modules
 echo -e "${BBlue}Removing deprecated pam_tally2.so references...${NC}"
 sed -i '/pam_tally2.so/d' /etc/pam.d/system-auth
