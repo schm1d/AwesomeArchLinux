@@ -701,6 +701,47 @@ if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
     # Do NOT touch mkinitcpio or grub in this fallback.
 fi
 
+# Bluetooth
+# Using lsusb as a simple check. Another approach could be `lspci | grep -i bluetooth` or `hciconfig`.
+if lsusb | grep -iq "bluetooth"; then
+  echo "[+] Bluetooth hardware detected."
+
+  # 3. Install necessary Bluetooth packages
+  echo "[+] Installing necessary Bluetooth packages..."
+  pacman -S --noconfirm bluez bluez-utils
+
+  # Enable and start the Bluetooth service
+  systemctl enable bluetooth
+  systemctl start bluetooth
+
+  # 4. Harden Bluetooth configuration
+  # Make a backup of /etc/bluetooth/main.conf
+  if [[ -f /etc/bluetooth/main.conf ]]; then
+    cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
+    echo "[+] Backup created: /etc/bluetooth/main.conf.bak"
+  else
+    touch /etc/bluetooth/main.conf
+    echo "[General]" >> /etc/bluetooth/main.conf
+  fi
+
+  echo "[+] Hardening Bluetooth configuration..."
+  # Insert or update under [General] section
+  sed -i '/^\[General\]/a \
+# Hardening settings below\n\
+AutoEnable=false\n\
+DiscoverableTimeout=0\n\
+PairableTimeout=0\n\
+Privacy=device\n\
+JustWorksRepairing=confirm\n\
+MinEncryptionKeySize=16\n' /etc/bluetooth/main.conf
+
+  echo "[+] Bluetooth installation and hardening completed successfully."
+
+else
+  echo "[!] No Bluetooth hardware detected on this system. Exiting."
+  exit 0
+fi
+
 echo -e "${BBlue}Improving GRUB screen performance...${NC}"
 # 1) For GRUB_GFXMODE
 if grep -q '^GRUB_GFXMODE=' /etc/default/grub; then
