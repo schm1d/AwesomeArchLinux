@@ -321,6 +321,9 @@ chmod +x /mnt/chroot.sh
 cp ../hardening/sysctl/sysctl.sh /mnt
 chmod +x /mnt/sysctl.sh
 
+cp ../hardening/ssh/ssh.sh /mnt
+chmod +x /mnt/ssh.sh
+
 # Shred local chroot.sh to avoid leaving sensitive data
 shred -u ./chroot.sh
 
