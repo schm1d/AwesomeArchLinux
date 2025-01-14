@@ -160,6 +160,12 @@ echo -e "${BBlue}Installing and configuring haveged...${NC}"
 pacman -S --noconfirm haveged
 systemctl enable haveged.service
 
+echo -e "${BBlue}Installing file security utility pax-utils & arch-audit...${NC}"
+pacman -S --noconfirm 	arch-audit pax-utils
+
+echo -e "${BBlue}Installing lynis...${NC}"
+pacman -S --noconfirm lynis
+
 ###############################################################################
 # CLAMAV CONFIGURATION
 ###############################################################################
