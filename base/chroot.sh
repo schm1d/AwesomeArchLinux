@@ -562,7 +562,7 @@ generate_ssh_key() {
 echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
 
     # Create the config file if it doesn't exist
-    mkdir -p "$HOME/.ssh"
+    mkdir -p /home/$USERNAME/.ssh
     touch "$SSH_CONFIG_FILE"
 
     # Backup existing config if not already backed up
@@ -600,8 +600,8 @@ EOF
 
 hash_known_hosts() {
     echo -e "${BBlue}Hashing known_hosts file...${NC}"
-    ssh-keygen -H -f "$HOME/.ssh/known_hosts" 2>/dev/null || true
-    rm -f "$HOME/.ssh/known_hosts.old"
+    ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true
+    rm -f "/home/$USERNAME/.ssh/known_hosts.old"
 }
 
 chmod 700 /home/$USERNAME/.ssh
