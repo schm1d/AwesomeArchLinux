@@ -704,43 +704,49 @@ fi
 # Bluetooth
 # Using lsusb as a simple check. Another approach could be `lspci | grep -i bluetooth` or `hciconfig`.
 if lsusb | grep -iq "bluetooth"; then
-  echo "[+] Bluetooth hardware detected."
-
-  # 3. Install necessary Bluetooth packages
-  echo "[+] Installing necessary Bluetooth packages..."
+  echo -e "${BBlue [+] Bluetooth hardware detected.${NC}"
   pacman -S --noconfirm bluez bluez-utils
 
-  # Enable and start the Bluetooth service
   systemctl enable bluetooth
   systemctl start bluetooth
 
-  # 4. Harden Bluetooth configuration
-  # Make a backup of /etc/bluetooth/main.conf
-  if [[ -f /etc/bluetooth/main.conf ]]; then
-    cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
-    echo "[+] Backup created: /etc/bluetooth/main.conf.bak"
-  else
-    touch /etc/bluetooth/main.conf
-    echo "[General]" >> /etc/bluetooth/main.conf
-  fi
+  # Backup main.conf
+  [[ -f /etc/bluetooth/main.conf ]] && cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
 
-  echo "[+] Hardening Bluetooth configuration..."
-  # Insert or update under [General] section
-  sed -i '/^\[General\]/a \
-# Hardening settings below\n\
-AutoEnable=false\n\
-DiscoverableTimeout=0\n\
-PairableTimeout=0\n\
-Privacy=device\n\
-JustWorksRepairing=confirm\n\
-MinEncryptionKeySize=16\n' /etc/bluetooth/main.conf
+  cat <<EOF >/etc/bluetooth/main.conf
+[General]
+# Hardening settings
+AutoEnable=false
+DiscoverableTimeout=0
+PairableTimeout=0
+Privacy=device
+JustWorksRepairing=confirm
+MinEncryptionKeySize=16
+SecureConnectionsOnly=true
+ControllerMode=le
+Name=RandomizedDevice
+EOF
 
-  echo "[+] Bluetooth installation and hardening completed successfully."
+  # (Optional) Systemd override
+  mkdir -p /etc/systemd/system/bluetooth.service.d
+  cat <<EOF >/etc/systemd/system/bluetooth.service.d/override.conf
+[Service]
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=~CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+MemoryDenyWriteExecute=true
+EOF
 
+  systemctl daemon-reload
+  systemctl restart bluetooth
+  echo -e "${BBlue [+] Bluetooth installation and hardening completed successfully.${NC}"
 else
-  echo "[!] No Bluetooth hardware detected on this system. Exiting."
-  exit 0
+  echo -e "${BBlue [!] No Bluetooth hardware detected on this system.${NC}"
 fi
+
 
 echo -e "${BBlue}Improving GRUB screen performance...${NC}"
 # 1) For GRUB_GFXMODE
