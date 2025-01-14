@@ -548,7 +548,7 @@ done
 set -e # Re-enable 'exit on error'
 
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
-./ssh.sh
+/ssh.sh
 
 generate_ssh_key() {
     if [ ! -f "$SSH_KEY_FILE" ]; then
@@ -607,6 +607,8 @@ hash_known_hosts() {
 chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 chown -R $USERNAME:$USERNAME /home/$USERNAME
+
+shred -u /ssh.sh
 
 # Harden Compilers by Restricting Access to Root User Only
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
@@ -1007,6 +1009,7 @@ fi
 
 echo -e "${BBlue}Hardening sysctl settings...${NC}"
 /sysctl.sh
+shred -u /sysctl.sh
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 shred -u /chroot.sh
