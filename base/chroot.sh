@@ -32,6 +32,9 @@ RULES_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/
 # Specify the path to the local auditd rules file
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_PORT=22 # Change to the desired SSH port.
+SSH_CONFIG_FILE="$HOME/.ssh/config"
+SSH_KEY_TYPE="ed25519"
+SSH_KEY_FILE="$HOME/.ssh/id_$KEY_TYPE"
 
 # Determine the partition suffix (p for NVMe devices)
 if [[ "$DISK" =~ [0-9]$ ]]; then
@@ -98,9 +101,6 @@ echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 echo -e "${BBlue}Setting hostname...${NC}"
 echo "$HOSTNAME" > /etc/hostname
 echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
-
-echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
-./ssh.sh
 
 # Create a new resolv.conf file with the following settings:
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
@@ -541,9 +541,63 @@ while true; do
 done
 set -e # Re-enable 'exit on error'
 
-echo -e "${BBlue}Setting up /home and .ssh/ of the user $USERNAME...${NC}"
-mkdir /home/$USERNAME/.ssh
-touch /home/$USERNAME/.ssh/authorized_keys
+echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
+./ssh.sh
+
+generate_ssh_key() {
+    if [ ! -f "$SSH_KEY_FILE" ]; then
+        echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
+        ssh-keygen -t $SSH_KEY_TYPE -C "$USERNAME" -f "$SSH_KEY_FILE"
+    else
+        echo -e "${BBlue}SSH key ($SSH_KEY_FILE) already exists.${NC}"
+    fi
+}
+
+echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
+
+    # Create the config file if it doesn't exist
+    mkdir -p "$HOME/.ssh"
+    touch "$SSH_CONFIG_FILE"
+
+    # Backup existing config if not already backed up
+    if [ ! -f "${SSH_CONFIG_FILE}.bak" ]; then
+        cp "$SSH_CONFIG_FILE" "${SSH_CONFIG_FILE}.bak"
+    fi
+
+    # Remove any existing configuration for the server
+    sed -i.bak '/^Host myserver$/,/^Host /d' "$SSH_CONFIG_FILE" || true
+
+    echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_FILE)...${NC}"
+        ssh-keygen -t $SSH_KEY_TYPE -C "$USERNAME" -f "$SSH_KEY_FILE"
+
+    # Append new configuration
+    cat >> "$SSH_CONFIG_FILE" <<EOF
+
+Host myserver
+    HostName
+    Port $SSH_PORT
+    User $USERNAME
+    HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+    KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
+    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+    MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+    PubkeyAuthentication yes
+    PasswordAuthentication yes
+    IdentitiesOnly yes
+    IdentityFile $SSH_KEY_FILE
+    ServerAliveInterval 10
+    ServerAliveCountMax 2
+EOF
+
+    echo "SSH client configuration updated."
+}
+
+hash_known_hosts() {
+    echo -e "${BBlue}Hashing known_hosts file...${NC}"
+    ssh-keygen -H -f "$HOME/.ssh/known_hosts" 2>/dev/null || true
+    rm -f "$HOME/.ssh/known_hosts.old"
+}
+
 chmod 700 /home/$USERNAME/.ssh
 chmod 600 /home/$USERNAME/.ssh/authorized_keys
 chown -R $USERNAME:$USERNAME /home/$USERNAME
