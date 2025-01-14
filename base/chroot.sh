@@ -34,7 +34,7 @@ LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_PORT=22 # Change to the desired SSH port.
 SSH_CONFIG_FILE="$HOME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
-SSH_KEY_FILE="$HOME/.ssh/id_$KEY_TYPE"
+SSH_KEY_FILE="$HOME/.ssh/id_$SSH_KEY_TYPE"
 
 # Determine the partition suffix (p for NVMe devices)
 if [[ "$DISK" =~ [0-9]$ ]]; then
