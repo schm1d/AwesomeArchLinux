@@ -596,7 +596,7 @@ Host myserver
 EOF
 
     echo "SSH client configuration updated."
-}
+  
 
 hash_known_hosts() {
     echo -e "${BBlue}Hashing known_hosts file...${NC}"
