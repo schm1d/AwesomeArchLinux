@@ -602,6 +602,7 @@ hash_known_hosts() {
     echo -e "${BBlue}Hashing known_hosts file...${NC}"
     ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true
     rm -f "/home/$USERNAME/.ssh/known_hosts.old"
+    touch /home/$USERNAME/.ssh/authorized_keys
 }
 
 chmod 700 /home/$USERNAME/.ssh
