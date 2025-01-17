@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Description: This is the chroot, which should be executed via 'archinstall.sh'.
+# Description: This is the chroot script for Arch Linux installation.
 # Author: Bruno Schmid @brulliant
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
@@ -16,27 +16,27 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-
-# The below values will be changed by archinstall.sh
-DISK='<your_target_disk>'
-CRYPT_NAME='crypt_lvm'
-LVM_NAME='lvm_arch'
-USERNAME='<user_name_goes_here>'
-HOSTNAME='<hostname_goes_here>'
-TIMEZONE='Europe/Zurich'
+# --- These values MUST be replaced by archinstall.sh ---
+DISK="${_INSTALL_DISK}"       # Example: /dev/sda or /dev/nvme0n1
+CRYPT_NAME="crypt_lvm"
+LVM_NAME="lvm_arch"
+USERNAME="${_INSTALL_USER}" # Example: myuser
+HOSTNAME="${_INSTALL_HOST}" # Example: myhostname
+TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
-LUKS_KEYS='/etc/luksKeys/boot.key' # Where you will store the root partition key
+LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
+SSH_PORT=22 
 
-# Define the URL of the auditd rules to download
-RULES_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules"
-# Specify the path to the local auditd rules file
+
+# --- Other Variables ---
+RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
-SSH_PORT=22 # Change to the desired SSH port.
-SSH_CONFIG_FILE="$HOME/.ssh/config"
+SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
-SSH_KEY_FILE="$HOME/.ssh/id_$SSH_KEY_TYPE"
+SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
 
-# Determine the partition suffix (p for NVMe devices)
+
+# --- Partition Handling ---
 if [[ "$DISK" =~ [0-9]$ ]]; then
     PART_SUFFIX="p"
 else
@@ -47,38 +47,80 @@ PARTITION1="${DISK}${PART_SUFFIX}1"
 PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
-# Retrieve the UUID of the LUKS partition
 UUID=$(cryptsetup luksUUID "$PARTITION3")
 
 CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
 kernel=$(uname -r)
 
+# --- Basic System Configuration ---
 pacman-key --init
 pacman-key --populate archlinux
 
-echo -e "${BBlue}Downloading the latest nanorc configuration file from Github...${NC}"
+timedatectl set-timezone "$TIMEZONE"
+hwclock --systohc --utc
+
+sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+export LANG="$LOCALE"
+
+echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf
+echo 'FONT=lat9w-16' >> /etc/vconsole.conf
+echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
+
+# Set hostname
+echo -e "${BBlue}Setting hostname...${NC}"
+echo "$HOSTNAME" > /etc/hostname
+echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
+
+# --- Network Configuration ---
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+
+echo "[Resolve]" > /etc/systemd/resolved.conf
+echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
+echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
+echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
+systemctl enable --now systemd-resolved.service  # Enable and start
+
+
+# --- IMPORTANT: User creation MUST come before home directory configuration ---
+# Add the user
+echo -e "${BBlue}Adding the user $USERNAME...${NC}"
+if ! id -u "$USERNAME" >/dev/null 2>&1; then
+  useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"  # Create user
+  chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
+  echo -e "${BBlue}User $USERNAME created.${NC}"
+
+else
+    echo "User $USERNAME already exists." >&2
+fi
+
+# --- Now configure Nano settings (after user creation) ---
+echo -e "${BBlue}Downloading nanorc...${NC}"
 curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
 
+
 # Add the following settings to the nano configuration file to harden it
-echo "set constantshow" >> ~/.nanorc
-echo "set locking" >> ~/.nanorc
-echo "set nohelp" >> ~/.nanorc
-echo "set nonewlines" >> ~/.nanorc
-echo "set nowrap" >> ~/.nanorc
-echo "set minibar" >> ~/.nanorc
-echo "set zap" >> ~/.nanorc
-echo "set linenumbers" >> ~/.nanorc
-echo "set tabsize 4" >> ~/.nanorc
-echo "set tabstospaces" >> ~/.nanorc
-echo "set wordbounds punct,alnum" >> ~/.nanorc
-echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> ~/.nanorc
+echo "set constantshow" >> /home/$USERNAME/.nanorc
+echo "set locking" >> /home/$USERNAME/.nanorc
+echo "set nohelp" >> /home/$USERNAME/.nanorc
+echo "set nonewlines" >> /home/$USERNAME/.nanorc
+echo "set nowrap" >> /home/$USERNAME/.nanorc
+echo "set minibar" >> /home/$USERNAME/.nanorc
+echo "set zap" >> /home/$USERNAME/.nanorc
+echo "set linenumbers" >> /home/$USERNAME/.nanorc
+echo "set tabsize 4" >> /home/$USERNAME/.nanorc
+echo "set tabstospaces" >> /home/$USERNAME/.nanorc
+echo "set wordbounds punct,alnum" >> /home/$USERNAME/.nanorc
+echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/$USERNAME/.nanorc
 
 # Enable and set a working backup directory
-set backup                              # Creates backups of your current file.
-set backupdir "~/.cache/nano/backups/"  # The location of the backups.
+echo "set backup" >> /home/$USERNAME/.nanorc           # Creates backups of your current file.
+echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/$USERNAME/.nanorc # The location of the backups.
 
 # Set permissions on the configuration file to prevent unauthorized changes 
-chmod 600 ~/.nanorc
+chmod 600 /home/$USERNAME/.nanorc
 
 # Set the timezone
 echo -e "${BBlue}Setting the timezone to $TIMEZONE...${NC}"
@@ -97,27 +139,6 @@ echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
 echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
 echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
-# Set hostname
-echo -e "${BBlue}Setting hostname...${NC}"
-echo "$HOSTNAME" > /etc/hostname
-echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
-
-# Create a new resolv.conf file with the following settings:
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
-echo "nameserver 8.8.8.8" >> /etc/resolv.conf  
-
-# Configure DNS to prevent leaks
-echo "Configuring DNS to prevent DNS leaks..."
-echo "[Resolve]" > /etc/systemd/resolved.conf
-echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
-echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
-echo "DNSSEC=yes" >> /etc/systemd/resolved.conf # Change to DNSSEC=allow-downgrade if needed
-systemctl enable systemd-resolved.service
-
-# Hardening hosts.allow and hosts.deny
-echo "sshd : ALL : ALLOW" > /etc/hosts.allow
-echo "ALL: LOCAL, 127.0.0.1" >> /etc/hosts.allow
-echo "ALL: ALL" > /etc/hosts.deny
 
 echo -e "${BBlue}Configuring IPtables...${NC}"
 # Set default policies
@@ -150,10 +171,6 @@ systemctl enable logrotate.timer
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
-if ! pacman -S --noconfirm rng-tools; then
-  echo "Failed to install rng-tools" >&2
-  exit 1
-fi
 systemctl enable rngd
 
 echo -e "${BBlue}Installing and configuring haveged...${NC}"
@@ -402,9 +419,6 @@ systemctl enable auditd
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager
 
-echo -e "${BBlue}Enabling NetworkManager...${NC}"
-systemctl enable iwd
-
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
 
@@ -419,7 +433,7 @@ systemctl enable fail2ban
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
-port    = $SSH_PORT
+port    = "$SSH_PORT"
 logpath = %(sshd_log)s
 maxretry = 5
 EOF
@@ -510,16 +524,6 @@ EOF
 systemctl enable arch-audit.timer
 systemctl start arch-audit.timer
 
-# Add the user
-echo -e "${BBlue}Adding the user $USERNAME...${NC}"
-if ! id -u "$USERNAME" >/dev/null 2>&1; then
-    useradd -m -G sudo,wheel -s /bin/zsh "$USERNAME"
-    echo -e "${BBlue}User $USERNAME created.${NC}"
-
-else
-    echo "User $USERNAME already exists." >&2
-fi
-
 # Set password for user (with loop for incorrect input)
 set +e # Disable 'exit on error' temporarily
 while true; do
@@ -550,71 +554,66 @@ set -e # Re-enable 'exit on error'
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 /ssh.sh
 
-generate_ssh_key() {
-    if [ ! -f "$SSH_KEY_FILE" ]; then
-        echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
-        ssh-keygen -t $SSH_KEY_TYPE -C "$USERNAME" -f "$SSH_KEY_FILE"
-    else
-        echo -e "${BBlue}SSH key ($SSH_KEY_FILE) already exists.${NC}"
-    fi
-}
+# --- SSH Configuration ---
+configure_ssh() {
+  # --- SSH Key Generation ---
+  if [ ! -f "$SSH_KEY_FILE" ]; then
+    echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
+    ssh-keygen -t "$SSH_KEY_TYPE" -C "$USERNAME@$HOSTNAME" -f "$SSH_KEY_FILE" -q -N "" # -q for quiet, -N for no passphrase
+  else
+    echo -e "${BBlue}SSH key ($SSH_KEY_FILE) already exists.${NC}"
+  fi
 
-echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
+  # --- SSH Client Configuration ---
+  echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
 
-    # Create the config file if it doesn't exist
-    mkdir -p /home/$USERNAME/.ssh
-    touch "$SSH_CONFIG_FILE"
+  mkdir -p "/home/$USERNAME/.ssh"  # Ensure directory exists
+  # Backup existing config (improved)
+  if [ -f "$SSH_CONFIG_FILE" ] && [ ! -f "$SSH_CONFIG_FILE.bak" ]; then
+    cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
+  fi
 
-    # Backup existing config if not already backed up
-    if [ ! -f "${SSH_CONFIG_FILE}.bak" ]; then
-        cp "$SSH_CONFIG_FILE" "${SSH_CONFIG_FILE}.bak"
-    fi
-
-    # Remove any existing configuration for the server
-    sed -i.bak '/^Host myserver$/,/^Host /d' "$SSH_CONFIG_FILE" || true
-
-    echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_FILE)...${NC}"
-        ssh-keygen -t $SSH_KEY_TYPE -C "$USERNAME" -f "$SSH_KEY_FILE"
-
-    # Append new configuration
-    cat >> "$SSH_CONFIG_FILE" <<EOF
-
-Host myserver
-    HostName
-    Port $SSH_PORT
-    User $USERNAME
+  # Use 'install' for atomic file writing
+  install -Dm644 /dev/stdin "$SSH_CONFIG_FILE" <<EOF
+Host "$HOSTNAME"  # Use hostname for Host entry
+    HostName "$HOSTNAME" # or IP if needed
+    Port "$SSH_PORT"
+    User "$USERNAME"
+    IdentityFile "$SSH_KEY_FILE"
+    # ... other SSH options as needed ...
     HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
     KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
     Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
     MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
-    PubkeyAuthentication yes
-    PasswordAuthentication yes
-    IdentitiesOnly yes
-    IdentityFile $SSH_KEY_FILE
-    ServerAliveInterval 10
-    ServerAliveCountMax 2
+
 EOF
 
-    echo "SSH client configuration updated."
-  
+  echo "SSH client configuration updated."
 
-echo -e "${BBlue}Hashing known_hosts file...${NC}"
-ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true
-touch /home/$USERNAME/.ssh/authorized_keys    
+  # --- SSH Server Configuration (Optional) ---
+  # ... (Add server-side configuration here if needed) ...
 
-chmod 700 /home/$USERNAME/.ssh
-chmod 600 /home/$USERNAME/.ssh/authorized_keys
-chown -R $USERNAME:$USERNAME /home/$USERNAME
+  # --- SSH Finalization ---
+  echo -e "${BBlue}Hashing known_hosts file...${NC}"
+  ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true # Suppress stderr if file doesn't exist
 
-shred -u /ssh.sh
+  touch "/home/$USERNAME/.ssh/authorized_keys"
+  chmod 700 "/home/$USERNAME/.ssh"
+  chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
+  chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
+
+  if [ -f "/ssh.sh" ]; then
+    shred -u /ssh.sh  # Only shred if /ssh.sh exists
+  fi
+
+} # End of configure_ssh() function
+
+
+configure_ssh # Call the SSH configuration function
+
 
 # Harden Compilers by Restricting Access to Root User Only
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
-# for compiler in gcc g++ clang make as ld; do
-#     if command -v $compiler &> /dev/null; then
-#         chmod 700 $(which $compiler)
-#     fi
-# done
 
 # Alternative approach using a 'compilers' group
 groupadd compilers
@@ -658,25 +657,28 @@ GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryp
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
 
-# Checking for CPU model
-echo -e "${BBlue}Installing CPU ucode...${NC}"
-# Use grep to check if the string 'Intel' is present in the CPU info
-if [[ $CPU_VENDOR_ID =~ "GenuineIntel" ]]; then
-    pacman -S intel-ucode --noconfirm
-    
-     # If the string 'Intel' is not present, check if the string 'AMD' is present
-elif [[ $CPU_VENDOR_ID =~ "AuthenticAMD" ]]; then
-      pacman -S amd-ucode --noconfirm
-else
-    # If neither 'Intel' nor 'AMD' is present, then it is an unknown CPU
-    echo "This is an unknown CPU."
-fi
+
+# --- CPU Microcode Installation ---
+install_cpu_microcode() {
+  echo -e "${BBlue}Installing CPU ucode...${NC}"
+
+  if [[ "$CPU_VENDOR_ID" =~ "GenuineIntel" ]]; then
+    if ! pacman -Qi intel-ucode &>/dev/null; then  # Check if already installed
+      pacman -S --noconfirm intel-ucode
+    fi
+  elif [[ "$CPU_VENDOR_ID" =~ "AuthenticAMD" ]]; then
+    if ! pacman -Qi amd-ucode &>/dev/null; then  # Check if already installed
+      pacman -S --noconfirm amd-ucode
+    fi
+  else
+    echo -e "${BBlue}Unknown CPU vendor: $CPU_VENDOR_ID. Skipping microcode installation.${NC}"
+  fi
+}
+
+install_cpu_microcode # Call the function
 
 #!/usr/bin/env bash
 
-# --- Colors for echoing status/info ---
-BBlue="\e[1;34m"
-NC="\e[0m"
 
 # --- Variables ---
 NVIDIA_CARD=false
@@ -789,96 +791,120 @@ if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
     # Do NOT touch mkinitcpio or grub in this fallback.
 fi
 
-# Bluetooth
-# Using lsusb as a simple check. Another approach could be `lspci | grep -i bluetooth` or `hciconfig`.
-if lsusb | grep -iq "bluetooth"; then
-  echo -e "${BBlue [+] Bluetooth hardware detected.${NC}"
-  pacman -S --noconfirm bluez bluez-utils
+# --- Bluetooth Configuration ---
+configure_bluetooth() {
+  if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then  # Improved detection
+    echo -e "${BBlue}Bluetooth hardware detected.${NC}"
 
-  systemctl enable bluetooth
-  systemctl start bluetooth
+    if ! pacman -Qi bluez bluez-utils &>/dev/null; then # Check if already installed
+      pacman -S --noconfirm bluez bluez-utils
+    fi
 
-  # Backup main.conf
-  [[ -f /etc/bluetooth/main.conf ]] && cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.bak
+    # Backup main.conf (using install -Dm)
+    install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
 
-  cat <<EOF >/etc/bluetooth/main.conf
-[General]
-# Hardening settings
-AutoEnable=false
-DiscoverableTimeout=0
-PairableTimeout=0
-Privacy=device
-JustWorksRepairing=confirm
-MinEncryptionKeySize=16
-SecureConnectionsOnly=true
-ControllerMode=le
-Name=RandomizedDevice
-EOF
-
-  # (Optional) Systemd override
-  mkdir -p /etc/systemd/system/bluetooth.service.d
-  cat <<EOF >/etc/systemd/system/bluetooth.service.d/override.conf
-[Service]
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-NoNewPrivileges=true
-CapabilityBoundingSet=~CAP_SYS_ADMIN
-RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-MemoryDenyWriteExecute=true
-EOF
-
-  systemctl daemon-reload
-  systemctl restart bluetooth
-  echo -e "${BBlue [+] Bluetooth installation and hardening completed successfully.${NC}"
-else
-  echo -e "${BBlue [!] No Bluetooth hardware detected on this system.${NC}"
-fi
+    cat <<EOF >/etc/bluetooth/main.conf
+        [General]
+        # Hardening and Auto-Enable settings
+        AutoEnable=true             # Enable automatic Bluetooth activation
+        DiscoverableTimeout=0
+        PairableTimeout=0
+        Privacy=device              # Enhanced privacy
+        JustWorksRepairing=confirm   # Require confirmation for pairing repairs
+        MinEncryptionKeySize=16      # Minimum encryption key size
+        SecureConnectionsOnly=true   # Enforce secure connections
+        ControllerMode=le           # Use Low Energy mode
+        Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
+    EOF
 
 
-echo -e "${BBlue}Improving GRUB screen performance...${NC}"
-# 1) For GRUB_GFXMODE
-if grep -q '^GRUB_GFXMODE=' /etc/default/grub; then
-  sed -i 's/^GRUB_GFXMODE=.*/GRUB_GFXMODE=1024x768x32/' /etc/default/grub
-else
-  echo "GRUB_GFXMODE=1024x768x32" >> /etc/default/grub
-fi
+    # Systemd override (using install -Dm)
+    mkdir -p /etc/systemd/system/bluetooth.service.d
+    cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
+        [Service]
+        ProtectSystem=strict
+        ProtectHome=read-only
+        PrivateTmp=true
+        NoNewPrivileges=true
+        CapabilityBoundingSet=~CAP_SYS_ADMIN
+        RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+        MemoryDenyWriteExecute=true
+    EOF
 
-# 2) For GRUB_GFXPAYLOAD_LINUX
-if grep -q '^GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
-  sed -i 's/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=keep/' /etc/default/grub
-else
-  echo "GRUB_GFXPAYLOAD_LINUX=keep" >> /etc/default/grub
-fi
-
-echo -e "${BBlue}Setting up GRUB...${NC}"
-mkdir /boot/grub
-grub-mkconfig -o /boot/grub/grub.cfg &&\
-grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
-
-# Set GRUB Password
-set +e  # Temporarily disable 'exit on error'
-while true; do
-  echo -e "${BBlue}Setting GRUB password...${NC}"
-  grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
-  GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
-  rm /tmp/grubpass
-  if [[ -n "$GRUB_PASS" ]]; then
-     break # Exit loop if the password was correctly created
+    systemctl daemon-reload
+    systemctl enable --now bluetooth  # Enable and start Bluetooth
+    echo -e "${BBlue}Bluetooth installation, configuration, and hardening complete.${NC}"
   else
-      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
-      sleep 1 # Add a delay
+    echo -e "${BBlue}No Bluetooth hardware detected.${NC}"
   fi
-done
-set -e # Re-enable 'exit on error'
+}
 
-cat <<EOF >> /etc/grub.d/40_custom
+configure_bluetooth  # Call the function
+
+
+# --- GRUB Configuration and Installation ---
+configure_grub() {
+  echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
+
+  # More robust way to set GRUB_GFXMODE and GRUB_GFXPAYLOAD_LINUX
+  sed -i -E \
+    -e 's/^#?(GRUB_GFXMODE=).*/\1"1024x768x32,auto"/' \
+    -e 's/^#?(GRUB_GFXPAYLOAD_LINUX=).*/\1"keep"/' \
+    /etc/default/grub
+
+
+  echo -e "${BBlue}Setting up GRUB...${NC}"
+  mkdir -p /boot/grub  # -p to create parent directories if needed
+
+  # Generate initial grub.cfg BEFORE installing 
+  grub-mkconfig -o /boot/grub/grub.cfg
+
+
+  grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
+
+
+  # --- Set GRUB Password (more robust) ---
+  set +e  # Temporarily disable 'exit on error'
+  GRUB_PASS="" # Initialize the variable
+
+  while [[ -z "$GRUB_PASS" ]]; do # Loop until a password is generated
+    echo -e "${BBlue}Setting GRUB password...${NC}"
+    read -r -s -p "Enter GRUB password: " GRUB_PASS_INPUT  # Get the password directly from user
+    echo
+    read -r -s -p "Confirm GRUB password: " GRUB_PASS_CONFIRM
+    echo
+
+    if [[ "$GRUB_PASS_INPUT" == "$GRUB_PASS_CONFIRM" ]]; then
+      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '{print $NF}')
+      if [[ -n "$GRUB_PASS" ]]; then
+        echo -e "${BBlue}GRUB password set successfully.${NC}"
+      else
+        echo -e "${BBlue}Error generating GRUB password hash. Please try again.${NC}"
+      fi
+    else
+      echo -e "${BBlue}Passwords do not match. Please try again.${NC}"
+    fi
+    sleep 1
+  done
+  set -e # Re-enable 'exit on error'
+
+  # Use install (or cat with sudo) for custom GRUB entry:
+  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF  # Use install for atomic writing
+#!/bin/sh
+exec tail -n +3 \$0
+# Add custom GRUB menu entries below this line
+
 set superusers="$USERNAME"
-password_pbkdf2 $USERNAME $GRUB_PASS
+password_pbkdf2 $USERNAME "$GRUB_PASS"  # Quote the password variable!
 EOF
-grub-mkconfig -o /boot/grub/grub.cfg
 
-chmod 600 $LUKS_KEYS
+  grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
+
+
+  chmod 600 "$LUKS_KEYS"
+}
+
+configure_grub # Call the function
 
 # Creating a cool /etc/issue
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
@@ -1005,9 +1031,31 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
 
-echo -e "${BBlue}Hardening sysctl settings...${NC}"
-/sysctl.sh
-shred -u /sysctl.sh
+# --- System Hardening (sysctl) ---
+harden_sysctl() {
+  local sysctl_file="/etc/sysctl.d/99-hardening.conf"
+
+  echo -e "${BBlue}Applying sysctl hardening settings...${NC}"
+
+  if [ ! -x "/sysctl.sh" ]; then #Check if the file exists and is executable
+    echo "Error: /sysctl.sh not found or not executable" >&2
+    exit 1
+  fi
+
+  # Execute sysctl.sh and write output to sysctl config file.
+ /sysctl.sh > "$sysctl_file"  # Write the sysctl settings to a persistent configuration file
+
+  # Apply the settings immediately
+  sysctl --system  # Apply settings from /etc/sysctl.d/*.conf
+
+
+  if [ -f "/sysctl.sh" ]; then
+    shred -u /sysctl.sh # Only shred if the file exists.
+  fi
+
+}
+
+harden_sysctl # Call the function
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 shred -u /chroot.sh
