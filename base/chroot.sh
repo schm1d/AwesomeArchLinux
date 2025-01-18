@@ -387,7 +387,7 @@ echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
 pacman -S --noconfirm fail2ban
 systemctl enable fail2ban
 
-cat <EOF > /etc/fail2ban/jail.d/sshd.conf
+cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
 port    = "$SSH_PORT"
