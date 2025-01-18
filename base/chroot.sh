@@ -577,18 +577,17 @@ configure_ssh() {
 
   # Use 'install' for atomic file writing
   install -Dm644 /dev/stdin "$SSH_CONFIG_FILE" <<EOF
-Host "$HOSTNAME"  # Use hostname for Host entry
-    HostName "$HOSTNAME" # or IP if needed
-    Port "$SSH_PORT"
-    User "$USERNAME"
-    IdentityFile "$SSH_KEY_FILE"
-    # ... other SSH options as needed ...
-    HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-    KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
-    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
-    MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
-
-EOF
+  Host "$HOSTNAME"  # Use hostname for Host entry
+  HostName "$HOSTNAME" # or IP if needed
+  Port "$SSH_PORT"
+  User "$USERNAME"
+  IdentityFile "$SSH_KEY_FILE"
+  # ... other SSH options as needed ...
+  HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+  KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
+  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+  MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+  EOF
 
   echo "SSH client configuration updated."
 
@@ -806,31 +805,31 @@ configure_bluetooth() {
     install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
 
     cat <<EOF >/etc/bluetooth/main.conf
-        [General]
-        # Hardening and Auto-Enable settings
-        AutoEnable=true             # Enable automatic Bluetooth activation
-        DiscoverableTimeout=0
-        PairableTimeout=0
-        Privacy=device              # Enhanced privacy
-        JustWorksRepairing=confirm   # Require confirmation for pairing repairs
-        MinEncryptionKeySize=16      # Minimum encryption key size
-        SecureConnectionsOnly=true   # Enforce secure connections
-        ControllerMode=le           # Use Low Energy mode
-        Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
+    [General]
+    # Hardening and Auto-Enable settings
+    AutoEnable=true             # Enable automatic Bluetooth activation
+    DiscoverableTimeout=0
+    PairableTimeout=0
+    Privacy=device              # Enhanced privacy
+    JustWorksRepairing=confirm   # Require confirmation for pairing repairs
+    MinEncryptionKeySize=16      # Minimum encryption key size
+    SecureConnectionsOnly=true   # Enforce secure connections
+    ControllerMode=le           # Use Low Energy mode
+    Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
     EOF
 
 
     # Systemd override (using install -Dm)
     mkdir -p /etc/systemd/system/bluetooth.service.d
     cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
-        [Service]
-        ProtectSystem=strict
-        ProtectHome=read-only
-        PrivateTmp=true
-        NoNewPrivileges=true
-        CapabilityBoundingSet=~CAP_SYS_ADMIN
-        RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-        MemoryDenyWriteExecute=true
+    [Service]
+    ProtectSystem=strict
+    ProtectHome=read-only
+    PrivateTmp=true
+    NoNewPrivileges=true
+    CapabilityBoundingSet=~CAP_SYS_ADMIN
+    RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+    MemoryDenyWriteExecute=true
     EOF
 
     systemctl daemon-reload
@@ -896,12 +895,12 @@ configure_grub # Call the function
 
 # Use install (or cat with sudo) for custom GRUB entry:
 install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF  # Use install for atomic writing
-  !/bin/sh
-  exec tail -n +3 \$0
-  # Add custom GRUB menu entries below this line
+!/bin/sh
+exec tail -n +3 \$0
+# Add custom GRUB menu entries below this line
 
-  set superusers="$USERNAME"
-  password_pbkdf2 $USERNAME "$GRUB_PASS"  # Quote the password variable!
+set superusers="$USERNAME"
+password_pbkdf2 "$USERNAME" "$GRUB_PASS"
 EOF
 
 grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
