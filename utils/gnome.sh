@@ -24,12 +24,12 @@ echo -e "${BBlue}Installing GNOME Desktop packages...${NC}"
 pacman -S --noconfirm \
   gdm gitg gnome gnome-appfolders-manager gnome-backgrounds gnome-bluetooth-3.0 gnome-connections gnome-logs \
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware gnome-keybindings eog libforensic1394\
-  gnome-keyring network-manager-gnome network-manager-openvpn-gnome nautilus parted regexxer seahorse-nautilus jomon \
+  gnome-keyring networkmanager-openvpn nautilus parted regexxer seahorse-nautilus jomon gnome-control-center\
   sushi xdg-desktop-portal-gnome ghex gnome-font-viewer gnome-multi-writer gnome-nettool gnome-session gnome-screenshot \
   gnome-shell gnome-shell-extension-arc-menu gnome-shell-extension-caffeine gnome-shell-extension-dash-to-panel veracrypt \
   gnome-shell-extension-desktop-icons-ng gnome-shell-extension-vitals gnome-software gnome-terminal gnome-tweaks onionshare \
   gsettings-desktop-schemas gsettings-system-schemas gthumb gtranslator komikku mutter gedit gedit-plugins chromium mvt \
-  xdg-user-dirs-gtk xorg-server xdg-utils xinit x11-session-utils x11-xserver-utils gnome-control-center torbrowser-launcher
+  xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit torbrowser-launcher networkmanager-openconnect networkmanager-strongswan
 
 # 2) Enable GDM service
 echo -e "${BBlue}Enabling GDM (GNOME Display Manager)...${NC}"
