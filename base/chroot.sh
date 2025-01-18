@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Description: This is the chroot script for Arch Linux installation.
 # Author: Bruno Schmid @brulliant
@@ -670,7 +670,54 @@ install_cpu_microcode() {
 
 install_cpu_microcode # Call the function
 
-#!/usr/bin/env bash
+# --- Bluetooth Configuration ---
+configure_bluetooth() {
+  if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then  # Improved detection
+    echo -e "${BBlue}Bluetooth hardware detected.${NC}"
+
+    if ! pacman -Qi bluez bluez-utils &>/dev/null; then # Check if already installed
+      pacman -S --noconfirm bluez bluez-utils
+    fi
+
+    # Backup main.conf (using install -Dm)
+    install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
+
+    cat <<EOF >/etc/bluetooth/main.conf
+    [General]
+    # Hardening and Auto-Enable settings
+    AutoEnable=true             # Enable automatic Bluetooth activation
+    DiscoverableTimeout=0
+    PairableTimeout=0
+    Privacy=device              # Enhanced privacy
+    JustWorksRepairing=confirm   # Require confirmation for pairing repairs
+    MinEncryptionKeySize=16      # Minimum encryption key size
+    SecureConnectionsOnly=true   # Enforce secure connections
+    ControllerMode=le           # Use Low Energy mode
+    Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
+    EOF
+
+    # Systemd override (using install -Dm)
+    mkdir -p /etc/systemd/system/bluetooth.service.d
+    cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
+    [Service]
+    ProtectSystem=strict
+    ProtectHome=read-only
+    PrivateTmp=true
+    NoNewPrivileges=true
+    CapabilityBoundingSet=~CAP_SYS_ADMIN
+    RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+    MemoryDenyWriteExecute=true
+    EOF
+
+    systemctl daemon-reload
+    systemctl enable bluetooth  # Enable and start Bluetooth
+    echo -e "${BBlue}Bluetooth installation, configuration, and hardening complete.${NC}"
+  else
+    echo -e "${BBlue}No Bluetooth hardware detected.${NC}"
+  fi
+}
+
+configure_bluetooth  # Call the function
 
 # --- Variables ---
 NVIDIA_CARD=false
