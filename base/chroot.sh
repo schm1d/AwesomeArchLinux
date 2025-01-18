@@ -81,7 +81,7 @@ echo "[Resolve]" > /etc/systemd/resolved.conf
 echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
 echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
 echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
-systemctl enable --now systemd-resolved.service  # Enable and start
+systemctl enable systemd-resolved.service  # Enable and start
 
 
 # --- IMPORTANT: User creation MUST come before home directory configuration ---
@@ -832,7 +832,7 @@ configure_bluetooth() {
     EOF
 
     systemctl daemon-reload
-    systemctl enable --now bluetooth  # Enable and start Bluetooth
+    systemctl enable bluetooth  # Enable and start Bluetooth
     echo -e "${BBlue}Bluetooth installation, configuration, and hardening complete.${NC}"
   else
     echo -e "${BBlue}No Bluetooth hardware detected.${NC}"
