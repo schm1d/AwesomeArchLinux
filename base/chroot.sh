@@ -18,7 +18,7 @@ fi
 
 # --- These values MUST be replaced by archinstall.sh ---
 DISK="${_INSTALL_DISK}"       # Example: /dev/sda or /dev/nvme0n1
-CRYPT_NAME="crypt_lvm"
+#CRYPT_NAME="crypt_lvm"
 LVM_NAME="lvm_arch"
 USERNAME="${_INSTALL_USER}" # Example: myuser
 HOSTNAME="${_INSTALL_HOST}" # Example: myhostname
@@ -41,14 +41,13 @@ else
     PART_SUFFIX=""
 fi
 
-PARTITION1="${DISK}${PART_SUFFIX}1"
-PARTITION2="${DISK}${PART_SUFFIX}2"
+#PARTITION1="${DISK}${PART_SUFFIX}1"
+#PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
 UUID=$(cryptsetup luksUUID "$PARTITION3")
 
 CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
-kernel=$(uname -r)
 
 # --- Basic System Configuration ---
 pacman-key --init
@@ -385,7 +384,6 @@ systemctl enable dhcpcd.service
 # Installing Fail2ban
 echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
 pacman -S --noconfirm fail2ban
-systemctl enable fail2ban
 
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
@@ -394,7 +392,8 @@ port    = "$SSH_PORT"
 logpath = %(sshd_log)s
 maxretry = 5
 EOF
-systemctl restart fail2ban
+
+systemctl enable fail2ban
 
 # Configure sudo
 echo -e "${BBlue}Hardening sudo...${NC}"
@@ -494,11 +493,11 @@ else
 fi
 
 # Enable and set a working backup directory
-echo "set backup" >> /home/$USERNAME/.nanorc           # Creates backups of your current file.
-echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/$USERNAME/.nanorc # The location of the backups.
+echo "set backup" >> /home/"$USERNAME"/.nanorc           # Creates backups of your current file.
+echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/"$USERNAME"/.nanorc # The location of the backups.
 
 # Set permissions on the configuration file to prevent unauthorized changes
-chmod 600 /home/$USERNAME/.nanorc
+chmod 600 /home/"$USERNAME"/.nanorc
 
 # Set password for user (with loop for incorrect input)
 set +e # Disable 'exit on error' temporarily
@@ -532,18 +531,18 @@ echo -e "${BBlue}Downloading nanorc...${NC}"
 curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
 
 # Add the following settings to the nano configuration file to harden it
-echo "set constantshow" >> /home/$USERNAME/.nanorc
-echo "set locking" >> /home/$USERNAME/.nanorc
-echo "set nohelp" >> /home/$USERNAME/.nanorc
-echo "set nonewlines" >> /home/$USERNAME/.nanorc
-echo "set nowrap" >> /home/$USERNAME/.nanorc
-echo "set minibar" >> /home/$USERNAME/.nanorc
-echo "set zap" >> /home/$USERNAME/.nanorc
-echo "set linenumbers" >> /home/$USERNAME/.nanorc
-echo "set tabsize 4" >> /home/$USERNAME/.nanorc
-echo "set tabstospaces" >> /home/$USERNAME/.nanorc
-echo "set wordbounds punct,alnum" >> /home/$USERNAME/.nanorc
-echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/$USERNAME/.nanorc
+echo "set constantshow" >> /home/"$USERNAME"/.nanorc
+echo "set locking" >> /home/"$USERNAME"/.nanorc
+echo "set nohelp" >> /home/"$USERNAME"/.nanorc
+echo "set nonewlines" >> /home/"$USERNAME"/.nanorc
+echo "set nowrap" >> /home/"$USERNAME"/.nanorc
+echo "set minibar" >> /home/"$USERNAME"/.nanorc
+echo "set zap" >> /home/"$USERNAME"/.nanorc
+echo "set linenumbers" >> /home/"$USERNAME"/.nanorc
+echo "set tabsize 4" >> /home/"$USERNAME"/.nanorc
+echo "set tabstospaces" >> /home/"$USERNAME"/.nanorc
+echo "set wordbounds punct,alnum" >> /home/"$USERNAME"/.nanorc
+echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/"$USERNAME"/.nanorc
 
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 /ssh.sh
@@ -611,11 +610,11 @@ echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${N
 
 # Alternative approach using a 'compilers' group
 groupadd compilers
-usermod -aG compilers $USERNAME
+usermod -aG compilers "$USERNAME"
 for compiler in gcc g++ clang make as ld; do
-    if command -v $compiler &> /dev/null; then
-        chown root:compilers $(which $compiler)
-        chmod 750 $(which $compiler)
+    if command -v "$compiler" &> /dev/null; then
+        chown root:compilers "$(which $compiler)"
+        chmod 750 "$(which $compiler)"
     fi
 done
 
@@ -682,32 +681,32 @@ configure_bluetooth() {
     # Backup main.conf (using install -Dm)
     install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
 
-    cat <<EOF >/etc/bluetooth/main.conf
-    [General]
-    # Hardening and Auto-Enable settings
-    AutoEnable=true             # Enable automatic Bluetooth activation
-    DiscoverableTimeout=0
-    PairableTimeout=0
-    Privacy=device              # Enhanced privacy
-    JustWorksRepairing=confirm   # Require confirmation for pairing repairs
-    MinEncryptionKeySize=16      # Minimum encryption key size
-    SecureConnectionsOnly=true   # Enforce secure connections
-    ControllerMode=le           # Use Low Energy mode
-    Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
-    EOF
+cat <<EOF >/etc/bluetooth/main.conf
+[General]
+# Hardening and Auto-Enable settings
+AutoEnable=true             # Enable automatic Bluetooth activation
+DiscoverableTimeout=0
+PairableTimeout=0
+Privacy=device              # Enhanced privacy
+JustWorksRepairing=confirm   # Require confirmation for pairing repairs
+MinEncryptionKeySize=16      # Minimum encryption key size
+SecureConnectionsOnly=true   # Enforce secure connections
+ControllerMode=le           # Use Low Energy mode
+Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
+EOF
 
-    # Systemd override (using install -Dm)
-    mkdir -p /etc/systemd/system/bluetooth.service.d
-    cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
-    [Service]
-    ProtectSystem=strict
-    ProtectHome=read-only
-    PrivateTmp=true
-    NoNewPrivileges=true
-    CapabilityBoundingSet=~CAP_SYS_ADMIN
-    RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-    MemoryDenyWriteExecute=true
-    EOF
+  # Systemd override (using install -Dm)
+  mkdir -p /etc/systemd/system/bluetooth.service.d
+cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
+[Service]
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=~CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+MemoryDenyWriteExecute=true
+EOF
 
     systemctl daemon-reload
     systemctl enable bluetooth  # Enable and start Bluetooth
@@ -874,15 +873,15 @@ configure_grub() {
   done
   set -e # Re-enable 'exit on error'
 
-  # Use install (or cat with sudo) for custom GRUB entry:
-  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF
-  #!/bin/sh
-  exec tail -n +3 \$0
-  # Add custom GRUB menu entries below this line
+# Use install (or cat with sudo) for custom GRUB entry:
+install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF
+#!/bin/sh
+exec tail -n +3 \$0
+# Add custom GRUB menu entries below this line
 
-  set superusers="$USERNAME"
-  password_pbkdf2 "$USERNAME" "$GRUB_PASS"
-  EOF
+set superusers="$USERNAME"
+password_pbkdf2 "$USERNAME" "$GRUB_PASS"
+EOF
 
   grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
 
