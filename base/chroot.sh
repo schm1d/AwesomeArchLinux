@@ -900,11 +900,10 @@ set superusers="$USERNAME"
 password_pbkdf2 $USERNAME "$GRUB_PASS"  # Quote the password variable!
 EOF
 
-  grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
+grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
 
+chmod 600 "$LUKS_KEYS"
 
-  chmod 600 "$LUKS_KEYS"
-}
 
 configure_grub # Call the function
 
