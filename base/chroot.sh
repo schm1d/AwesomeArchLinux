@@ -889,23 +889,25 @@ configure_grub() {
     sleep 1
   done
   set -e # Re-enable 'exit on error'
+ 
+ }
 
-  # Use install (or cat with sudo) for custom GRUB entry:
-  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF  # Use install for atomic writing
-#!/bin/sh
-exec tail -n +3 \$0
-# Add custom GRUB menu entries below this line
+configure_grub # Call the function
 
-set superusers="$USERNAME"
-password_pbkdf2 $USERNAME "$GRUB_PASS"  # Quote the password variable!
+# Use install (or cat with sudo) for custom GRUB entry:
+install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF  # Use install for atomic writing
+  !/bin/sh
+  exec tail -n +3 \$0
+  # Add custom GRUB menu entries below this line
+
+  set superusers="$USERNAME"
+  password_pbkdf2 $USERNAME "$GRUB_PASS"  # Quote the password variable!
 EOF
 
 grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
 
 chmod 600 "$LUKS_KEYS"
 
-
-configure_grub # Call the function
 
 # Creating a cool /etc/issue
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
