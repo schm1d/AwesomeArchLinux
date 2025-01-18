@@ -11,7 +11,7 @@ BBlue='\033[1;34m'
 NC='\033[0m'
 
 # -- EDIT THIS to your actual desktop user --
-TARGET_USER="myusername"
+TARGET_USER="$USER"
 HOME_DIR="/home/$TARGET_USER"
 
 if [ "$(id -u)" -ne 0 ]; then
