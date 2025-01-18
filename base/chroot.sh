@@ -83,45 +83,6 @@ echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
 echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
 systemctl enable systemd-resolved.service  # Enable and start
 
-
-# --- IMPORTANT: User creation MUST come before home directory configuration ---
-# Add the user
-echo -e "${BBlue}Adding the user $USERNAME...${NC}"
-if ! id -u "$USERNAME" >/dev/null 2>&1; then
-  useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"  # Create user
-  chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
-  echo -e "${BBlue}User $USERNAME created.${NC}"
-
-else
-    echo "User $USERNAME already exists." >&2
-fi
-
-# --- Now configure Nano settings (after user creation) ---
-echo -e "${BBlue}Downloading nanorc...${NC}"
-curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
-
-
-# Add the following settings to the nano configuration file to harden it
-echo "set constantshow" >> /home/$USERNAME/.nanorc
-echo "set locking" >> /home/$USERNAME/.nanorc
-echo "set nohelp" >> /home/$USERNAME/.nanorc
-echo "set nonewlines" >> /home/$USERNAME/.nanorc
-echo "set nowrap" >> /home/$USERNAME/.nanorc
-echo "set minibar" >> /home/$USERNAME/.nanorc
-echo "set zap" >> /home/$USERNAME/.nanorc
-echo "set linenumbers" >> /home/$USERNAME/.nanorc
-echo "set tabsize 4" >> /home/$USERNAME/.nanorc
-echo "set tabstospaces" >> /home/$USERNAME/.nanorc
-echo "set wordbounds punct,alnum" >> /home/$USERNAME/.nanorc
-echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/$USERNAME/.nanorc
-
-# Enable and set a working backup directory
-echo "set backup" >> /home/$USERNAME/.nanorc           # Creates backups of your current file.
-echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/$USERNAME/.nanorc # The location of the backups.
-
-# Set permissions on the configuration file to prevent unauthorized changes 
-chmod 600 /home/$USERNAME/.nanorc
-
 # Set the timezone
 echo -e "${BBlue}Setting the timezone to $TIMEZONE...${NC}"
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
@@ -524,6 +485,25 @@ EOF
 systemctl enable arch-audit.timer
 systemctl start arch-audit.timer
 
+# --- IMPORTANT: User creation MUST come before home directory configuration ---
+# Add the user
+echo -e "${BBlue}Adding the user $USERNAME...${NC}"
+if ! id -u "$USERNAME" >/dev/null 2>&1; then
+  useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"  # Create user
+  chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
+  echo -e "${BBlue}User $USERNAME created.${NC}"
+
+else
+    echo "User $USERNAME already exists." >&2
+fi
+
+# Enable and set a working backup directory
+echo "set backup" >> /home/$USERNAME/.nanorc           # Creates backups of your current file.
+echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/$USERNAME/.nanorc # The location of the backups.
+
+# Set permissions on the configuration file to prevent unauthorized changes 
+chmod 600 /home/$USERNAME/.nanorc
+
 # Set password for user (with loop for incorrect input)
 set +e # Disable 'exit on error' temporarily
 while true; do
@@ -550,6 +530,26 @@ while true; do
     fi
 done
 set -e # Re-enable 'exit on error'
+
+# --- Now configure Nano settings (after user creation) ---
+echo -e "${BBlue}Downloading nanorc...${NC}"
+curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
+
+
+# Add the following settings to the nano configuration file to harden it
+echo "set constantshow" >> /home/$USERNAME/.nanorc
+echo "set locking" >> /home/$USERNAME/.nanorc
+echo "set nohelp" >> /home/$USERNAME/.nanorc
+echo "set nonewlines" >> /home/$USERNAME/.nanorc
+echo "set nowrap" >> /home/$USERNAME/.nanorc
+echo "set minibar" >> /home/$USERNAME/.nanorc
+echo "set zap" >> /home/$USERNAME/.nanorc
+echo "set linenumbers" >> /home/$USERNAME/.nanorc
+echo "set tabsize 4" >> /home/$USERNAME/.nanorc
+echo "set tabstospaces" >> /home/$USERNAME/.nanorc
+echo "set wordbounds punct,alnum" >> /home/$USERNAME/.nanorc
+echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/$USERNAME/.nanorc
+
 
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 /ssh.sh
