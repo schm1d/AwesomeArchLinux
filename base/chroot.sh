@@ -557,6 +557,9 @@ echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 # --- SSH Configuration ---
 configure_ssh() {
   # --- SSH Key Generation ---
+  
+  mkdir -p "/home/$USERNAME/.ssh"  # Ensure directory exists
+  
   if [ ! -f "$SSH_KEY_FILE" ]; then
     echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
     ssh-keygen -t "$SSH_KEY_TYPE" -C "$USERNAME@$HOSTNAME" -f "$SSH_KEY_FILE" -q -N "" # -q for quiet, -N for no passphrase
@@ -567,7 +570,6 @@ configure_ssh() {
   # --- SSH Client Configuration ---
   echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
 
-  mkdir -p "/home/$USERNAME/.ssh"  # Ensure directory exists
   # Backup existing config (improved)
   if [ -f "$SSH_CONFIG_FILE" ] && [ ! -f "$SSH_CONFIG_FILE.bak" ]; then
     cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
