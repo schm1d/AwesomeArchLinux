@@ -25,8 +25,7 @@ HOSTNAME="${_INSTALL_HOST}" # Example: myhostname
 TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
-SSH_PORT=22 
-
+SSH_PORT=22
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -34,7 +33,6 @@ LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
 SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
-
 
 # --- Partition Handling ---
 if [[ "$DISK" =~ [0-9]$ ]]; then
@@ -99,7 +97,6 @@ echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
 echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
 echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
 echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
-
 
 echo -e "${BBlue}Configuring IPtables...${NC}"
 # Set default policies
@@ -328,7 +325,6 @@ echo "install tipc /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo -e "${BBlue}Disabling core dump...${NC}"
 echo "* hard core 0" >> /etc/security/limits.conf
 
-
 # Using NTP for better reliability
 echo -e "${BBlue}Using NTP Daemon or NTP Client to Prevent Time Issues...${NC}"
 pacman -S --noconfirm chrony
@@ -391,7 +387,7 @@ echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
 pacman -S --noconfirm fail2ban
 systemctl enable fail2ban
 
-cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
+cat <EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
 port    = "$SSH_PORT"
@@ -444,7 +440,7 @@ echo "@includedir /etc/sudoers.d" >> /etc/sudoers
 
 # Set permissions for /etc/sudoers
 echo -e "${BBlue}Setting permissions for /etc/sudoers${NC}"
-chmod 440 /etc/sudoers 
+chmod 440 /etc/sudoers
 chown root:root /etc/sudoers
 
 # Install arch-audit to Determine Vulnerable Packages
@@ -501,7 +497,7 @@ fi
 echo "set backup" >> /home/$USERNAME/.nanorc           # Creates backups of your current file.
 echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/$USERNAME/.nanorc # The location of the backups.
 
-# Set permissions on the configuration file to prevent unauthorized changes 
+# Set permissions on the configuration file to prevent unauthorized changes
 chmod 600 /home/$USERNAME/.nanorc
 
 # Set password for user (with loop for incorrect input)
@@ -535,7 +531,6 @@ set -e # Re-enable 'exit on error'
 echo -e "${BBlue}Downloading nanorc...${NC}"
 curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
 
-
 # Add the following settings to the nano configuration file to harden it
 echo "set constantshow" >> /home/$USERNAME/.nanorc
 echo "set locking" >> /home/$USERNAME/.nanorc
@@ -550,16 +545,15 @@ echo "set tabstospaces" >> /home/$USERNAME/.nanorc
 echo "set wordbounds punct,alnum" >> /home/$USERNAME/.nanorc
 echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/$USERNAME/.nanorc
 
-
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 /ssh.sh
 
 # --- SSH Configuration ---
 configure_ssh() {
   # --- SSH Key Generation ---
-  
+
   mkdir -p "/home/$USERNAME/.ssh"  # Ensure directory exists
-  
+
   if [ ! -f "$SSH_KEY_FILE" ]; then
     echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
     ssh-keygen -t "$SSH_KEY_TYPE" -C "$USERNAME@$HOSTNAME" -f "$SSH_KEY_FILE" -q -N "" # -q for quiet, -N for no passphrase
@@ -577,7 +571,7 @@ configure_ssh() {
 
   # Use 'install' for atomic file writing
   install -Dm644 /dev/stdin "$SSH_CONFIG_FILE" <<EOF
-  Host "$HOSTNAME"  # Use hostname for Host entry
+ Host "$HOSTNAME"  # Use hostname for Host entry
   HostName "$HOSTNAME" # or IP if needed
   Port "$SSH_PORT"
   User "$USERNAME"
@@ -587,31 +581,30 @@ configure_ssh() {
   KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
   Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
-  EOF
+EOF
 
-  echo "SSH client configuration updated."
+echo "SSH client configuration updated."
 
-  # --- SSH Server Configuration (Optional) ---
-  # ... (Add server-side configuration here if needed) ...
+# --- SSH Server Configuration (Optional) ---
+# ... (Add server-side configuration here if needed) ...
 
-  # --- SSH Finalization ---
-  echo -e "${BBlue}Hashing known_hosts file...${NC}"
-  ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true # Suppress stderr if file doesn't exist
+# --- SSH Finalization ---
+echo -e "${BBlue}Hashing known_hosts file...${NC}"
+ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true # Suppress stderr if file doesn't exist
 
-  touch "/home/$USERNAME/.ssh/authorized_keys"
-  chmod 700 "/home/$USERNAME/.ssh"
-  chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
-  chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
+touch "/home/$USERNAME/.ssh/authorized_keys"
+chmod 700 "/home/$USERNAME/.ssh"
+chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
+chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
 
-  if [ -f "/ssh.sh" ]; then
+if [ -f "/ssh.sh" ]; then
     shred -u /ssh.sh  # Only shred if /ssh.sh exists
-  fi
+fi
 
 } # End of configure_ssh() function
 
 
 configure_ssh # Call the SSH configuration function
-
 
 # Harden Compilers by Restricting Access to Root User Only
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
@@ -626,7 +619,7 @@ for compiler in gcc g++ clang make as ld; do
     fi
 done
 
-# Set default ACLs on home directory 
+# Set default ACLs on home directory
 echo -e "${BBlue}Setting default ACLs on home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 
@@ -651,13 +644,12 @@ echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
 # pti=on: Enables Kernel Page Table Isolation, which mitigates Meltdown and prevents some KASLR bypasses.
 # randomize_kstack_offset=on: Randomises the kernel stack offset on each syscall, which makes attacks that rely on deterministic kernel stack layout significantly more difficult
 # vsyscall=none: Disables vsyscalls, as they are obsolete and have been replaced with vDSO. vsyscalls are also at fixed addresses in memory, making them a potential target for ROP attacks.
-# lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information. 
+# lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
 # lockdown=confidentiality - This was removed because it locked nvidia and vmware module so they couldn't be loaded.
 GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none quiet loglevel=3\""
 GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
-
 
 # --- CPU Microcode Installation ---
 install_cpu_microcode() {
@@ -680,7 +672,6 @@ install_cpu_microcode # Call the function
 
 #!/usr/bin/env bash
 
-
 # --- Variables ---
 NVIDIA_CARD=false
 AMD_CARD=false
@@ -701,7 +692,7 @@ if [[ "$NVIDIA_CARD" == true ]]; then
     if ! grep -q "blacklist nouveau" /etc/modprobe.d/blacklist-nouveau.conf; then
         echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
     fi
-    
+
     gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
     echo "Detected GPU: $gpu_model"
     echo "Running Kernel: $KERNEL"
@@ -818,7 +809,6 @@ configure_bluetooth() {
     Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
     EOF
 
-
     # Systemd override (using install -Dm)
     mkdir -p /etc/systemd/system/bluetooth.service.d
     cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
@@ -842,7 +832,6 @@ configure_bluetooth() {
 
 configure_bluetooth  # Call the function
 
-
 # --- GRUB Configuration and Installation ---
 configure_grub() {
   echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
@@ -853,16 +842,13 @@ configure_grub() {
     -e 's/^#?(GRUB_GFXPAYLOAD_LINUX=).*/\1"keep"/' \
     /etc/default/grub
 
-
   echo -e "${BBlue}Setting up GRUB...${NC}"
   mkdir -p /boot/grub  # -p to create parent directories if needed
 
-  # Generate initial grub.cfg BEFORE installing 
+  # Generate initial grub.cfg BEFORE installing
   grub-mkconfig -o /boot/grub/grub.cfg
 
-
   grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
-
 
   # --- Set GRUB Password (more robust) ---
   set +e  # Temporarily disable 'exit on error'
@@ -888,25 +874,24 @@ configure_grub() {
     sleep 1
   done
   set -e # Re-enable 'exit on error'
- 
+
+  # Use install (or cat with sudo) for custom GRUB entry:
+  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF
+  #!/bin/sh
+  exec tail -n +3 \$0
+  # Add custom GRUB menu entries below this line
+
+  set superusers="$USERNAME"
+  password_pbkdf2 "$USERNAME" "$GRUB_PASS"
+  EOF
+
+  grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
+
  }
 
 configure_grub # Call the function
 
-# Use install (or cat with sudo) for custom GRUB entry:
-install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF  # Use install for atomic writing
-!/bin/sh
-exec tail -n +3 \$0
-# Add custom GRUB menu entries below this line
-
-set superusers="$USERNAME"
-password_pbkdf2 "$USERNAME" "$GRUB_PASS"
-EOF
-
-grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
-
 chmod 600 "$LUKS_KEYS"
-
 
 # Creating a cool /etc/issue
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
@@ -922,13 +907,13 @@ Arch Linux \r (\l)
                \$  *                   .\$\$\$\$\$\$
               .\$  ^c           \$\$\$\$\$e\$\$\$\$\$\$\$\$.
               d\$L  4.         4\$\$\$\$\$\$\$\$\$\$\$\$\$\$b
-              \$\$\$\$b ^ceeeee.  4\$\$ECL.F*\$\$\$\$\$\$\$
-  e\$""=.      \$\$\$\$P d\$\$\$\$F \$ \$\$\$\$\$\$\$\$\$- \$\$\$\$\$\$
+              \$\$\$\$b ^ceeeee. 4\$\$ECL.F*\$\$\$\$\$\$\$
+  e\$""=.      \$\$\$\$P d\$\$\$\$F \$ \$\$\$\$\$\$\$\$- \$\$\$\$\$\$
  z\$\$b. ^c     3\$\$\$F "\$\$\$\$b   \$"\$\$\$\$\$\$\$  \$\$\$\$*"      .=""\$c
 4\$\$\$\$L   \     \$\$P"  "\$\$b   .\$ \$\$\$\$\$...e\$\$        .=  e\$\$\$.
 ^*\$\$\$\$\$c  %..   *c    ..    \$\$ 3\$\$\$\$\$\$\$\$\$\$eF     zP  d\$\$\$\$\$
   "**\$\$\$ec   "\   %ce""    \$\$\$  \$\$\$\$\$\$\$\$\$\$*    .r" =\$\$\$\$P""
-        "*\$b.  "c  *\$e.    *** d\$\$\$\$\$"L\$\$    .d"  e\$\$***"
+        "*\$b. "c  *\$e.    *** d\$\$\$\$\$"L\$\$    .d"  e\$\$***"
           ^*\$\$c ^\$c \$\$\$      4J\$\$\$\$\$% \$\$\$ .e*".eeP"
              "\$\$\$\$\$\$"'\$=e....\$*\$\$**\$cz\$\$" "..d\$*"
                "*\$\$\$  *=%4.\$ L L\$ P3\$\$\$F \$\$\$P"
@@ -959,7 +944,6 @@ Arch Linux \r (\l)
 ********************************************************************
 EOF
 
-
 echo -e "${BBlue}Setting permission on config files...${NC}"
 
 chmod 0700 /boot
@@ -982,8 +966,8 @@ chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
 chown -c root:root /etc/sudoers
 chmod -c 0440 /etc/sudoers
-chmod 02750 /bin/ping 
-chmod 02750 /usr/bin/w 
+chmod 02750 /bin/ping
+chmod 02750 /usr/bin/w
 chmod 02750 /usr/bin/who
 chmod 02750 /usr/bin/whereis
 chmod 0600 /etc/login.defs
@@ -1011,7 +995,6 @@ sed -i '/^auth.*include.*system-auth/i auth \[default=die\] pam_faillock.so auth
 
 # Add account required pam_faillock.so
 sed -i '/^account.*required.*pam_unix\.so/a account required pam_faillock.so' /etc/pam.d/system-auth
-
 
 # Configure password quality requirements
 echo -e "${BBlue}Configuring password quality requirements...${NC}"
@@ -1049,7 +1032,6 @@ harden_sysctl() {
 
   # Apply the settings immediately
   sysctl --system  # Apply settings from /etc/sysctl.d/*.conf
-
 
   if [ -f "/sysctl.sh" ]; then
     shred -u /sysctl.sh # Only shred if the file exists.
