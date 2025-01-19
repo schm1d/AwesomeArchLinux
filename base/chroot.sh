@@ -868,7 +868,7 @@ configure_grub() {
     echo
 
     if [[ "$GRUB_PASS_INPUT" == "$GRUB_PASS_CONFIRM" ]]; then
-      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '/PBKDF2/ {print $NF}')
+        GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '{print $NF}')
       if [[ -n "$GRUB_PASS" ]]; then
         echo -e "${BBlue}GRUB password set successfully.${NC}"
       else
@@ -882,13 +882,9 @@ configure_grub() {
   set -e # Re-enable 'exit on error'
 
   # Create the custom GRUB file with password
-  cat <<EOF | sudo tee /etc/grub.d/40_custom > /dev/null
-#!/bin/sh
-exec tail -n +3 \$0
-# Add custom GRUB menu entries below this line
-
-set superusers="$USER"
-password_pbkdf2 $USER $GRUB_PASS
+cat <<EOF | sudo tee -a /etc/grub.d/40_custom >/dev/null
+set superusers="$USERNAME"
+password_pbkdf2 "$USERNAME" "$GRUB_PASS"
 EOF
 
   chmod +x /etc/grub.d/40_custom
