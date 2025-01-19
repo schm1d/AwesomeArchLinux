@@ -857,40 +857,30 @@ configure_grub() {
   grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
 
   # --- Set GRUB Password ---
-  set +e  # Temporarily disable 'exit on error'
-  GRUB_PASS="" # Initialize the variable
+set +e  # Temporarily disable 'exit on error'
 
-  while [[ -z "$GRUB_PASS" ]]; do
-    echo -e "${BBlue}Setting GRUB password...${NC}"
-    read -r -s -p "Enter GRUB password: " GRUB_PASS_INPUT
-    echo
-    read -r -s -p "Confirm GRUB password: " GRUB_PASS_CONFIRM
-    echo
+while true; do
+  echo -e "${BBlue}Setting GRUB password...${NC}"
+  grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
+  GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
+  rm /tmp/grubpass
+  if [[ -n "$GRUB_PASS" ]]; then
+     break # Exit loop if the password was correctly created
+  else
+      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
+      sleep 1 # Add a delay
+  fi
+done
 
-    if [[ "$GRUB_PASS_INPUT" == "$GRUB_PASS_CONFIRM" ]]; then
-        GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '{print $NF}')
-      if [[ -n "$GRUB_PASS" ]]; then
-        echo -e "${BBlue}GRUB password set successfully.${NC}"
-      else
-        echo -e "${BBlue}Error generating GRUB password hash. Please try again.${NC}"
-      fi
-    else
-      echo -e "${BBlue}Passwords do not match. Please try again.${NC}"
-    fi
-    sleep 1
-  done
-  set -e # Re-enable 'exit on error'
+set -e # Re-enable 'exit on error'
 
-  # Create the custom GRUB file with password
-cat <<EOF | sudo tee -a /etc/grub.d/40_custom >/dev/null
+cat <<EOF >> /etc/grub.d/40_custom
 set superusers="$USERNAME"
 password_pbkdf2 "$USERNAME" "$GRUB_PASS"
 EOF
 
-  chmod +x /etc/grub.d/40_custom
+grub-mkconfig -o /boot/grub/grub.cfg
 
-  # Regenerate grub.cfg to include the password
-  grub-mkconfig -o /boot/grub/grub.cfg
 }
 
 configure_grub
