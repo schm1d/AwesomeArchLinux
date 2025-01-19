@@ -38,94 +38,64 @@ systemctl enable gdm.service
 # 3) Apply GNOME settings for the specified user
 echo -e "${BBlue}Applying GNOME/dconf configuration for user '${TARGET_USER}'...${NC}"
 
-# Make sure the user’s D-Bus session is available (common in a live system). If not, we can still
-# write to dconf by forcing environment variables or using a dconf-user override. 
-# Easiest approach: use 'sudo -u' with gsettings if the user is already logged in or can log in.
+# Explicitly run each gsettings command as the target user
+sudo -u "$TARGET_USER" gsettings set apps.update-manager first-run false || true
+sudo -u "$TARGET_USER" gsettings set apps.update-manager launch-count 1 || true
+sudo -u "$TARGET_USER" gsettings set apps.update-manager launch-time 1736281180 || true
 
-# We’ll do everything in a heredoc to keep it simple
-sudo -u "$TARGET_USER" bash <<EOF
+sudo -u "$TARGET_USER" gsettings set com.ubuntu.update-notifier release-check-time 1736280597 || true
 
-################################################################################
-# Some of these schemas may NOT exist on a stock Arch GNOME system (e.g. apps.update-manager).
-# If you want to avoid errors on missing schemas, append "|| true" to each gsettings line.
-################################################################################
+sudo -u "$TARGET_USER" gsettings set org.gnome.control-center last-panel 'privacy'
+sudo -u "$TARGET_USER" gsettings set org.gnome.control-center window-state '(980, 640, false)'
 
-# [apps/update-manager]
-gsettings set apps.update-manager first-run false || true
-gsettings set apps.update-manager launch-count 1 || true
-gsettings set apps.update-manager launch-time 1736281180 || true
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Pardus/ categories "['X-Pardus-Apps']"
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Pardus/ name 'X-Pardus-Apps.directory'
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Pardus/ translate true
 
-# [com/ubuntu/update-notifier]
-gsettings set com.ubuntu.update-notifier release-check-time 1736280597 || true
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ apps "['gnome-abrt.desktop', 'gnome-system-log.desktop', 'nm-connection-editor.desktop', 'org.gnome.baobab.desktop', 'org.gnome.Connections.desktop', 'org.gnome.DejaDup.desktop', 'org.gnome.Dictionary.desktop', 'org.gnome.DiskUtility.desktop', 'org.gnome.Evince.desktop', 'org.gnome.FileRoller.desktop', 'org.gnome.fonts.desktop', 'org.gnome.Loupe.desktop', 'org.gnome.seahorse.Application.desktop', 'org.gnome.tweaks.desktop', 'org.gnome.Usage.desktop', 'vinagre.desktop']"
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ categories "['X-GNOME-Utilities']"
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ name 'X-GNOME-Utilities.directory'
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ translate true
 
-# [org/gnome/control-center]
-gsettings set org.gnome.control-center last-panel 'privacy'
-gsettings set org.gnome.control-center window-state '(980, 640, false)'
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'ch+de_nodeadkeys')]"
 
-# [org/gnome/desktop/app-folders/folders/Utilities]
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ apps "['gnome-abrt.desktop', 'gnome-system-log.desktop', 'nm-connection-editor.desktop', 'org.gnome.baobab.desktop', 'org.gnome.Connections.desktop', 'org.gnome.DejaDup.desktop', 'org.gnome.Dictionary.desktop', 'org.gnome.DiskUtility.desktop', 'org.gnome.Evince.desktop', 'org.gnome.FileRoller.desktop', 'org.gnome.fonts.desktop', 'org.gnome.Loupe.desktop', 'org.gnome.seahorse.Application.desktop', 'org.gnome.tweaks.desktop', 'org.gnome.Usage.desktop', 'vinagre.desktop']"
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ categories "['X-GNOME-Utilities']"
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ name 'X-GNOME-Utilities.directory'
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ translate true
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
 
-# [org/gnome/desktop/input-sources]
-gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'ch+de_nodeadkeys')]"
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.notifications application-children "['org-gnome-nautilus']"
 
-# [org/gnome/desktop/interface]
-gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/org-gnome-nautilus/ application-id 'org.gnome.Nautilus.desktop'
 
-# [org/gnome/desktop/notifications]
-gsettings set org.gnome.desktop.notifications application-children "['org-gnome-nautilus']"
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.screensaver lock-enabled false
 
-# [org/gnome/desktop/notifications/application/org-gnome-nautilus]
-gsettings set org.gnome.desktop.notifications.application:/org/gnome/desktop/notifications/application/org-gnome-nautilus/ application-id 'org.gnome.Nautilus.desktop'
+sudo -u "$TARGET_USER" gsettings set org.gnome.desktop.session idle-delay 0
 
-# [org/gnome/desktop/screensaver]
-gsettings set org.gnome.desktop.screensaver lock-enabled false
+sudo -u "$TARGET_USER" gsettings set org.gnome.evolution-data-server migrated true
 
-# [org/gnome/desktop/session]
-gsettings set org.gnome.desktop.session idle-delay 0
+sudo -u "$TARGET_USER" gsettings set org.gnome.mutter edge-tiling false
 
-# [org/gnome/evolution-data-server]
-gsettings set org.gnome.evolution-data-server migrated true
+sudo -u "$TARGET_USER" gsettings set org.gnome.mutter.keybindings toggle-tiled-left "[]"
+sudo -u "$TARGET_USER" gsettings set org.gnome.mutter.keybindings toggle-tiled-right "[]"
 
-# [org/gnome/mutter]
-gsettings set org.gnome.mutter edge-tiling false
+sudo -u "$TARGET_USER" gsettings set org.gnome.nautilus.preferences default-folder-viewer 'icon-view'
+sudo -u "$TARGET_USER" gsettings set org.gnome.nautilus.preferences migrated-gtk-settings true
+sudo -u "$TARGET_USER" gsettings set org.gnome.nautilus.preferences search-filter-time-type 'last_modified'
 
-# [org/gnome/mutter/keybindings]
-gsettings set org.gnome.mutter.keybindings toggle-tiled-left "[]"
-gsettings set org.gnome.mutter.keybindings toggle-tiled-right "[]"
+sudo -u "$TARGET_USER" gsettings set org.gnome.nautilus.window-state initial-size '(889, 562)'
 
-# [org/gnome/nautilus/preferences]
-gsettings set org.gnome.nautilus.preferences default-folder-viewer 'icon-view'
-gsettings set org.gnome.nautilus.preferences migrated-gtk-settings true
-gsettings set org.gnome.nautilus.preferences search-filter-time-type 'last_modified'
+sudo -u "$TARGET_USER" gsettings set org.gnome.settings-daemon.plugins.color night-light-schedule-automatic false
 
-# [org/gnome/nautilus/window-state]
-gsettings set org.gnome.nautilus.window-state initial-size '(889, 562)'
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell favorite-apps "['firefox_firefox.desktop', 'org.gnome.Nautilus.desktop', 'snap-store_snap-store.desktop', 'yelp.desktop', 'org.gnome.Terminal.desktop']"
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell welcome-dialog-last-shown-version '47.0'
 
-# [org/gnome/settings-daemon/plugins/color]
-gsettings set org.gnome.settings-daemon.plugins.color night-light-schedule-automatic false
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell.extensions.ding check-x11wayland true
 
-# [org/gnome/shell]
-gsettings set org.gnome.shell favorite-apps "['firefox_firefox.desktop', 'org.gnome.Nautilus.desktop', 'snap-store_snap-store.desktop', 'yelp.desktop', 'org.gnome.Terminal.desktop']"
-gsettings set org.gnome.shell welcome-dialog-last-shown-version '47.0'
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell.extensions.tiling-assistant active-window-hint-color 'rgb(211,70,21)'
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell.extensions.tiling-assistant last-version-installed 48
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell.extensions.tiling-assistant overridden-settings "{'org.gnome.mutter.edge-tiling': <@mb nothing>, 'org.gnome.mutter.keybindings.toggle-tiled-left': <@mb nothing>, 'org.gnome.mutter.keybindings.toggle-tiled-right': <@mb nothing>}"
 
-# [org/gnome/shell/extensions/ding]
-gsettings set org.gnome.shell.extensions.ding check-x11wayland true
+sudo -u "$TARGET_USER" gsettings set org.gnome.shell.world-clocks locations "[]"
 
-# [org/gnome/shell/extensions/tiling-assistant]
-gsettings set org.gnome.shell.extensions.tiling-assistant active-window-hint-color 'rgb(211,70,21)'
-gsettings set org.gnome.shell.extensions.tiling-assistant last-version-installed 48
-gsettings set org.gnome.shell.extensions.tiling-assistant overridden-settings "{'org.gnome.mutter.edge-tiling': <@mb nothing>, 'org.gnome.mutter.keybindings.toggle-tiled-left': <@mb nothing>, 'org.gnome.mutter.keybindings.toggle-tiled-right': <@mb nothing>}"
-
-# [org/gnome/shell/world-clocks]
-gsettings set org.gnome.shell.world-clocks locations "[]"
-
-# [org/gtk/gtk4/settings/file-chooser]
-gsettings set org.gtk.gtk4.settings.file-chooser show-hidden false
-gsettings set org.gtk.gtk4.settings.file-chooser sort-directories-first true
-
-EOF
+sudo -u "$TARGET_USER" gsettings set org.gtk.gtk4.settings.file-chooser show-hidden false
+sudo -u "$TARGET_USER" gsettings set org.gtk.gtk4.settings.file-chooser sort-directories-first true
 
 echo -e "${BBlue}GNOME Desktop configuration completed.\nYou can reboot to start GDM (GNOME) now.${NC}"
