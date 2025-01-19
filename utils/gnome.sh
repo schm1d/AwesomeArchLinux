@@ -38,6 +38,7 @@ if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then  # Improve
     if ! pacman -Qi bluez bluez-utils &>/dev/null; then # Check if already installed
       pacman -S --noconfirm bluez bluez-utils gnome-bluetooth-3.0 blueman
     fi
+fi
 
 # 2) Enable GDM service
 echo -e "${BBlue}Enabling GDM (GNOME Display Manager)...${NC}"
