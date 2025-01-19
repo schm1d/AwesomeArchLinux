@@ -1029,13 +1029,9 @@ harden_sysctl() {
   # Execute sysctl.sh and write output to sysctl config file.
   /sysctl.sh
 
-  # Apply the settings immediately
-  sysctl --system
-
-  if [ -f "/sysctl.sh" ]; then
-    shred -u /sysctl.sh # Only shred if the file exists.
-  fi
-
+  sleep2
+  
+  shred -u /sysctl.sh
 }
 
 harden_sysctl
