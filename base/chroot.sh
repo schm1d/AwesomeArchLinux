@@ -1018,7 +1018,6 @@ sleep 2
 
 # --- System Hardening (sysctl) ---
 harden_sysctl() {
-  local sysctl_file="/etc/sysctl.d/99-hardening.conf"
 
   echo -e "${BBlue}Applying sysctl hardening settings...${NC}"
 
@@ -1028,7 +1027,7 @@ harden_sysctl() {
   fi
 
   # Execute sysctl.sh and write output to sysctl config file.
- /sysctl.sh > "$sysctl_file"
+  /sysctl.sh
 
   # Apply the settings immediately
   sysctl --system
