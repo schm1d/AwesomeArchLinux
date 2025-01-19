@@ -22,13 +22,13 @@ fi
 # 1) Install GNOME Desktop packages
 echo -e "${BBlue}Installing GNOME Desktop packages...${NC}"
 pacman -S --noconfirm \
-  gdm gitg gnome gnome-appfolders-manager gnome-backgrounds gnome-bluetooth-3.0 gnome-connections gnome-logs \
+  gdm gitg gnome gnome-appfolders-manager gnome-backgrounds gnome-bluetooth-3.0 gnome-connections gnome-logs evince vinagre\
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware gnome-keybindings eog libforensic1394\
-  gnome-keyring networkmanager-openvpn nautilus parted regexxer seahorse-nautilus jomon gnome-control-center\
-  sushi xdg-desktop-portal-gnome ghex gnome-font-viewer gnome-multi-writer gnome-nettool gnome-session gnome-screenshot \
+  gnome-keyring networkmanager-openvpn nautilus parted regexxer seahorse-nautilus jomon gnome-control-center firefox baobab deja-dup\
+  sushi xdg-desktop-portal-gnome ghex gnome-font-viewer gnome-multi-writer gnome-nettool gnome-session gnome-screenshot loupe\
   gnome-shell gnome-shell-extension-arc-menu gnome-shell-extension-caffeine gnome-shell-extension-dash-to-panel veracrypt \
   gnome-shell-extension-desktop-icons-ng gnome-shell-extension-vitals gnome-software gnome-terminal gnome-tweaks onionshare \
-  gsettings-desktop-schemas gsettings-system-schemas gthumb gtranslator komikku mutter gedit gedit-plugins chromium mvt \
+  gsettings-desktop-schemas gsettings-system-schemas gthumb gtranslator komikku mutter gedit gedit-plugins chromium mvt gnome-dictionary\
   xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit torbrowser-launcher networkmanager-openconnect networkmanager-strongswan
 
 # 2) Enable GDM service
@@ -62,9 +62,6 @@ gsettings set com.ubuntu.update-notifier release-check-time 1736280597 || true
 gsettings set org.gnome.control-center last-panel 'privacy'
 gsettings set org.gnome.control-center window-state '(980, 640, false)'
 
-# [org/gnome/desktop/app-folders]
-gsettings set org.gnome.desktop.app-folders folder-children "['Utilities', 'YaST', 'Pardus']"
-
 # [org/gnome/desktop/app-folders/folders/Pardus]
 gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Pardus/ categories "['X-Pardus-Apps']"
 gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Pardus/ name 'X-Pardus-Apps.directory'
@@ -76,18 +73,11 @@ gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folder
 gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ name 'X-GNOME-Utilities.directory'
 gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/Utilities/ translate true
 
-# [org/gnome/desktop/app-folders/folders/YaST]
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/YaST/ categories "['X-SuSE-YaST']"
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/YaST/ name 'suse-yast.directory'
-gsettings set org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/YaST/ translate true
-
 # [org/gnome/desktop/input-sources]
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'ch+de_nodeadkeys')]"
 
 # [org/gnome/desktop/interface]
 gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
-gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark'
-gsettings set org.gnome.desktop.interface icon-theme 'Yaru-dark'
 
 # [org/gnome/desktop/notifications]
 gsettings set org.gnome.desktop.notifications application-children "['org-gnome-nautilus']"
