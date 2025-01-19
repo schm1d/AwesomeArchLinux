@@ -43,8 +43,6 @@ sudo -u "$TARGET_USER" gsettings set apps.update-manager first-run false || true
 sudo -u "$TARGET_USER" gsettings set apps.update-manager launch-count 1 || true
 sudo -u "$TARGET_USER" gsettings set apps.update-manager launch-time 1736281180 || true
 
-sudo -u "$TARGET_USER" gsettings set com.ubuntu.update-notifier release-check-time 1736280597 || true
-
 sudo -u "$TARGET_USER" gsettings set org.gnome.control-center last-panel 'privacy'
 sudo -u "$TARGET_USER" gsettings set org.gnome.control-center window-state '(980, 640, false)'
 
