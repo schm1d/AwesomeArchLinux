@@ -27,7 +27,7 @@ https://github.com/vinceliuice/grub2-themes
 
 cd ./grub2-themes
 
-sudo ./install.sh -t vimix -s ultrawide -i whitesur
+sudo ./install.sh -t vimix -s ultrawide -i whitesur -b /boot/grub
 
 cd ../
 
