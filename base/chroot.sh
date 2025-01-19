@@ -634,6 +634,8 @@ mkinitcpio -p linux &&\
 echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
 sed -i '/GRUB_ENABLE_CRYPTODISK/s/^#//g' /etc/default/grub
 
+sleep 1
+
 echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
 
 # GRUBSEC Hardening explanation:
@@ -649,6 +651,8 @@ GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=
 GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
+
+sleep 1
 
 # --- CPU Microcode Installation ---
 install_cpu_microcode() {
@@ -668,6 +672,8 @@ install_cpu_microcode() {
 }
 
 install_cpu_microcode # Call the function
+
+sleep 1
 
 # --- Bluetooth Configuration ---
 configure_bluetooth() {
@@ -717,6 +723,8 @@ EOF
 }
 
 configure_bluetooth  # Call the function
+
+sleep 2
 
 # --- Variables ---
 NVIDIA_CARD=false
@@ -829,6 +837,7 @@ if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
     # Do NOT touch mkinitcpio or grub in this fallback.
 fi
 
+sleep 2
 
 # --- GRUB Configuration and Installation ---
 configure_grub() {
@@ -888,6 +897,8 @@ EOF
  }
 
 configure_grub # Call the function
+
+sleep 1
 
 chmod 600 "$LUKS_KEYS"
 
@@ -972,6 +983,8 @@ chmod 0600 /etc/login.defs
 chown root:root /etc/issue
 chmod 644 /etc/issue
 
+sleep 1
+
 # Remove deprecated PAM modules
 echo -e "${BBlue}Removing deprecated pam_tally2.so references...${NC}"
 sed -i '/pam_tally2.so/d' /etc/pam.d/system-auth
@@ -1014,6 +1027,8 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
 
+sleep 1
+
 # --- System Hardening (sysctl) ---
 harden_sysctl() {
   local sysctl_file="/etc/sysctl.d/99-hardening.conf"
@@ -1038,6 +1053,8 @@ harden_sysctl() {
 }
 
 harden_sysctl # Call the function
+
+sleep 2
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 shred -u /chroot.sh
