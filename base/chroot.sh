@@ -850,26 +850,26 @@ configure_grub() {
     /etc/default/grub
 
   echo -e "${BBlue}Setting up GRUB...${NC}"
-  mkdir -p /boot/grub  # -p to create parent directories if needed
+  mkdir -p /boot/grub
 
   # Generate initial grub.cfg BEFORE installing
   grub-mkconfig -o /boot/grub/grub.cfg
 
   grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
 
-  # --- Set GRUB Password (more robust) ---
+  # --- Set GRUB Password (with user input and confirmation) ---
   set +e  # Temporarily disable 'exit on error'
   GRUB_PASS="" # Initialize the variable
 
   while [[ -z "$GRUB_PASS" ]]; do # Loop until a password is generated
     echo -e "${BBlue}Setting GRUB password...${NC}"
-    read -r -s -p "Enter GRUB password: " GRUB_PASS_INPUT  # Get the password directly from user
+    read -r -s -p "Enter GRUB password: " GRUB_PASS_INPUT
     echo
     read -r -s -p "Confirm GRUB password: " GRUB_PASS_CONFIRM
     echo
 
     if [[ "$GRUB_PASS_INPUT" == "$GRUB_PASS_CONFIRM" ]]; then
-      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '{print $NF}')
+      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT")
       if [[ -n "$GRUB_PASS" ]]; then
         echo -e "${BBlue}GRUB password set successfully.${NC}"
       else
@@ -882,19 +882,19 @@ configure_grub() {
   done
   set -e # Re-enable 'exit on error'
 
-# Use install (or cat with sudo) for custom GRUB entry:
-install -Dm644 /dev/stdin /etc/grub.d/40_custom <<EOF
+  # Use install (or cat with sudo) for custom GRUB entry:
+  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<'EOF'
 #!/bin/sh
 exec tail -n +3 \$0
 # Add custom GRUB menu entries below this line
 
 set superusers="$USERNAME"
-password_pbkdf2 "$USERNAME" "$GRUB_PASS"
+password_pbkdf2 "$USERNAME" "$(echo "$GRUB_PASS" | awk '{print $NF}')"
 EOF
 
   grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
 
- }
+}
 
 configure_grub # Call the function
 
@@ -1027,7 +1027,7 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
 
-sleep 1
+sleep 2
 
 # --- System Hardening (sysctl) ---
 harden_sysctl() {
@@ -1041,10 +1041,10 @@ harden_sysctl() {
   fi
 
   # Execute sysctl.sh and write output to sysctl config file.
- /sysctl.sh > "$sysctl_file"  # Write the sysctl settings to a persistent configuration file
+ /sysctl.sh > "$sysctl_file"
 
   # Apply the settings immediately
-  sysctl --system  # Apply settings from /etc/sysctl.d/*.conf
+  sysctl --system
 
   if [ -f "/sysctl.sh" ]; then
     shred -u /sysctl.sh # Only shred if the file exists.
@@ -1052,7 +1052,7 @@ harden_sysctl() {
 
 }
 
-harden_sysctl # Call the function
+harden_sysctl
 
 sleep 2
 
