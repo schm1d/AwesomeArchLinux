@@ -839,11 +839,10 @@ fi
 
 sleep 2
 
-# --- GRUB Configuration and Installation ---
 configure_grub() {
   echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
 
-  # More robust way to set GRUB_GFXMODE and GRUB_GFXPAYLOAD_LINUX
+  # Set GRUB_GFXMODE and GRUB_GFXPAYLOAD_LINUX
   sed -i -E \
     -e 's/^#?(GRUB_GFXMODE=).*/\1"1024x768x32,auto"/' \
     -e 's/^#?(GRUB_GFXPAYLOAD_LINUX=).*/\1"keep"/' \
@@ -857,11 +856,11 @@ configure_grub() {
 
   grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
 
-  # --- Set GRUB Password (with user input and confirmation) ---
+  # --- Set GRUB Password ---
   set +e  # Temporarily disable 'exit on error'
   GRUB_PASS="" # Initialize the variable
 
-  while [[ -z "$GRUB_PASS" ]]; do # Loop until a password is generated
+  while [[ -z "$GRUB_PASS" ]]; do
     echo -e "${BBlue}Setting GRUB password...${NC}"
     read -r -s -p "Enter GRUB password: " GRUB_PASS_INPUT
     echo
@@ -869,7 +868,7 @@ configure_grub() {
     echo
 
     if [[ "$GRUB_PASS_INPUT" == "$GRUB_PASS_CONFIRM" ]]; then
-      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT")
+      GRUB_PASS=$(grub-mkpasswd-pbkdf2 <<< "$GRUB_PASS_INPUT" | awk '/PBKDF2/ {print $NF}')
       if [[ -n "$GRUB_PASS" ]]; then
         echo -e "${BBlue}GRUB password set successfully.${NC}"
       else
@@ -882,23 +881,25 @@ configure_grub() {
   done
   set -e # Re-enable 'exit on error'
 
-  # Use install (or cat with sudo) for custom GRUB entry:
-  install -Dm644 /dev/stdin /etc/grub.d/40_custom <<'EOF'
+  # Create the custom GRUB file with password
+  cat <<EOF | sudo tee /etc/grub.d/40_custom > /dev/null
 #!/bin/sh
 exec tail -n +3 \$0
 # Add custom GRUB menu entries below this line
 
-set superusers="$USERNAME"
-password_pbkdf2 "$USERNAME" "$(echo "$GRUB_PASS" | awk '{print $NF}')"
+set superusers="$USER"
+password_pbkdf2 $USER $GRUB_PASS
 EOF
 
-  grub-mkconfig -o /boot/grub/grub.cfg # Regenerate grub.cfg with the password
+  chmod +x /etc/grub.d/40_custom
 
+  # Regenerate grub.cfg to include the password
+  grub-mkconfig -o /boot/grub/grub.cfg
 }
 
-configure_grub # Call the function
+configure_grub
 
-sleep 1
+sleep 2
 
 chmod 600 "$LUKS_KEYS"
 
