@@ -1029,7 +1029,7 @@ harden_sysctl() {
   # Execute sysctl.sh and write output to sysctl config file.
   /sysctl.sh
 
-  sleep2
+  sleep 2
   
   shred -u /sysctl.sh
 }
