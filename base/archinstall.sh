@@ -274,7 +274,7 @@ echo -e "${BBlue}Updating Arch Keyrings...${NC}"
 pacman -Sy archlinux-keyring --noconfirm
 
 echo -e "${BBlue}Installing Arch Linux base system...${NC}"
-pacstrap /mnt base base-devel archlinux-keyring linux linux-headers \
+pacstrap /mnt base base-devel archlinux-keyring linux linux-headers dialog \
          linux-firmware zsh lvm2 mtools networkmanager iwd dhcpcd wget curl git \
          openssh neovim unzip unrar p7zip zip unarj arj cabextract xz pbzip2 pixz \
          alsa-firmware alsa-tools alsa-utils fuse3 ntfs-3g zsh-completions net-tools sbctl \
