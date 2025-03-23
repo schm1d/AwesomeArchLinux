@@ -121,9 +121,12 @@ Here's a step-by-step guide to implement these blocklists:
    - `Protection against child exploitation materia`l: iblocklist_pedophiles
    - `Ransomware protection`: ransomware_rw, ransomware_feed
 
-## 7. **Verify your active blocklists**
+## 7. **Verify your own active blocklists**
+
+The `ipset` command is command line utility that allows the firewall admins to manage large lists of IPs.
+
    ```bash
-   sudo ipset list
+   sudo ipset list -n
    ```
    This will show all active IP sets.
 
