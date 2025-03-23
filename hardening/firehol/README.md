@@ -58,9 +58,22 @@ Here's a step-by-step guide to implement these blocklists:
    ```
 
    The blocklist format is:
-   - `blacklist fullbogons`: Blocks both incoming and outgoing traffic
-   - `blacklist inbound`: Blocks only incoming traffic
-   - `blacklist outbound`: Blocks only outgoing traffic
+   ```bash
+   # Block both directions (most restrictive)
+   blacklist full ipset:firehol_level1
+   
+   # Block only incoming traffic from these IPs
+   blacklist ipset:spamhaus_drop
+   
+   # Block only outgoing traffic to these IPs
+   blacklist out ipset:dshield 
+   
+   # Block by IP/network group - use for multiple IP sets with same policy
+   ipset4 create mygroup hash:net
+   ipset4 addfile mygroup ipsets/firehol_level1
+   ipset4 addfile mygroup ipsets/spamhaus_drop
+   blacklist full ipset:mygroup
+   ```
 
 ## 5. **Test your configuration**
    ```bash
