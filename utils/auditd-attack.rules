@@ -288,6 +288,14 @@
 -w /etc/openvpn/ -p wa -k T1219_Remote_Access_Tools  # Added for VPN monitoring
 
 ## Third Party Software
+
+# Arch Linux Package Management (Pacman and Yay)
+-w /usr/bin/pacman -p x -k T1072_Third_Party_Software_Arch
+-w /usr/bin/yay -p x -k T1072_Third_Party_Software_Arch
+-w /etc/pacman.conf -p wa -k T1072_Third_Party_Software_Arch
+-w /etc/makepkg.conf -p wa -k T1072_Third_Party_Software_Arch
+-w /usr/bin/paru -p x -k T1072_Third_Party_Software_Arch
+
 # RPM (Redhat/CentOS)
 -w /usr/bin/rpm -p x -k T1072_Third_Party_Software  # Fixed key name consistency
 -w /usr/bin/yum -p x -k T1072_Third_Party_Software
