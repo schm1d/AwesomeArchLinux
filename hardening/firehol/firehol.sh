@@ -106,7 +106,7 @@ run_sudo chmod 600 "$FIREHOL_CONF" || { echo "[!] Failed to set permissions on F
 # 4. Automate Blocklist Updates
 # ==============================
 echo -e "${BBlue}[+] Scheduling automatic updates via cron, daily...${NC}"
-CRON_JOB="0 0 * * * root /sbin/update-ipsets && firehol try"
+CRON_JOB="*/30 * * * * root /sbin/update-ipsets && /usr/bin/firehol try"
 CRON_FILE="/etc/cron.d/firehol-ipsets"
 
 echo "$CRON_JOB" > /tmp/firehol-ipsets
