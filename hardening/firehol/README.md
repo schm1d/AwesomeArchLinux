@@ -44,7 +44,7 @@ Here's a step-by-step guide to implement these blocklists:
    sudo update-ipsets enable ransomware_rw 
    ```
 
-## 4. **Edit your FireHOL configuration**
+ ## 4. **Edit your FireHOL configuration**
    ```bash
    sudo nano /etc/firehol/firehol.conf
    ```
@@ -75,13 +75,29 @@ Here's a step-by-step guide to implement these blocklists:
    blacklist full ipset:mygroup
    ```
 
-## 5. **Test your configuration**
+   ### Updating IP Sets
+   Update your IP sets manually:
+   ```bash
+   sudo update-ipsets
+   ```
+
+   ### Force a recheck of all IP sets
+   ```bash
+   sudo update-ipsets --recheck
+   ```
+
+   ### Update only specific IP sets
+   ```bash
+   sudo update-ipsets run firehol_level1 dshield
+   ```
+
+   ## 5. **Test your configuration**
    ```bash
    sudo firehol try
    ```
    This will load the new configuration temporarily and prompt you to confirm it works.
 
-## 6. **Additional blocklist options**
+   ## 6. **Additional blocklist options**
 
    There are different levels of protection:
    - `firehol_level1`: Safe for most users
