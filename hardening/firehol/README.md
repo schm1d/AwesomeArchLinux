@@ -123,7 +123,7 @@ Here's a step-by-step guide to implement these blocklists:
 
 ## 7. **Verify your own active blocklists**
 
-The `ipset` command is command line utility that allows the firewall admins to manage large lists of IPs.
+The `ipset` command is command line utility that allows the firewall admins to manage large lists of IPs. More about it [here](https://firehol.org/guides/ipset/).
 
    ```bash
    sudo ipset list -n
