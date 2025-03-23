@@ -14,7 +14,7 @@ Make the script executable and run it:
 
 ```bash
     chmod +x ./firehol.sh
-   ./firehol.sh]
+   ./firehol.sh
    ```
 
 Now that FireHOL is running successfully, you can add blocklists from the FireHOL blocklist-ipsets repository.  
@@ -53,7 +53,7 @@ Here's a step-by-step guide to implement these blocklists:
    ```
    # Block traffic using FireHOL IP sets
    blacklist full ipset:firehol_level1
-   blacklist full ipset:spamhaus_drop
+   blacklist full ipset:spamhaus_edrop
    blacklist full ipset:dshield
    ```
 
@@ -118,7 +118,7 @@ Here's a step-by-step guide to implement these blocklists:
    - `Web server protection`: firehol_level1, firehol_webserver
   - ` Mail server protection`: firehol_level1, spamhaus_drop, spamhaus_edrop
   - ` Protection against malicious activities`: firehol_level3, dshield
-   - `Protection against child exploitation materia`l: iblocklist_pedophiles
+   - `Protection against child exploitation material`: iblocklist_pedophiles
    - `Ransomware protection`: ransomware_rw, ransomware_feed
 
 ## 7. **Verify your own active blocklists**
