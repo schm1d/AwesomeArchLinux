@@ -112,6 +112,15 @@ Here's a step-by-step guide to implement these blocklists:
    - `coinbl_hosts`: Cryptocurrency mining/cryptojacking protection
    - `malware`: Known malware sources
 
+   ### Based on the documentation:
+
+   - `General protection`: firehol_level1
+   - `Web server protection`: firehol_level1, firehol_webserver
+  - ` Mail server protection`: firehol_level1, spamhaus_drop, spamhaus_edrop
+  - ` Protection against malicious activities`: firehol_level3, dshield
+   - `Protection against child exploitation materia`l: iblocklist_pedophiles
+   - `Ransomware protection`: ransomware_rw, ransomware_feed
+
 ## 7. **Verify your active blocklists**
    ```bash
    sudo ipset list
