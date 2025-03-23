@@ -3,7 +3,7 @@
 # Script: install_firehol_blocklist.sh
 # Description: Installs and configures Firehol with IP sets from Firehol's blocklist-ipsets repository.
 # Author: @brulliant (Fixed version)
-# Usage: ./install_firehol_blocklist.sh
+# Usage: ./firehol.sh
 
 BBlue='\033[1;34m'
 NC='\033[0m'
