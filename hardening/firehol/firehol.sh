@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Script: install_firehol_blocklist.sh
+# Script: firehol.sh
 # Description: Installs and configures Firehol with IP sets from Firehol's blocklist-ipsets repository.
-# Author: @brulliant (Fixed version)
+# Author: @brulliant
+#Linkedin: https://www.linkedin.com/in/schmidbruno/
 # Usage: ./firehol.sh
 
 BBlue='\033[1;34m'
