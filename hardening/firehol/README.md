@@ -52,9 +52,9 @@ Here's a step-by-step guide to implement these blocklists:
    Modify your configuration to include the blocklists. Add these lines within the `interface any world` section:
    ```
    # Block traffic using FireHOL IP sets
-   blacklist fullbogons ipset:firehol_level1
-   blacklist fullbogons ipset:spamhaus_drop
-   blacklist fullbogons ipset:dshield
+   blacklist full ipset:firehol_level1
+   blacklist full ipset:spamhaus_drop
+   blacklist full ipset:dshield
    ```
 
    The blocklist format is:
