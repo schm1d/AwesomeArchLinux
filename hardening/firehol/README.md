@@ -22,13 +22,13 @@ Here's a step-by-step guide to implement these blocklists:
 
 ## 1. **Download the blocklist IP sets**
    ```bash
-   sudo update-ipsets download
+   sudo update-ipsets -g
    ```
    This will download all available blocklists to your system.
 
 ## 2. **View available blocklists**
    ```bash
-   sudo update-ipsets list available
+   sudo update-ipsets
    ```
    This shows all blocklists you can use.
 
