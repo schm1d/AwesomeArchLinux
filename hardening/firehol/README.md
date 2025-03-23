@@ -39,9 +39,9 @@ Here's a step-by-step guide to implement these blocklists:
    sudo update-ipsets enable firehol_level1
    
    # For specific threats, add more specialized lists
-   sudo update-ipsets enable spamhaus_drop
-   sudo update-ipsets enable dshield
-   sudo update-ipsets enable alienvault_reputation
+   sudo update-ipsets enable sslbl
+   sudo update-ipsets enable spamhaus_edrop
+   sudo update-ipsets enable ransomware_rw 
    ```
 
 ## 4. **Edit your FireHOL configuration**
