@@ -35,7 +35,17 @@ run_user() {
 # 1. Install Required Packages
 # ==============================
 echo -e "${BBlue}[+] Installing dependencies...${NC}"
-run_sudo pacman -S --noconfirm wget git cronie iputils iproute2 || { echo "[!] Failed to install dependencies."; exit 1; }
+run_sudo pacman -S --noconfirm wget git cronie iputils iproute2 jq less || { 
+    echo "[!] Failed to install dependencies."; 
+    exit 1; 
+}
+
+for pkg in firehol update-ipsets; do
+    if ! command -v "$pkg" &> /dev/null; then
+        echo "[!] $pkg is not installed. Please check the installation process."
+        exit 1
+    fi
+done
 
 # ==============================
 # 2. Install Firehol from AUR
