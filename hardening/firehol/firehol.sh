@@ -50,19 +50,23 @@ done
 # ==============================
 # 2. Install Firehol from AUR
 # ==============================
-echo -e "${BBlue}[+] Installing Firehol from AUR...${NC}"
 if ! command -v yay &> /dev/null; then
     echo -e "${BBlue}[+] Installing yay AUR helper...${NC}"
-    YAY_TEMP_DIR="$HOME/yay_temp"
-    mkdir -p "$YAY_TEMP_DIR"
-    run_user git clone https://aur.archlinux.org/yay.git "$YAY_TEMP_DIR" || { echo "[!] Failed to clone yay."; exit 1; }
+    YAY_TEMP_DIR=$(mktemp -d)
+    run_user git clone https://aur.archlinux.org/yay.git "$YAY_TEMP_DIR" || { 
+        echo "[!] Failed to clone yay."; 
+        exit 1; 
+    }
     cd "$YAY_TEMP_DIR" || exit 1
-    run_user makepkg -si --noconfirm || { echo "[!] Failed to install yay."; exit 1; }
+    run_user makepkg -si --noconfirm || { 
+        echo "[!] Failed to install yay."; 
+        exit 1; 
+    }
     cd - || exit 1
     rm -rf "$YAY_TEMP_DIR"
 fi
 
-# Install FireHOL as regular user
+# Install FireHOL as a regular user
 # Check if ping is available
 if ! command -v ping &> /dev/null; then
     echo -e "${BBlue}[!] The ping command is not available. Installing iputils package...${NC}"
@@ -74,8 +78,8 @@ run_sudo pacman -S --noconfirm jq less || { echo "[!] Failed to install addition
 
 echo -e "${BBlue}[+] Installing FireHOL from AUR...${NC}"
 run_user yay -S --noconfirm firehol || { 
-    echo "[!] Failed to install FireHOL. Check if all dependencies are installed."; 
-    echo "    The build log suggests 'ping' command is missing, which should be provided by iputils package.";
+    echo "[!] Failed to install FireHOL. Ensure yay is correctly installed and try again."
+    echo "    You may need to install yay or check for AUR helper issues manually."
     exit 1; 
 }
 
