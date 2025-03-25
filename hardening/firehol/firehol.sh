@@ -3,11 +3,15 @@
 # Script: firehol.sh
 # Description: Installs and configures Firehol with IP sets from Firehol's blocklist-ipsets repository.
 # Author: @brulliant
-#Linkedin: https://www.linkedin.com/in/schmidbruno/
+# LinkedIn: https://www.linkedin.com/in/schmidbruno/
 # Usage: ./firehol.sh
 
+# Define color codes for output
 BBlue='\033[1;34m'
 NC='\033[0m'
+
+# Log all output to a file for later review
+exec > >(tee -a /var/log/firehol_install.log) 2>&1
 
 # ==============================
 # Helper Functions
@@ -40,16 +44,10 @@ run_sudo pacman -S --noconfirm wget git cronie iputils iproute2 jq less || {
     exit 1; 
 }
 
-for pkg in firehol update-ipsets; do
-    if ! command -v "$pkg" &> /dev/null; then
-        echo "[!] $pkg is not installed. Please check the installation process."
-        exit 1
-    fi
-done
-
 # ==============================
 # 2. Install Firehol from AUR
 # ==============================
+echo -e "${BBlue}[+] Installing Firehol from AUR...${NC}"
 if ! command -v yay &> /dev/null; then
     echo -e "${BBlue}[+] Installing yay AUR helper...${NC}"
     YAY_TEMP_DIR=$(mktemp -d)
@@ -66,22 +64,21 @@ if ! command -v yay &> /dev/null; then
     rm -rf "$YAY_TEMP_DIR"
 fi
 
-# Install FireHOL as a regular user
-# Check if ping is available
-if ! command -v ping &> /dev/null; then
-    echo -e "${BBlue}[!] The ping command is not available. Installing iputils package...${NC}"
-    run_sudo pacman -S --noconfirm iputils || { echo "[!] Failed to install iputils."; exit 1; }
-fi
-
-# Install additional dependencies that might be required by FireHOL
-run_sudo pacman -S --noconfirm jq less || { echo "[!] Failed to install additional dependencies."; exit 1; }
-
+# Install FireHOL as regular user
 echo -e "${BBlue}[+] Installing FireHOL from AUR...${NC}"
 run_user yay -S --noconfirm firehol || { 
     echo "[!] Failed to install FireHOL. Ensure yay is correctly installed and try again."
-    echo "    You may need to install yay or check for AUR helper issues manually."
+    echo "    You may need to manually install yay or check for AUR helper issues."
     exit 1; 
 }
+
+# Verify installation
+for pkg in firehol update-ipsets; do
+    if ! command -v "$pkg" &> /dev/null; then
+        echo "[!] $pkg is not installed. Please check the installation process."
+        exit 1
+    fi
+done
 
 # ==============================
 # 3. Configure Firehol Rules
@@ -94,14 +91,15 @@ if [ -f "$FIREHOL_CONF" ]; then
     run_sudo cp "$FIREHOL_CONF" "$BACKUP_CONF" || { echo "[!] Failed to backup configuration."; exit 1; }
 fi
 
-# Generate a simpler configuration to ensure FireHOL starts correctly
-echo -e "${BBlue}[+] Creating basic Firehol configuration...${NC}"
+# Generate a hardened configuration with drop policy and logging
+echo -e "${BBlue}[+] Creating hardened Firehol configuration...${NC}"
 cat <<EOF > /tmp/firehol.conf
 version 6
 
 # Default interface for all traffic
 interface any world
     policy drop
+    protection strong  # Enable logging for dropped packets
     # Accept specific incoming services
     server ssh accept
     server http accept
@@ -109,15 +107,17 @@ interface any world
     # Allow all outbound traffic
     client all accept
 EOF
+
 run_sudo mkdir -p "/etc/firehol"
 run_sudo cp /tmp/firehol.conf "$FIREHOL_CONF"
-run_sudo chmod 600 "$FIREHOL_CONF" || { echo "[!] Failed to set permissions."; exit 1; }
+run_sudo chown root:root "$FIREHOL_CONF"
+run_sudo chmod 600 "$FIREHOL_CONF" || { echo "[!] Failed to set permissions on Firehol configuration."; exit 1; }
 
 # ==============================
 # 4. Automate Blocklist Updates
 # ==============================
 echo -e "${BBlue}[+] Scheduling automatic updates via cron, daily...${NC}"
-CRON_JOB="*/30 * * * * root /sbin/update-ipsets && /usr/bin/firehol try"
+CRON_JOB="0 0 * * * root /sbin/update-ipsets && /usr/bin/firehol try"
 CRON_FILE="/etc/cron.d/firehol-ipsets"
 
 echo "$CRON_JOB" > /tmp/firehol-ipsets
@@ -126,63 +126,50 @@ run_sudo chmod 644 "$CRON_FILE" || { echo "[!] Failed to set permissions on cron
 run_sudo systemctl enable cronie --now || { echo "[!] Failed to enable cronie."; exit 1; }
 
 # ==============================
-# 5. Enable Firehol Service (but don't start yet)
+# 5. Enable and Start Firehol Service
 # ==============================
-echo -e "${BBlue}[+] Enabling Firehol service...${NC}"
-run_sudo systemctl enable firehol || { echo "[!] Failed to enable Firehol."; exit 1; }
-
-# ==============================
-# 6. Test configuration before starting
-# ==============================
-echo -e "${BBlue}[+] Testing FireHOL configuration...${NC}"
-run_sudo firehol try || {
-    echo "[!] FireHOL configuration test failed.";
-    echo "    Using fallback minimal configuration...";
-    
-    # Create a minimal fallback configuration
-    cat <<EOF > /tmp/firehol-minimal.conf
-version 6
-interface any world
-    policy accept
-EOF
-    run_sudo cp /tmp/firehol-minimal.conf "$FIREHOL_CONF"
-    echo "[+] Created minimal configuration to ensure FireHOL can start."
+echo -e "${BBlue}[+] Enabling and starting Firehol service...${NC}"
+run_sudo systemctl enable firehol || { 
+    echo "[!] Failed to enable Firehol service. Check systemctl status."; 
+    exit 1; 
+}
+run_sudo systemctl start firehol || { 
+    echo "[!] Failed to start Firehol service. Check logs with: journalctl -xeu firehol.service"; 
+    exit 1; 
 }
 
-# ==============================
-# 7. Starting Firehol with Diagnostic Information
-# ==============================
-echo -e "${BBlue}[+] Checking FireHOL configuration...${NC}"
-run_sudo firehol helpme || { echo "[!] Failed to get FireHOL diagnostic information."; }
-
-echo -e "${BBlue}[+] Running FireHOL debug to check configuration...${NC}"
-run_sudo firehol debug || { echo "[!] Failed to debug FireHOL configuration."; }
-
-# Start FireHOL with the basic configuration
-echo -e "${BBlue}[+] Trying to start FireHOL with basic configuration...${NC}"
-run_sudo systemctl restart firehol || { 
-    echo "[!] Failed to start FireHOL service.";
-    echo "    Please check the logs with: journalctl -xeu firehol.service";
-}
+# Verify service status
+if ! run_sudo systemctl is-active --quiet firehol; then
+    echo "[!] FireHOL service is not running. Check logs with: journalctl -xeu firehol.service"
+    exit 1
+fi
 
 # ==============================
-# 8. Add IP Sets After Basic Configuration Works
+# 6. Optional: Enable IP Sets
 # ==============================
-echo -e "${BBlue}[+] Once FireHOL starts correctly, you can enable IP sets with:${NC}"
-echo -e "    sudo update-ipsets enable firehol_level1"
-echo -e "    sudo firehol restart"
-echo -e ""
-echo -e "${BBlue}[+] Then gradually add more IP sets to your configuration as needed${NC}"
+read -p "Do you want to enable the firehol_level1 IP set now? (y/N): " enable_ipset
+if [[ "$enable_ipset" =~ ^[Yy]$ ]]; then
+    echo -e "${BBlue}[+] Enabling firehol_level1 IP set...${NC}"
+    run_sudo update-ipsets enable firehol_level1 || { 
+        echo "[!] Failed to enable IP set."; 
+        exit 1; 
+    }
+    echo "blacklist fullbogons ipset:firehol_level1" >> "$FIREHOL_CONF"
+    run_sudo firehol try || { 
+        echo "[!] Failed to apply IP set configuration."; 
+        exit 1; 
+    }
+fi
 
-echo -e "${BBlue}[+] FireHOL installation complete!${NC}"
+# ==============================
+# 7. Final Steps and Recommendations
+# ==============================
+echo -e "${BBlue}[+] FireHOL installation and configuration complete!${NC}"
 echo -e ""
 echo -e "=========== NEXT STEPS ==========="
-echo -e "1. Check if FireHOL is running with: systemctl status firehol"
-echo -e "2. If not running, view logs with: journalctl -xeu firehol.service"
-echo -e "3. Once basic configuration works, update with blocklists:"
-echo -e "   a. Run: sudo update-ipsets download"
-echo -e "   b. Enable specific IP sets: sudo update-ipsets enable firehol_level1"
-echo -e "   c. Edit /etc/firehol/firehol.conf to add: blacklist fullbogons ipset:firehol_level1"
-echo -e "   d. Test and reload: sudo firehol try"
+echo -e "1. Check FireHOL status with: systemctl status firehol"
+echo -e "2. View logs with: journalctl -xeu firehol.service"
+echo -e "3. To add more IP sets, edit /etc/firehol/firehol.conf and use 'update-ipsets enable <set_name>'"
+echo -e "4. Test configuration changes with: sudo firehol try"
 echo -e "=================================="
 exit 0
