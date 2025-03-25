@@ -101,20 +101,17 @@ version 6
 
 # Default interface for all traffic
 interface any world
-    policy accept
-
+    policy drop
     # Accept specific incoming services
     server ssh accept
     server http accept
     server https accept
-
     # Allow all outbound traffic
     client all accept
 EOF
-
 run_sudo mkdir -p "/etc/firehol"
 run_sudo cp /tmp/firehol.conf "$FIREHOL_CONF"
-run_sudo chmod 600 "$FIREHOL_CONF" || { echo "[!] Failed to set permissions on Firehol configuration."; exit 1; }
+run_sudo chmod 600 "$FIREHOL_CONF" || { echo "[!] Failed to set permissions."; exit 1; }
 
 # ==============================
 # 4. Automate Blocklist Updates
