@@ -109,8 +109,6 @@ EOF
 
 echo -e "${BBlue}Enabling and starting Stubby service...${NC}"
 systemctl enable stubby
-systemctl start stubby
-
 
 systemctl enable systemd-resolved.service  # Enable and start
 
@@ -303,9 +301,19 @@ pacman -S --noconfirm arpwatch
 echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S --noconfirm usbguard
 
+echo -e "${BBlue}Enhancing usbguard configuration...${NC}"
+cat <<EOF > /etc/usbguard/usbguard-daemon.conf
+RuleFile=/etc/usbguard/rules.conf
+ImplicitPolicyTarget=block
+PresentDevicePolicy=apply-policy
+PresentControllerPolicy=keep
+InsertedDevicePolicy=apply-policy
+RestoreControllerDeviceState=false
+DeviceRulesWithPort=false
+EOF
+
 sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
 systemctl enable usbguard.service
-
 
 # Hardening /etc/login.defs
 echo -e "${BBlue}Changing the value of UMASK from 022 to 027...${NC}"
@@ -639,6 +647,12 @@ fi
 
 
 configure_ssh # Call the SSH configuration function
+
+echo -e "${BBlue}Applying hardened compiler flags...${NC}"
+sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
+sed -i '/^CXXFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
+sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
+sed -i '/^OPTIONS=/ s/!/!pie /' /etc/makepkg.conf
 
 # Harden Compilers by Restricting Access to Root User Only
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
