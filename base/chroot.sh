@@ -53,6 +53,10 @@ CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
 pacman-key --init
 pacman-key --populate archlinux
 
+echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
+userdel -r games 2>/dev/null || true
+groupdel games 2>/dev/null || true
+
 timedatectl set-timezone "$TIMEZONE"
 hwclock --systohc --utc
 
@@ -658,6 +662,20 @@ fi
 
 
 configure_ssh # Call the SSH configuration function
+
+sleep 2
+
+echo -e "${BBlue}Setting up SSH key rotation...${NC}"
+cat <<EOF > /usr/local/bin/rotate-ssh-keys.sh
+#!/bin/bash
+ssh-keygen -t "$SSH_KEY_TYPE" -f "$SSH_KEY_FILE" -q -N "" -C "$USERNAME@$HOSTNAME-$(date +%Y%m%d)"
+chown "$USERNAME:$USERNAME" "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
+chmod 600 "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
+EOF
+chmod +x /usr/local/bin/rotate-ssh-keys.sh
+echo "0 0 1 */3 * /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
+
+sleep 1
 
 echo -e "${BBlue}Applying hardened compiler flags...${NC}"
 sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
