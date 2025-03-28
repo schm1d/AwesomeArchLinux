@@ -156,7 +156,18 @@ iptables-save > /etc/iptables/rules.v4
 
 echo -e "${BBlue}Installing and configuring logrotate...${NC}"
 pacman -S --noconfirm logrotate
-systemctl enable logrotate.timer
+echo -e "${BBlue}Enhancing logging configuration...${NC}"
+cat <<EOF > /etc/logrotate.d/custom
+/var/log/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 640 root adm
+}
+EOF
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
@@ -1062,6 +1073,29 @@ EOF
 if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
+
+echo -e "${BBlue}Setting up automatic security updates...${NC}"
+pacman -S --noconfirm pacman-contrib
+cat <<EOF > /etc/systemd/system/pacman-autoupdate.timer
+[Unit]
+Description=Run pacman autoupdate daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+cat <<EOF > /etc/systemd/system/pacman-autoupdate.service
+[Unit]
+Description=Update system packages automatically
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pacman -Syu --noconfirm
+EOF
+systemctl enable pacman-autoupdate.timer
 
 sleep 2
 
