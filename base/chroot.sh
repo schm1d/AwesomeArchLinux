@@ -71,13 +71,47 @@ echo "$HOSTNAME" > /etc/hostname
 echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
 
 # --- Network Configuration ---
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
-echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-
+echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
 echo "[Resolve]" > /etc/systemd/resolved.conf
-echo "DNS=8.8.8.8 8.8.4.4" >> /etc/systemd/resolved.conf
-echo "FallbackDNS=1.1.1.1 9.9.9.9" >> /etc/systemd/resolved.conf
+echo "DNS=127.0.0.1:5353" >> /etc/systemd/resolved.conf
+echo "FallbackDNS=127.0.0.1:5353" >> /etc/systemd/resolved.conf
 echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
+echo "DNSOverTLS=no" >> /etc/systemd/resolved.conf
+
+echo -e "${BBlue}Installing Stubby for DNS-over-TLS...${NC}"
+pacman -S stubby --noconfirm
+
+echo -e "${BBlue}Configuring Stubby...${NC}"
+cat <<EOF > /etc/stubby/stubby.yml
+resolution_type: GETDNS_RESOLUTION_STUB
+dns_transport_list:
+  - GETDNS_TRANSPORT_TLS
+tls_authentication: GETDNS_AUTHENTICATION_REQUIRED
+dnssec_return_status: GETDNS_EXTENSION_TRUE
+appdata_dir: "/var/cache/stubby"
+listen_addresses:
+  - 127.0.0.1@5353
+  - 0::1@5353
+upstream_recursive_servers:
+  - address_data: 8.8.8.8
+    tls_auth_name: "dns.google"
+    tls_port: 853
+  - address_data: 8.8.4.4
+    tls_auth_name: "dns.google"
+    tls_port: 853
+  - address_data: 1.1.1.1
+    tls_auth_name: "cloudflare-dns.com"
+    tls_port: 853
+  - address_data: 9.9.9.9
+    tls_auth_name: "dns.quad9.net"
+    tls_port: 853
+EOF
+
+echo -e "${BBlue}Enabling and starting Stubby service...${NC}"
+systemctl enable stubby
+systemctl start stubby
+
+
 systemctl enable systemd-resolved.service  # Enable and start
 
 # Set the timezone
@@ -272,6 +306,7 @@ pacman -S --noconfirm usbguard
 sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
 systemctl enable usbguard.service
 
+
 # Hardening /etc/login.defs
 echo -e "${BBlue}Changing the value of UMASK from 022 to 027...${NC}"
 sed -i 's/^UMASK[[:space:]]\+022/UMASK\t\t027/' /etc/login.defs
@@ -320,7 +355,7 @@ echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install rds /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 echo "install tipc /bin/true" >> /etc/modprobe.d/disable-protocols.conf
 
-# Disabling core dump. Comment if you need it.
+# Disabling core dump. Please feel free to comment if you need it.
 echo -e "${BBlue}Disabling core dump...${NC}"
 echo "* hard core 0" >> /etc/security/limits.conf
 
