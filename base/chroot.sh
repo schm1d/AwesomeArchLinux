@@ -453,6 +453,18 @@ EOF
 
 systemctl enable fail2ban
 
+echo -e "${BBlue}Improving journald configuration...${NC}"
+cat <<EOF > /etc/systemd/journald.conf
+[Journal]
+Storage=persistent
+Compress=yes
+Seal=yes
+SplitMode=login
+ForwardToSyslog=no
+SystemMaxUse=200M
+EOF
+systemctl restart systemd-journald
+
 # Configure sudo
 echo -e "${BBlue}Hardening sudo...${NC}"
 # Create a group for sudo
