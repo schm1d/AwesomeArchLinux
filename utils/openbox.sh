@@ -37,11 +37,11 @@ handle_error() {
 echo -e "${BBlue}Installing Openbox and essential desktop packages...${NC}"
 sudo pacman -Syu --noconfirm || handle_error "Failed to update system."
 sudo pacman -S --noconfirm \
-  xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs \
-  lightdm lightdm-gtk-greeter terminator lxpolkit \
-  tint2 pcmanfm xterm networkmanager network-manager-applet \
-  thunar-archive-plugin xarchiver feh lxappearance neofetch \
-  xdg-user-dirs-gtk xdg-utils networkmanager-openvpn torbrowser-launcher \
+  xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs chatblade \
+  lightdm lightdm-gtk-greeter terminator lxpolkit vagrant ipython notepadqq \
+  tint2 pcmanfm xterm networkmanager network-manager-applet pidgin pidgin-otr\
+  thunar-archive-plugin xarchiver feh lxappearance neofetch elinks dhex hexer\
+  xdg-user-dirs-gtk xdg-utils networkmanager-openvpn torbrowser-launcher code \
   networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine \
   gtk-engines veracrypt onionshare chromium libforensic1394 jdk21-openjdk
   || handle_error "Failed to install Openbox packages."
