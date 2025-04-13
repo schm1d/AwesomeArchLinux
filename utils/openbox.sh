@@ -15,18 +15,30 @@ NC='\033[0m'
 TARGET_USER="$USER"
 HOME_DIR="/home/$TARGET_USER"
 
+if [ "$TARGET_USER" = "root" ]; then
+    echo "Please set TARGET_USER to a non-root user."
+    exit 1
+fi
+
+if [ ! -d "$HOME_DIR" ]; then
+    echo "Home directory '$HOME_DIR' doesn't exist. Please create it or adjust TARGET_USER."
+    exit 1
+fi
+
+
 # Function to handle errors
 handle_error() {
     echo "Error: $1" >&2
     exit 1
 }
 
+
 # 1) Install Openbox and related packages
 echo -e "${BBlue}Installing Openbox and essential desktop packages...${NC}"
 sudo pacman -Syu --noconfirm || handle_error "Failed to update system."
 sudo pacman -S --noconfirm \
-  xorg-server xorg-xinit openbox obconf-qt \
-  lightdm lightdm-gtk-greeter terminator \
+  xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs \
+  lightdm lightdm-gtk-greeter terminator lxpolkit \
   tint2 pcmanfm xterm networkmanager network-manager-applet \
   thunar-archive-plugin xarchiver feh lxappearance neofetch\
   || handle_error "Failed to install Openbox packages."
