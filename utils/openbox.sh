@@ -40,7 +40,10 @@ sudo pacman -S --noconfirm \
   xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs \
   lightdm lightdm-gtk-greeter terminator lxpolkit \
   tint2 pcmanfm xterm networkmanager network-manager-applet \
-  thunar-archive-plugin xarchiver feh lxappearance neofetch\
+  thunar-archive-plugin xarchiver feh lxappearance neofetch \
+  xdg-user-dirs-gtk xdg-utils networkmanager-openvpn torbrowser-launcher \
+  networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine \
+  gtk-engines veracrypt onionshare chromium libforensic1394 jdk21-openjdk
   || handle_error "Failed to install Openbox packages."
 
 # 2) Bluetooth detection and installation
