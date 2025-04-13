@@ -63,7 +63,7 @@ echo "kernel.panic_on_oops = 1" >> /etc/sysctl.d/99-sysctl.conf # Specifies that
 # once the kernel has finished booting, no further kernel modules can be loaded (even by root). 
 # If your system has anything that needs the vfat module later—most commonly an EFI System Partition 
 # (/boot/efi) or other FAT/EFI partitions—the kernel must load vfat at boot before that sysctl disables module loading.
-echo "kernel.modules_disabled = 1" >> /etc/sysctl.d/99-sysctl.conf
+echo "kernel.modules_disabled = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.randomize_va_space = 2" >> /etc/sysctl.d/99-sysctl.conf
 # echo "kernel.exec-shield = 1" >> /etc/sysctl.d/99-sysctl.conf #  Provide protection against buffer overflow attacks.
 echo "kernel.kptr_restrict = 2" >> /etc/sysctl.d/99-sysctl.conf # This setting aims to mitigate kernel pointer leaks.
