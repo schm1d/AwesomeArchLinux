@@ -29,7 +29,7 @@ handle_error() {
 echo -e "${BBlue}Installing GNOME Desktop packages...${NC}"
 pacman -Syu --noconfirm || handle_error "Failed to update system."
 pacman -S --noconfirm \
-  gdm gitg gnome gnome-appfolders-manager gnome-backgrounds gnome-connections gnome-logs evince vinagre \
+  gdm gitg gnome gnome-appfolders-manager gnome-backgrounds gnome-connections gnome-logs evince vinagre glib2 imagemagick\
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware gnome-keybindings eog libforensic1394 \
   gnome-keyring networkmanager-openvpn nautilus parted regexxer seahorse-nautilus jomon gnome-control-center firefox baobab deja-dup \
   sushi xdg-desktop-portal-gnome ghex gnome-font-viewer gnome-multi-writer gnome-nettool gnome-session gnome-screenshot loupe \
