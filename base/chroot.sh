@@ -883,7 +883,7 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     # Adjust GRUB
     echo -e "${BBlue}Adjusting /etc/default/grub for NVIDIA...${NC}"
-    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia_drm.modeset=1\2|' /etc/default/grub
+    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia-drm.modeset=1\2|' /etc/default/grub
 
     # Update GRUB config
     if [[ -f /boot/grub/grub.cfg ]]; then
