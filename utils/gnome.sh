@@ -89,6 +89,9 @@ echo -e "${BBlue}Hardening GNOME configuration...${NC}"
 systemctl disable --now geoclue.service || handle_error "Failed to disable geoclue service."
 chmod 700 "$HOME_DIR/.config" || handle_error "Failed to set permissions on .config directory."
 
+# Set Keyboard X11 layout: https://wiki.archlinux.org/title/Xorg/Keyboard_configuration
+# sudo localectl set-x11-keymap ch pc105 de_nodeadkeys
+
 # 7) Clean up package cache
 echo -e "${BBlue}Cleaning up package cache...${NC}"
 pacman -Sc --noconfirm || handle_error "Failed to clean package cache."
