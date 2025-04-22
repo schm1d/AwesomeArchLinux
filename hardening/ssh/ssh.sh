@@ -21,9 +21,9 @@ echo -e "${BBlue}Cleaning old keys...${NC}"
 cd /etc/ssh
 shred -u ssh_host_*key*
 
-echo -e "${BBlue}Creating ed25519, RSA, and ecdsa keys...${NC}"
-ssh-keygen -t ed25519 -f ssh_host_ed25519_key -N "" < /dev/null
-ssh-keygen -t rsa -b 4096 -f ssh_host_rsa_key -N "" < /dev/null
+echo -e "${BBlue}Creating ed25519 and RSA keys...${NC}"
+ssh-keygen -t ed25519 -f ssh_host_ed25519_key -N "$USER" < /dev/null
+ssh-keygen -t rsa -b 4096 -f ssh_host_rsa_key -N "$USER" < /dev/null
 #ssh-keygen -t ecdsa -b 4096 -f ssh_host_ecdsa_key -N "$USER" < /dev/null
 
 echo -e "${BBlue}Hardening \"/etc/ssh/sshd_config\"...${NC}"
