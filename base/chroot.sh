@@ -83,6 +83,7 @@ echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
 echo "DNSOverTLS=no" >> /etc/systemd/resolved.conf
 
 echo -e "${BBlue}Installing Stubby for DNS-over-TLS...${NC}"
+pacman -S dnssec-anchors --noconfirm
 pacman -S stubby --noconfirm
 
 echo -e "${BBlue}Configuring Stubby...${NC}"
