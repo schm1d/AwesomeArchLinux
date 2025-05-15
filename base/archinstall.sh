@@ -287,6 +287,10 @@ genfstab -pU /mnt >> /mnt/etc/fstab
 echo -e "${BBlue}Copying the $CRYPT_NAME key to $LUKS_KEYS ...${NC}"
 mkdir --verbose -p "/mnt$LUKS_KEYS"
 cp ./boot.key "/mnt$LUKS_KEYS/boot.key"
+chown root:root "/mnt$LUKS_KEYS/boot.key"
+chmod 400 "/mnt$LUKS_KEYS/boot.key" # Read-only for root
+chown root:root "/mnt$LUKS_KEYS"
+chmod 700 "/mnt$LUKS_KEYS"         # Access only for root
 
 # Securely delete the key file from the local file system.
 echo -e "${BBlue}Securely erasing the local key file...${NC}"
