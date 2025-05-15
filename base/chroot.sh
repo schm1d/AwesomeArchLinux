@@ -72,7 +72,11 @@ echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
 echo "$HOSTNAME" > /etc/hostname
-echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" > /etc/hosts
+
+echo -e "${BBlue}Setting /etc/hosts...${NC}"
+echo "127.0.0.1 localhost" > /etc/hosts
+echo "::1       localhost" >> /etc/hosts
+echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
 
 # --- Network Configuration ---
 echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
