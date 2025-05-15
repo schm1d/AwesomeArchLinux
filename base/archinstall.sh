@@ -198,7 +198,7 @@ partprobe "$DISK"
 
 echo -e "${BBlue}\nCreating the LUKS container on $PARTITION3...${NC}"
 cryptsetup -q --cipher aes-xts-plain64 --key-size 512 --hash sha512 \
-  --iter-time 3000 --use-random --type luks1 luksFormat "$PARTITION3"
+ --pbkdf argon2id --iter-time 3000 --use-random --type luks2 luksFormat "$PARTITION3"
 
 # Prompt repeatedly for the correct LUKS passphrase
 ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
