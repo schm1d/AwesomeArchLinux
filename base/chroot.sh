@@ -319,6 +319,25 @@ echo -e "${BBlue}ClamAV + Unofficial Signatures configuration completed!\n${NC}"
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
 pacman -S --noconfirm rkhunter
 
+rkhunter --propupd
+cat <<EOF > /etc/systemd/system/rkhunter-check.service
+[Unit]
+Description=Run rkhunter daily check
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rkhunter --check --cronjob --rwo
+EOF
+cat <<EOF > /etc/systemd/system/rkhunter-check.timer
+[Unit]
+Description=Run rkhunter daily check
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl enable rkhunter-check.timer
+
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
 pacman -S --noconfirm arpwatch
 
