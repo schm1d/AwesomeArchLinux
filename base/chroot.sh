@@ -714,8 +714,9 @@ for compiler in gcc g++ clang make as ld; do
 done
 
 # Set default ACLs on home directory
-echo -e "${BBlue}Setting default ACLs on home directory${NC}"
+echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
+setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
 
 echo -e "${BBlue}Adding GRUB package...${NC}"
 pacman -S grub efibootmgr os-prober --noconfirm
