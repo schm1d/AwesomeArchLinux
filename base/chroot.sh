@@ -139,6 +139,10 @@ echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
 echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
 echo -e "${BBlue}Configuring IPtables...${NC}"
+
+pacman -S --noconfirm iptables-nft nftables
+systemctl enable iptables.service # To load IPv4 rules
+
 # Set default policies
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
