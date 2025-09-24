@@ -443,10 +443,9 @@ cryptsetup -v \
     --pbkdf argon2id \
     --pbkdf-memory 4194304 \
     --pbkdf-parallel 4 \
-    --pbkdf-iterations 10 \
+    --iter-time 3000 \
     --use-random \
     --verify-passphrase \
-    --label "ARCH_CRYPT" \
     luksFormat "$PARTITION3"
 
 # Test password
