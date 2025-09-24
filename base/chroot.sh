@@ -231,8 +231,8 @@ upstream_recursive_servers:
     tls_port: 853
 EOF
 
-# Create and secure cache directory
 echo -e "${BBlue}Setting up Stubby cache directory...${NC}"
+useradd -r -s /usr/bin/nologin stubby 2>/dev/null || true
 mkdir -p /var/cache/stubby
 chown stubby:stubby /var/cache/stubby
 chmod 750 /var/cache/stubby
