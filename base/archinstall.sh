@@ -301,12 +301,13 @@ EOF
 # Validate network
 validate_network
 
-# Select mirrors
+# Select mirrors - avoid SIGPIPE from head
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
 curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
-    sed -e 's/^#Server/Server/' -e '/^#/d' | \
-    head -20 > /etc/pacman.d/mirrorlist
+    sed -e 's/^#Server/Server/' -e '/^#/d' > /tmp/mirrorlist.tmp
+head -20 /tmp/mirrorlist.tmp > /etc/pacman.d/mirrorlist
+rm -f /tmp/mirrorlist.tmp
 
 # Detect and setup TPM
 detect_tpm || true
