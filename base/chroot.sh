@@ -138,34 +138,51 @@ echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf &&
 echo 'FONT=lat9w-16' >> /etc/vconsole.conf &&
 echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
-echo -e "${BBlue}Configuring IPtables...${NC}"
+echo -e "${BBlue}Configuring firewall with nftables...${NC}"
 
-pacman -S --noconfirm iptables-nft nftables
-systemctl enable iptables.service # To load IPv4 rules
+pacman -S --noconfirm nftables
 
-# Set default policies
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT ACCEPT
+cat <<'EOF' > /etc/nftables.conf
+#!/usr/sbin/nft -f
 
-# Allow loopback interface traffic (localhost communication)
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A OUTPUT -o lo -j ACCEPT
+flush ruleset
 
-# Allow established and related incoming connections
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        
+        # Allow loopback
+        iif lo accept
+        
+        # Allow established connections
+        ct state established,related accept
+        
+        # Drop invalid connections
+        ct state invalid drop
+        
+        # Allow SSH with rate limiting
+        tcp dport $SSH_PORT ct state new limit rate 2/minute accept
+        
+        # Drop everything else
+        counter drop
+    }
+    
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+    
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+EOF
 
-# Allow SSH on custom port ($SSH_PORT) with rate limiting
-iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -m limit --limit 2/min --limit-burst 5 -j ACCEPT
+sed -i "s/\$SSH_PORT/$SSH_PORT/g" /etc/nftables.conf
 
-# Drop any other new connections to the custom SSH port beyond the rate limit
-iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
+systemctl enable nftables.service
+systemctl start nftables.service
 
-# Drop invalid packets
-iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
-
-# Save rules for persistency
-iptables-save > /etc/iptables/rules.v4
+echo -e "${BBlue}Firewall configuration with nftables completed.${NC}"
 
 echo -e "${BBlue}Installing and configuring logrotate...${NC}"
 pacman -S --noconfirm logrotate
