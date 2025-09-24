@@ -71,55 +71,245 @@ echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
 
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
+hostnamectl set-hostname "$HOSTNAME"
 echo "$HOSTNAME" > /etc/hostname
 
-echo -e "${BBlue}Setting /etc/hosts...${NC}"
-echo "127.0.0.1 localhost" > /etc/hosts
-echo "::1       localhost" >> /etc/hosts
-echo "127.0.0.1 localhost localhost.localdomain $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
+echo -e "${BBlue}Configuring /etc/hosts...${NC}"
+cat > /etc/hosts <<EOF
+# Static table lookup for hostnames
+# IPv4
+127.0.0.1       localhost
+127.0.1.1       $HOSTNAME.localdomain $HOSTNAME
 
-# --- Network Configuration ---
-echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
-echo "[Resolve]" > /etc/systemd/resolved.conf
-echo "DNS=127.0.0.1:5353" >> /etc/systemd/resolved.conf
-echo "FallbackDNS=127.0.0.1:5353" >> /etc/systemd/resolved.conf
-echo "DNSSEC=yes" >> /etc/systemd/resolved.conf
-echo "DNSOverTLS=no" >> /etc/systemd/resolved.conf
+# IPv6
+::1             localhost ip6-localhost ip6-loopback
+ff02::1         ip6-allnodes
+ff02::2         ip6-allrouters
+
+# Block some tracking domains at host level
+0.0.0.0         googleadservices.com
+0.0.0.0         google-analytics.com
+0.0.0.0         doubleclick.net
+0.0.0.0         facebook.com
+0.0.0.0         www.facebook.com
+EOF
+
+# Set proper permissions
+chmod 644 /etc/hosts
+chown root:root /etc/hosts
+
+echo -e "${BBlue}Configuring network parameters...${NC}"
+# Create networkd configuration for better network management
+mkdir -p /etc/systemd/network/
+
+# Configure network hardening via networkd
+cat > /etc/systemd/network/20-wired.network <<EOF
+[Match]
+Name=en*
+Name=eth*
+
+[Network]
+DHCP=yes
+DNSSEC=yes
+DNSOverTLS=no  # We use Stubby for this
+IPv6PrivacyExtensions=yes
+
+[DHCPv4]
+UseDNS=no  # Don't accept DNS from DHCP
+UseDomains=no
+UseNTP=no  # Use our own NTP configuration
+
+[DHCPv6]
+UseDNS=no
+UseNTP=no
+
+[IPv6AcceptRA]
+UseDNS=no
+DHCPv6Client=no
+EOF
+
+# Configure NetworkManager with privacy settings (if installed)
+if [ -d /etc/NetworkManager ]; then
+    echo -e "${BBlue}Configuring NetworkManager privacy...${NC}"
+    mkdir -p /etc/NetworkManager/conf.d/
+    cat > /etc/NetworkManager/conf.d/00-privacy.conf <<EOF
+[main]
+# Use systemd-resolved
+systemd-resolved=true
+
+[connection]
+# Generate random MAC addresses for privacy
+wifi.cloned-mac-address=random
+ethernet.cloned-mac-address=random
+connection.stable-id=\${CONNECTION}/\${BOOT}
+EOF
+fi
+
+# Configure systemd-networkd (if NetworkManager not used)
+if systemctl is-enabled systemd-networkd &>/dev/null; then
+    echo -e "${BBlue}Configuring systemd-networkd...${NC}"
+    mkdir -p /etc/systemd/network/
+    cat > /etc/systemd/network/20-wired.network <<EOF
+[Match]
+Name=en*
+Name=eth*
+
+[Network]
+DHCP=yes
+IPv6PrivacyExtensions=yes
+
+[DHCPv4]
+UseDNS=no  # We use Stubby instead
+UseNTP=yes
+
+[DHCPv6]
+UseDNS=no
+EOF
+fi
+
+# Set proper permissions
+chmod 644 /etc/hosts
+chown root:root /etc/hosts
 
 echo -e "${BBlue}Installing Stubby for DNS-over-TLS...${NC}"
-pacman -S dnssec-anchors --noconfirm
-pacman -S stubby --noconfirm
+pacman -S --noconfirm dnssec-anchors stubby
 
-echo -e "${BBlue}Configuring Stubby...${NC}"
+echo -e "${BBlue}Configuring Stubby for secure DNS...${NC}"
 cat <<EOF > /etc/stubby/stubby.yml
+# Stubby configuration for DNS-over-TLS with privacy focus
 resolution_type: GETDNS_RESOLUTION_STUB
 dns_transport_list:
   - GETDNS_TRANSPORT_TLS
 tls_authentication: GETDNS_AUTHENTICATION_REQUIRED
+tls_query_padding_blocksize: 128
+edns_client_subnet_private: 1
 dnssec_return_status: GETDNS_EXTENSION_TRUE
 appdata_dir: "/var/cache/stubby"
+round_robin_upstreams: 1
+idle_timeout: 10000
+tls_connection_retries: 5
+tls_backoff_time: 900
+timeout: 2000
+
+# Local listening addresses
 listen_addresses:
   - 127.0.0.1@5353
-  - 0::1@5353
+  - ::1@5353
+
+# DNS servers (privacy-focused order)
 upstream_recursive_servers:
+  # Quad9 - Blocks malicious domains, no logging
+  - address_data: 9.9.9.9
+    tls_auth_name: "dns.quad9.net"
+    tls_port: 853
+  - address_data: 149.112.112.112
+    tls_auth_name: "dns.quad9.net"
+    tls_port: 853
+  # Quad9 IPv6
+  - address_data: 2620:fe::fe
+    tls_auth_name: "dns.quad9.net"
+    tls_port: 853
+    
+  # Cloudflare - Fast, decent privacy policy
+  - address_data: 1.1.1.1
+    tls_auth_name: "cloudflare-dns.com"
+    tls_port: 853
+  - address_data: 1.0.0.1
+    tls_auth_name: "cloudflare-dns.com"
+    tls_port: 853
+  # Cloudflare IPv6
+  - address_data: 2606:4700:4700::1111
+    tls_auth_name: "cloudflare-dns.com"
+    tls_port: 853
+    
+  # Google - As fallback only
   - address_data: 8.8.8.8
     tls_auth_name: "dns.google"
     tls_port: 853
   - address_data: 8.8.4.4
     tls_auth_name: "dns.google"
     tls_port: 853
-  - address_data: 1.1.1.1
-    tls_auth_name: "cloudflare-dns.com"
-    tls_port: 853
-  - address_data: 9.9.9.9
-    tls_auth_name: "dns.quad9.net"
-    tls_port: 853
 EOF
 
-echo -e "${BBlue}Enabling and starting Stubby service...${NC}"
-systemctl enable stubby
+# Create and secure cache directory
+echo -e "${BBlue}Setting up Stubby cache directory...${NC}"
+mkdir -p /var/cache/stubby
+chown stubby:stubby /var/cache/stubby
+chmod 750 /var/cache/stubby
 
-systemctl enable systemd-resolved.service  # Enable and start
+# Configure systemd-resolved to use Stubby
+echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
+mkdir -p /etc/systemd/resolved.conf.d/
+cat <<EOF > /etc/systemd/resolved.conf.d/dns_over_tls.conf
+[Resolve]
+# Use Stubby as the only DNS resolver
+DNS=127.0.0.1#5353
+FallbackDNS=::1#5353
+Domains=~.
+DNSSEC=allow-downgrade
+DNSOverTLS=no
+MulticastDNS=no
+LLMNR=no
+Cache=yes
+DNSStubListener=yes
+ReadEtcHosts=yes
+EOF
+
+# Ensure proper service ordering
+echo -e "${BBlue}Configuring service dependencies...${NC}"
+mkdir -p /etc/systemd/system/systemd-resolved.service.d/
+cat <<EOF > /etc/systemd/system/systemd-resolved.service.d/stubby.conf
+[Unit]
+After=stubby.service
+Wants=stubby.service
+
+[Service]
+Restart=on-failure
+RestartSec=5
+EOF
+
+# Configure Stubby service hardening
+mkdir -p /etc/systemd/system/stubby.service.d/
+cat <<EOF > /etc/systemd/system/stubby.service.d/hardening.conf
+[Service]
+# Security hardening for Stubby service
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/var/cache/stubby
+Restart=on-failure
+RestartSec=5
+EOF
+
+# Fix resolv.conf symlink
+echo -e "${BBlue}Setting up resolv.conf...${NC}"
+rm -f /etc/resolv.conf
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+# Reload systemd and enable services
+echo -e "${BBlue}Enabling DNS services...${NC}"
+systemctl daemon-reload
+systemctl enable stubby
+systemctl enable systemd-resolved
+
+# Start services (will work after chroot)
+systemctl start stubby 2>/dev/null || true
+systemctl start systemd-resolved 2>/dev/null || true
+
+echo -e "${BBlue}DNS-over-TLS configuration completed!${NC}"
 
 # Set the timezone
 echo -e "${BBlue}Setting the timezone to $TIMEZONE...${NC}"
