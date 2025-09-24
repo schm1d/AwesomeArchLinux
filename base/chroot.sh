@@ -268,10 +268,55 @@ Restart=on-failure
 RestartSec=5
 EOF
 
-# Fix resolv.conf symlink
 echo -e "${BBlue}Setting up resolv.conf...${NC}"
-rm -f /etc/resolv.conf
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+# Check if resolv.conf is a symlink and handle it properly
+if [ -L /etc/resolv.conf ]; then
+    # It's a symlink, remove it
+    rm -f /etc/resolv.conf
+elif [ -f /etc/resolv.conf ]; then
+    # It's a regular file, back it up and remove
+    cp /etc/resolv.conf /etc/resolv.conf.backup
+    rm -f /etc/resolv.conf
+fi
+
+# In chroot, we need to handle this differently
+# Don't create the symlink yet, just prepare it for post-install
+cat > /etc/resolv.conf <<EOF
+# Temporary resolv.conf for chroot
+nameserver 127.0.0.1
+nameserver ::1
+EOF
+
+# Create a script to fix resolv.conf on first boot
+cat > /usr/local/bin/fix-resolv-conf.sh <<'RESOLV_SCRIPT'
+#!/bin/bash
+# Fix resolv.conf symlink after first boot
+if [ ! -L /etc/resolv.conf ]; then
+    rm -f /etc/resolv.conf
+    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+fi
+RESOLV_SCRIPT
+chmod +x /usr/local/bin/fix-resolv-conf.sh
+
+# Create systemd service to run once at first boot
+cat > /etc/systemd/system/fix-resolv-conf.service <<EOF
+[Unit]
+Description=Fix resolv.conf symlink
+After=systemd-resolved.service
+Before=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fix-resolv-conf.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable fix-resolv-conf.service
+
+echo -e "${BBlue}DNS configuration will be finalized on first boot${NC}"
 
 # Reload systemd and enable services
 echo -e "${BBlue}Enabling DNS services...${NC}"
