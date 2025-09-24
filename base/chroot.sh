@@ -268,32 +268,6 @@ Restart=on-failure
 RestartSec=5
 EOF
 
-# Configure Stubby service hardening
-mkdir -p /etc/systemd/system/stubby.service.d/
-cat <<EOF > /etc/systemd/system/stubby.service.d/hardening.conf
-[Service]
-# Security hardening for Stubby service
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-NoNewPrivileges=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-ReadWritePaths=/var/cache/stubby
-Restart=on-failure
-RestartSec=5
-EOF
-
 # Fix resolv.conf symlink
 echo -e "${BBlue}Setting up resolv.conf...${NC}"
 rm -f /etc/resolv.conf
@@ -923,32 +897,6 @@ EOF
 chmod +x /usr/local/bin/rotate-ssh-keys.sh
 echo "0 0 1 */3 * /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
 
-echo -e "${BBlue}Hardening systemd services...${NC}"
-
-# SSH hardening
-mkdir -p /etc/systemd/system/sshd.service.d/
-cat <<EOF > /etc/systemd/system/sshd.service.d/hardening.conf
-[Service]
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-EOF
-
-systemctl daemon-reload
-
 sleep 1
 
 echo -e "${BBlue}Applying hardened compiler flags...${NC}"
@@ -1389,6 +1337,380 @@ Type=oneshot
 ExecStart=/usr/bin/pacman -Syu --noconfirm
 EOF
 systemctl enable pacman-autoupdate.timer
+
+sleep 2
+
+# --- Systemd Services Hardening ---
+echo -e "${BBlue}Hardening systemd services...${NC}"
+
+# Create a function to apply hardening to services
+harden_systemd_service() {
+    local service=$1
+    local override_dir="/etc/systemd/system/${service}.d"
+    
+    # Skip if service doesn't exist
+    if ! systemctl list-unit-files | grep -q "^${service}"; then
+        return
+    fi
+    
+    mkdir -p "$override_dir"
+    
+    cat > "${override_dir}/hardening.conf" <<EOF
+[Service]
+# Process isolation
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+# Kernel protection
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# Filesystem restrictions
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectProc=invisible
+ProcSubset=pid
+
+# Capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System calls
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# Network
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+
+# Misc security
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+UMask=0077
+
+# Resource limits
+LimitNOFILE=1024
+LimitNPROC=512
+EOF
+}
+
+# SSH Service - Already partially done, but let's enhance it
+echo -e "${BBlue}Hardening SSH service...${NC}"
+mkdir -p /etc/systemd/system/sshd.service.d/
+cat > /etc/systemd/system/sshd.service.d/hardening.conf <<'EOF'
+[Service]
+# SSH-specific hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only  # SSH needs to read authorized_keys
+ReadWritePaths=/var/log
+
+# Kernel protections
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# Network restrictions
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=any
+IPAddressDeny=
+
+# Device access
+PrivateDevices=yes
+DevicePolicy=closed
+
+# System call filtering
+SystemCallFilter=@system-service @privileged @resources
+SystemCallErrorNumber=EPERM
+
+# Additional security
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# NetworkManager hardening
+echo -e "${BBlue}Hardening NetworkManager...${NC}"
+mkdir -p /etc/systemd/system/NetworkManager.service.d/
+cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
+[Service]
+# NetworkManager needs some privileges for network management
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+
+# Network operations need certain capabilities
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+NoNewPrivileges=no  # NM needs to acquire privileges
+
+# Device access for network interfaces
+PrivateDevices=no
+DevicePolicy=auto
+
+# System calls - NM needs broader access
+SystemCallFilter=@system-service @module @raw-io @privileged
+SystemCallErrorNumber=EPERM
+
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# Auditd hardening
+echo -e "${BBlue}Hardening auditd...${NC}"
+mkdir -p /etc/systemd/system/auditd.service.d/
+cat > /etc/systemd/system/auditd.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/log/audit
+
+# Audit needs special capabilities
+CapabilityBoundingSet=CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+PrivateDevices=yes
+PrivateTmp=yes
+
+SystemCallFilter=@system-service @privileged
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# ClamAV hardening
+echo -e "${BBlue}Hardening ClamAV services...${NC}"
+mkdir -p /etc/systemd/system/clamav-daemon.service.d/
+cat > /etc/systemd/system/clamav-daemon.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/clamav /var/log/clamav
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+SystemCallFilter=@system-service @file-system @io-event
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+# Resource limits for scanning
+LimitNICE=19
+LimitNOFILE=8192
+TasksMax=4
+
+Restart=on-failure
+RestartSec=10s
+EOF
+
+# Fail2ban hardening
+echo -e "${BBlue}Hardening fail2ban...${NC}"
+mkdir -p /etc/systemd/system/fail2ban.service.d/
+cat > /etc/systemd/system/fail2ban.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/fail2ban /var/log /run/fail2ban
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# fail2ban needs CAP_NET_ADMIN and CAP_NET_RAW for iptables
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+PrivateTmp=yes
+PrivateDevices=yes
+
+SystemCallFilter=@system-service @network-io @privileged
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# Stubby DNS hardening (already in DNS section but let's ensure it's complete)
+echo -e "${BBlue}Hardening Stubby DNS...${NC}"
+mkdir -p /etc/systemd/system/stubby.service.d/
+cat > /etc/systemd/system/stubby.service.d/hardening.conf <<'EOF'
+[Service]
+User=stubby
+Group=stubby
+
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/cache/stubby
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+# DNS specific
+IPAddressAllow=any
+IPAddressDeny=
+
+Restart=always
+RestartSec=5s
+EOF
+
+# systemd-resolved hardening
+echo -e "${BBlue}Hardening systemd-resolved...${NC}"
+mkdir -p /etc/systemd/system/systemd-resolved.service.d/
+cat > /etc/systemd/system/systemd-resolved.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/systemd/resolve
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# Chrony NTP hardening
+echo -e "${BBlue}Hardening Chrony NTP...${NC}"
+mkdir -p /etc/systemd/system/chronyd.service.d/
+cat > /etc/systemd/system/chronyd.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/chrony /var/log/chrony
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=no  # Chrony needs to set system time
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+# Chrony needs CAP_SYS_TIME
+CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_SYS_TIME
+
+SystemCallFilter=@system-service @clock
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# Apply hardening to other common services
+for service in rngd.service haveged.service systemd-journald.service; do
+    echo -e "${BBlue}Hardening ${service}...${NC}"
+    harden_systemd_service "$service"
+done
+
+# Reload systemd to apply all changes
+echo -e "${BBlue}Reloading systemd daemon to apply hardening...${NC}"
+systemctl daemon-reload
+
+echo -e "${BGreen}Systemd services hardening completed!${NC}"
 
 sleep 2
 
