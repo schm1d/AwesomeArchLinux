@@ -727,10 +727,37 @@ cat <<EOF > /usr/local/bin/rotate-ssh-keys.sh
 #!/bin/bash
 ssh-keygen -t "$SSH_KEY_TYPE" -f "$SSH_KEY_FILE" -q -N "" -C "$USERNAME@$HOSTNAME-$(date +%Y%m%d)"
 chown "$USERNAME:$USERNAME" "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
-chmod 600 "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
+chmod 600 "$SSH_KEY_FILE"
+chmod 644 "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
 EOF
 chmod +x /usr/local/bin/rotate-ssh-keys.sh
 echo "0 0 1 */3 * /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
+
+echo -e "${BBlue}Hardening systemd services...${NC}"
+
+# SSH hardening
+mkdir -p /etc/systemd/system/sshd.service.d/
+cat <<EOF > /etc/systemd/system/sshd.service.d/hardening.conf
+[Service]
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+EOF
+
+systemctl daemon-reload
 
 sleep 1
 
