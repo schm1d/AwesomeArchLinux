@@ -640,15 +640,13 @@ export INSTALL_DATE="$(date)"
 EOF
 chmod 600 /mnt/root/.install-env
 
-# Create wrapper for chroot script
-cat > /mnt/chroot-wrapper.sh <<'WRAPPER'
-#!/bin/bash
-source /root/.install-env
-export _INSTALL_DISK="$INSTALL_DISK"
-export _INSTALL_USER="$INSTALL_USER"
-export _INSTALL_HOST="$INSTALL_HOST"
-/chroot.sh
-WRAPPER
+cat > /mnt/set-install-vars.sh <<EOF
+export _INSTALL_DISK="$DISK"
+export _INSTALL_USER="$USERNAME"
+export _INSTALL_HOST="$HOSTNAME"
+export _INSTALL_CRYPT="$CRYPT_NAME"
+exp ort _INSTALL_LVM="$LVM_NAME"
+EOF
 
 chmod +x /mnt/chroot-wrapper.sh
 cp ./chroot.sh /mnt/
@@ -769,7 +767,7 @@ if [ "$USE_TPM_LUKS" = true ]; then
     setup_tpm_in_chroot
 fi
 
-arch-chroot /mnt /bin/bash /chroot-wrapper.sh
+arch-chroot /mnt bash -c "source /set-install-vars.sh && /chroot.sh"
 
 # -----------------------
 # 12. FINAL TPM ENROLLMENT
