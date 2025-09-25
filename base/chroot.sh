@@ -976,7 +976,10 @@ sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
 mkinitcpio -p linux &&\
 
 echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
+sed -i 's/^GRUB_PRELOAD_MODULES=.*/GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"/' /etc/default/grub
 sed -i '/GRUB_ENABLE_CRYPTODISK/s/^#//g' /etc/default/grub
+
+chmod 400 /etc/luksKeys/boot.key
 
 sleep 1
 
@@ -992,7 +995,18 @@ echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
 # lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
 # lockdown=confidentiality - This was removed because it locked nvidia and vmware module so they couldn't be loaded.
 GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none quiet loglevel=3\""
-GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
+#GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
+if [ "$INSTALL_TPM" = true ]; then
+    sed -i "s|^HOOKS=.*|HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
+    GRUBCMD="\"rd.luks.name=$UUID=$CRYPT_NAME rd.lvm.lv=$LVM_NAME/root root=/dev/mapper/$LVM_NAME-root\""
+    # No cryptkey needed for sd-encrypt; TPM handles unlock post-enroll
+    sed -i "s|^MODULES=.*|MODULES=(tpm tpm_tis tpm_crb)|" /etc/mkinitcpio.conf
+else
+    sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
+    GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
+    sed -i "s|^FILES=.*|FILES=($LUKS_KEYS)|g" /etc/mkinitcpio.conf
+fi
+
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
 
