@@ -1186,12 +1186,6 @@ sleep 2
 configure_grub() {
   echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
 
-  # Set GRUB_GFXMODE and GRUB_GFXPAYLOAD_LINUX
-  sed -i -E \
-    -e 's/^#?(GRUB_GFXMODE=).*/\1"1024x768x32,auto"/' \
-    -e 's/^#?(GRUB_GFXPAYLOAD_LINUX=).*/\1"keep"/' \
-    /etc/default/grub
-
   echo -e "${BBlue}Setting up GRUB...${NC}"
   mkdir -p /boot/grub
 
