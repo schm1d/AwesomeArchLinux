@@ -455,8 +455,10 @@ dd if=/dev/random of=./boot.key bs=512 count=8 iflag=fullblock
 dd if=/dev/random of=./recovery.key bs=512 count=8 iflag=fullblock
 
 # Add keys to LUKS
-cryptsetup -v luksAddKey --key-slot 1 "$PARTITION3" ./boot.key
-cryptsetup -v luksAddKey --key-slot 2 "$PARTITION3" ./recovery.key
+echo -e "${BBlue}Adding keyfiles to LUKS container...${NC}"
+echo "You'll need to enter your LUKS passphrase twice (once for each key)"
+cryptsetup -v luksAddKey "$PARTITION3" ./boot.key --key-slot 1
+cryptsetup -v luksAddKey "$PARTITION3" ./recovery.key --key-slot 2
 
 echo -e "${BGreen}IMPORTANT: Save recovery.key externally NOW!${NC}"
 read -p "Press Enter after saving recovery.key..."
