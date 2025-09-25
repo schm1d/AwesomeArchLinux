@@ -645,7 +645,7 @@ export _INSTALL_DISK="$DISK"
 export _INSTALL_USER="$USERNAME"
 export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
-exp ort _INSTALL_LVM="$LVM_NAME"
+export _INSTALL_LVM="$LVM_NAME"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
