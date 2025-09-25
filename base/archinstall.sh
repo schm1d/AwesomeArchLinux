@@ -648,6 +648,7 @@ export _INSTALL_USER="$USERNAME"
 export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
+export INSTALL_TPM="$USE_TPM_LUKS"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
