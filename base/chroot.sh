@@ -5,6 +5,7 @@
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
 set -euo pipefail
+source /root/.install-env || { echo "Failed to source /root/.install-env"; exit 1; }
 
 # Set up the variables
 BBlue='\033[1;34m'
