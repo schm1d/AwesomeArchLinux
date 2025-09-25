@@ -648,7 +648,7 @@ export _INSTALL_CRYPT="$CRYPT_NAME"
 exp ort _INSTALL_LVM="$LVM_NAME"
 EOF
 
-chmod +x /mnt/chroot-wrapper.sh
+chmod +x /mnt/set-install-vars.sh
 cp ./chroot.sh /mnt/
 chmod +x /mnt/chroot.sh
 
@@ -794,7 +794,7 @@ shred -vzu ./tpm_luks.conf 2>/dev/null || true
 
 # Clean up scripts
 shred -vzu /mnt/chroot.sh 2>/dev/null || true
-shred -vzu /mnt/chroot-wrapper.sh 2>/dev/null || true
+shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl.sh 2>/dev/null || true
 shred -vzu /mnt/ssh.sh 2>/dev/null || true
 
