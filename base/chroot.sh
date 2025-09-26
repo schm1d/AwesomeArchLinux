@@ -30,6 +30,8 @@ TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
+CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
+LVM_NAME="lvm_arch"
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -49,7 +51,7 @@ fi
 #PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
-UUID=$(cryptsetup luksUUID "$PARTITION3")
+LUKS_UUID=$(cryptsetup luksUUID "$PARTITION3")
 
 CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
 
@@ -977,8 +979,8 @@ sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
 mkinitcpio -p linux &&\
 
 echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
-sed -i 's/^GRUB_PRELOAD_MODULES=.*/GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"/' /etc/default/grub
-sed -i '/GRUB_ENABLE_CRYPTODISK/s/^#//g' /etc/default/grub
+sed -ri 's|^#?GRUB_PRELOAD_MODULES=.*|GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"|' /etc/default/grub
+sed -ri 's|^#?GRUB_ENABLE_CRYPTODISK=.*|GRUB_ENABLE_CRYPTODISK=y|' /etc/default/grub
 
 chmod 400 /etc/luksKeys/boot.key
 
@@ -999,17 +1001,18 @@ GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=
 #GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
 if [ "$INSTALL_TPM" = true ]; then
     sed -i "s|^HOOKS=.*|HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-    GRUBCMD="\"rd.luks.name=$UUID=$CRYPT_NAME rd.lvm.lv=$LVM_NAME/root root=/dev/mapper/$LVM_NAME-root\""
+    GRUBCMD="\"rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} rd.lvm.lv=${LVM_NAME}/root root=/dev/mapper/${LVM_NAME}-root\""
     # No cryptkey needed for sd-encrypt; TPM handles unlock post-enroll
     sed -i "s|^MODULES=.*|MODULES=(tpm tpm_tis tpm_crb)|" /etc/mkinitcpio.conf
 else
-    sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-    GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
-    sed -i "s|^FILES=.*|FILES=($LUKS_KEYS)|g" /etc/mkinitcpio.conf
+    
+    GRUBCMD="\"cryptdevice=UUID=${LUKS_UUID}:${CRYPT_NAME} root=/dev/mapper/${LVM_NAME}-root cryptkey=rootfs:/etc/luksKeys/boot.key\""
+    sed -ri 's|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|' /etc/mkinitcpio.conf
+    sed -ri 's|^FILES=.*|FILES=(/etc/luksKeys/boot.key)|' /etc/mkinitcpio.conf
 fi
 
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|g" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|g" /etc/default/grub
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
+sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
 
 sleep 1
 
