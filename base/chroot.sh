@@ -1001,12 +1001,12 @@ GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=
 #GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
 if [ "$INSTALL_TPM" = true ]; then
     sed -i "s|^HOOKS=.*|HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-    GRUBCMD="\"rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} rd.lvm.lv=${LVM_NAME}/root root=/dev/mapper/${LVM_NAME}-root\""
+    GRUBCMD="\"rd.luks.name=${LUKS_UUID}=${LVM_NAME} rd.lvm.lv=${LVM_NAME}/root root=/dev/mapper/${LVM_NAME}-root\""
     # No cryptkey needed for sd-encrypt; TPM handles unlock post-enroll
     sed -i "s|^MODULES=.*|MODULES=(tpm tpm_tis tpm_crb)|" /etc/mkinitcpio.conf
 else
     
-    GRUBCMD="\"cryptdevice=UUID=${LUKS_UUID}:${CRYPT_NAME} root=/dev/mapper/${LVM_NAME}-root cryptkey=rootfs:/etc/luksKeys/boot.key\""
+    GRUBCMD="\"cryptdevice=UUID=${LUKS_UUID}:${LVM_NAME} root=/dev/mapper/${LVM_NAME}-root cryptkey=rootfs:/etc/luksKeys/boot.key\""
     sed -ri 's|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|' /etc/mkinitcpio.conf
     sed -ri 's|^FILES=.*|FILES=(/etc/luksKeys/boot.key)|' /etc/mkinitcpio.conf
 fi
@@ -1149,7 +1149,13 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     # Adjust mkinitcpio.conf
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
-    sed -i 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
+    sed -ri 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
+
+    # Optional but recommended: early KMS for smoother boot
+    if ! grep -Eq '(^|\s)kms(\s|\))' /etc/mkinitcpio.conf; then
+      sed -ri 's/(HOOKS=\(.*modconf) /\1 kms /' /etc/mkinitcpio.conf
+    fi
+    
     # Re-generate initramfs
     mkinitcpio -P  # -P regenerates all presets for all installed kernels
 
