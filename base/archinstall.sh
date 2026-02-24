@@ -18,6 +18,7 @@ TPM_AVAILABLE=false
 TPM_VERSION=""
 TPM_DEVICE=""
 USE_TPM_LUKS=false
+# shellcheck disable=SC2034  # Used by TPM enrollment commands
 TPM_PCR_BANK="sha256"
 TPM_PCRS="0+7"
 
@@ -141,7 +142,8 @@ validate_disk_space() {
     local root="$3"
     local var="${4:-0}"
     
-    local disk_size=$(lsblk -b -d -o SIZE -n "$disk" 2>/dev/null || echo 0)
+    local disk_size
+    disk_size=$(lsblk -b -d -o SIZE -n "$disk" 2>/dev/null || echo 0)
     local required=$((($swap + $root + $var + 10) * 1073741824))
     
     if [[ $disk_size -lt $required ]]; then
@@ -164,7 +166,8 @@ validate_network() {
 
 # Check entropy levels
 check_entropy() {
-    local entropy=$(cat /proc/sys/kernel/random/entropy_avail)
+    local entropy
+    entropy=$(cat /proc/sys/kernel/random/entropy_avail)
     if [ "$entropy" -lt 256 ]; then
         echo -e "${BBlue}Low entropy detected ($entropy). Generating additional entropy...${NC}"
         dd if=/dev/urandom of=/dev/null bs=1M count=100 status=progress 2>/dev/null
@@ -175,7 +178,8 @@ check_entropy() {
 # Detect if device is SSD
 detect_device_type() {
     local disk="$1"
-    local device_name=$(basename "$disk")
+    local device_name
+    device_name=$(basename "$disk")
     
     if [ -f "/sys/block/$device_name/queue/rotational" ]; then
         if [ "$(cat /sys/block/$device_name/queue/rotational)" = "0" ]; then
@@ -197,6 +201,7 @@ detect_tpm() {
     
     if [ -c /dev/tpm0 ] || [ -c /dev/tpmrm0 ]; then
         TPM_AVAILABLE=true
+        # shellcheck disable=SC2034  # Referenced in TPM enrollment logic
         TPM_VERSION="2.0"
         
         if [ -c /dev/tpmrm0 ]; then
@@ -393,6 +398,7 @@ else
     PART_SUFFIX=""
 fi
 
+# shellcheck disable=SC2034  # Used in partition formatting below
 PARTITION1="${DISK}${PART_SUFFIX}1"
 PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"

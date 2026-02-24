@@ -19,12 +19,10 @@ BGreen='\033[1;32m'
 NC='\033[0m'
 
 # Check dependencies
-for cmd in git; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo -e "${BRed}Required command '$cmd' not found. Install it first.${NC}" >&2
-        exit 1
-    fi
-done
+if ! command -v git &>/dev/null; then
+    echo -e "${BRed}Required command 'git' not found. Install it first.${NC}" >&2
+    exit 1
+fi
 
 BUILDDIR="$(mktemp -d)"
 trap 'rm -rf "$BUILDDIR"' EXIT

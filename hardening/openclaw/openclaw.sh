@@ -144,6 +144,7 @@ OC_CONFIG="$OC_DIR/openclaw.json"
 OC_WORKSPACE="$OC_DIR/workspace"
 OC_CREDENTIALS="$OC_DIR/credentials"
 OC_ENV_FILE="$OC_DIR/.env"
+# shellcheck disable=SC2034  # Available for session cleanup functions
 OC_SESSIONS_GLOB="$OC_DIR/agents/*/sessions"
 OC_EXEC_APPROVALS="$OC_DIR/exec-approvals.json"
 
@@ -290,9 +291,11 @@ fi
 # Determine sandbox mode for exec based on flag
 if [[ "$WITH_SANDBOX" == true ]]; then
     EXEC_HOST_MODE="sandbox"
+    # shellcheck disable=SC2034  # Used in config template substitution
     SANDBOX_MODE_CFG="all"
 else
     EXEC_HOST_MODE="sandbox"
+    # shellcheck disable=SC2034
     SANDBOX_MODE_CFG="off"
 fi
 

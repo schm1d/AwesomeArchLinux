@@ -28,6 +28,7 @@ TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
+# shellcheck disable=SC2034  # Referenced in GRUB config and comments
 CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
 LVM_NAME="lvm_arch"
 INSTALL_TPM="${INSTALL_TPM:-false}"

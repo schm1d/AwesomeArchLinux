@@ -24,7 +24,7 @@ show_status() {
     lvs 2>/dev/null || echo "No LVM volumes active"
     echo
     echo -e "${BBlue}Open LUKS:${NC}"
-    ls /dev/mapper/ | grep -v control || echo "No LUKS containers open"
+    find /dev/mapper/ -mindepth 1 -not -name control -printf '%f\n' 2>/dev/null || echo "No LUKS containers open"
 }
 
 # Function to unmount everything

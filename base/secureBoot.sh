@@ -21,10 +21,8 @@ UPDATE_ONLY=false
 LOGFILE="/var/log/secureboot_setup.log"
 
 # Colors
-readonly C_OK="\033[1;32m"
-readonly C_INFO="\033[1;34m"
-readonly C_ERR="\033[1;31m"
-readonly C_NC="\033[0m"
+# shellcheck disable=SC2034  # Color palette — all available for use
+readonly C_OK="\033[1;32m"  C_INFO="\033[1;34m"  C_ERR="\033[1;31m"  C_NC="\033[0m"
 
 echo_log() { printf "%b %s\n" "${C_INFO}" "${1}" | tee -a "$LOGFILE"; }
 echo_err() { printf "%b %s\n" "${C_ERR}" "${1}" | tee -a "$LOGFILE"; exit 1; }
@@ -74,11 +72,9 @@ echo_log "Using key directory: $KEY_DIR"
 echo_log "EFI partition mount: $EFI_MOUNT"
 
 # File names
-declare -A CERT=( [PK]=PK [KEK]=KEK [db]=db [dbx]=dbx )
-
 cd "$KEY_DIR"
 
-if ! \$UPDATE_ONLY; then
+if ! $UPDATE_ONLY; then
   # Generate keys and certificates
 echo_log "Generating keys and certificates (size=$KEY_SIZE, validity=$VALID_DAYS days)"
   for name in PK KEK db dbx; do

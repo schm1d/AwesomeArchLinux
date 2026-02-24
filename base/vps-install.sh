@@ -193,8 +193,6 @@ echo -e "SSH Port: $SSH_PORT\n"
 
 log_action "User: $USERNAME, Hostname: $HOSTNAME, SSH Port: $SSH_PORT"
 
-SWAP_SIZE="${SIZE_OF_SWAP}G"
-
 # -----------------------
 # 4. DISK PREPARATION
 # -----------------------

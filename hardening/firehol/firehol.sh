@@ -23,16 +23,17 @@ declare -r RED="\033[1;31m"
 declare -r GREEN="\033[1;32m"
 declare -r NC="\033[0m"
 
-echo_msg()  { printf "%b %s\n" "${GREEN}[+]${NC}" "\$1"; }
-echo_err()  { printf "%b %s\n" "${RED}[!]${NC}" "\$1" >&2; }
+echo_msg()  { printf "%b %s\n" "${GREEN}[+]${NC}" "$1"; }
+echo_info() { printf "%b %s\n" "${BLUE}[*]${NC}" "$1"; }
+echo_err()  { printf "%b %s\n" "${RED}[!]${NC}" "$1" >&2; }
 
 # ==============================
 # Usage
 # ==============================
 usage() {
     cat <<EOF
-Usage: sudo \$0 [-l level] [-u] [-h]
-  -l level   FireHOL blocklist level (default: \$LEVEL)
+Usage: sudo $0 [-l level] [-u] [-h]
+  -l level   FireHOL blocklist level (default: $LEVEL)
   -u         Update existing installation only
   -h         Show this help message
 EOF
@@ -44,22 +45,22 @@ EOF
 # ==============================
 UPDATE_ONLY=false
 while getopts ":l:uh" opt; do
-  case \${opt} in
-    l) LEVEL=\${OPTARG} ;;    
+  case ${opt} in
+    l) LEVEL=${OPTARG} ;;    
     u) UPDATE_ONLY=true ;;    
     h) usage ;;              
-    :) echo_err "Option -\$OPTARG requires an argument."; usage ;;  
-   \?) echo_err "Invalid option: -\$OPTARG"; usage ;;  
+    :) echo_err "Option -$OPTARG requires an argument."; usage ;;  
+   \?) echo_err "Invalid option: -$OPTARG"; usage ;;  
   esac
 done
 
 # Ensure running as root
-if [[ \${EUID} -ne 0 ]]; then
+if [[ ${EUID} -ne 0 ]]; then
   echo_err "This script must be run as root."; exit 1
 fi
 
 # Redirect all output to logfile
-exec > >(tee -a "\$LOGFILE") 2>&1
+exec > >(tee -a "$LOGFILE") 2>&1
 
 # ==============================
 # Helper Functions
@@ -67,8 +68,8 @@ exec > >(tee -a "\$LOGFILE") 2>&1
 
 install_pkgs() {
   local pkgs=(wget git cronie iputils iproute2 jq less)
-  echo_msg "Installing dependencies: \${pkgs[*]}"
-  pacman -Syu --noconfirm "\${pkgs[@]}"
+  echo_msg "Installing dependencies: ${pkgs[*]}"
+  pacman -Syu --noconfirm "${pkgs[@]}"
 }
 
 install_yay() {
@@ -76,32 +77,32 @@ install_yay() {
     echo_msg "Installing yay AUR helper"
     local tmpdir
     tmpdir=$(mktemp -d)
-    git clone https://aur.archlinux.org/yay.git "\$tmpdir" \
-      && pushd "\$tmpdir" \
+    git clone https://aur.archlinux.org/yay.git "$tmpdir" \
+      && pushd "$tmpdir" \
       && makepkg -si --noconfirm \
       && popd \
-      && rm -rf "\$tmpdir"
+      && rm -rf "$tmpdir"
   fi
 }
 
 install_aur_pkg() {
-  local pkg=\$1
-  echo_msg "Installing \$pkg from AUR"
-  sudo -u "\$SUDO_USER" yay -S --noconfirm "\$pkg"
+  local pkg=$1
+  echo_msg "Installing $pkg from AUR"
+  sudo -u "$SUDO_USER" yay -S --noconfirm "$pkg"
 }
 
 backup_conf() {
-  local src=\$1 dst=\$2
-  if [[ -f "\$src" ]]; then
-    echo_msg "Backing up \$src to \$dst"
-    cp "\$src" ‘‘\$dst"
+  local src=$1 dst=$2
+  if [[ -f "$src" ]]; then
+    echo_msg "Backing up $src to $dst"
+    cp "$src" "$dst"
   fi
 }
 
 write_firehol_conf() {
-  local dest=\$1 level=\$2 tmpconf
-  tmpconf=\$(mktemp)
-  cat > "\$tmpconf" <<EOF
+  local dest=$1 level=$2 tmpconf
+  tmpconf=$(mktemp)
+  cat > "$tmpconf" <<EOF
 version 6
 
 # Hardened drop-all policy
@@ -113,19 +114,19 @@ interface any world
     server https accept
     client all accept
 
-# Blocklists: firehol_level\$level
-blacklist fullbogons ipset:firehol_level\$level
+# Blocklists: firehol_level$level
+blacklist fullbogons ipset:firehol_level$level
 EOF
-  install -Dm600 "\$tmpconf" "\$dest"
-  rm -f "\$tmpconf"
+  install -Dm600 "$tmpconf" "$dest"
+  rm -f "$tmpconf"
 }
 
 setup_cron() {
   local cronfile=/etc/cron.d/firehol-ipsets entry
-  entry="\$CRON_SCHEDULE root /usr/bin/update-ipsets && /usr/bin/firehol try"
-  echo_msg "Configuring cron job: \$entry"
-  echo "\$entry" > /tmp/firehol-ipsets
-  install -Dm644 /tmp/firehol-ipsets "\$cronfile"
+  entry="$CRON_SCHEDULE root /usr/bin/update-ipsets && /usr/bin/firehol try"
+  echo_msg "Configuring cron job: $entry"
+  echo "$entry" > /tmp/firehol-ipsets
+  install -Dm644 /tmp/firehol-ipsets "$cronfile"
   systemctl enable --now cronie
 }
 
@@ -138,7 +139,7 @@ enable_firehol_service() {
 # ==============================
 # Main Logic
 # ==============================
-if ! \$UPDATE_ONLY; then
+if ! $UPDATE_ONLY; then
   install_pkgs
   install_yay
   install_aur_pkg firehol
@@ -147,16 +148,16 @@ fi
 
 # Validate installation
 for bin in firehol update-ipsets; do
-  if ! command -v "\$bin" &>/dev/null; then
-    echo_err "\$bin not found. Aborting."
+  if ! command -v "$bin" &>/dev/null; then
+    echo_err "$bin not found. Aborting."
     exit 1
   fi
 done
 
 # Backup and write config
 mkdir -p /etc/firehol
-backup_conf /etc/firehol/firehol.conf /etc/firehol/firehol.conf.bak.\$(date +%F_%H%M%S)
-write_firehol_conf /etc/firehol/firehol.conf \$LEVEL
+backup_conf /etc/firehol/firehol.conf "/etc/firehol/firehol.conf.bak.$(date +%F_%H%M%S)"
+write_firehol_conf /etc/firehol/firehol.conf $LEVEL
 
 # Automate updates
 setup_cron
@@ -164,6 +165,6 @@ setup_cron
 enable_firehol_service
 
 echo_msg "FireHOL installation/configuration complete!"
-echo_msg "Blocklist level: \$LEVEL"
+echo_msg "Blocklist level: $LEVEL"
 echo_msg "Check status: systemctl status firehol"
 echo_msg "Logs: journalctl -xeu firehol.service"

@@ -133,7 +133,8 @@ write_aide_conf() {
 
     # Back up existing config if present
     if [[ -f "${AIDE_CONF}" ]]; then
-        local backup="${AIDE_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+        local backup
+        backup="${AIDE_CONF}.bak.$(date +%Y%m%d%H%M%S)"
         cp "${AIDE_CONF}" "${backup}"
         warn "Existing config backed up to ${backup}"
     fi
@@ -456,7 +457,8 @@ mode_update() {
     case "${confirm}" in
         [yY]|[yY][eE][sS])
             # Backup the old database
-            local backup="${AIDE_DB}.bak.$(date +%Y%m%d%H%M%S)"
+            local backup
+            backup="${AIDE_DB}.bak.$(date +%Y%m%d%H%M%S)"
             cp "${AIDE_DB}" "${backup}"
             chmod 600 "${backup}"
             info "Old database backed up to ${backup}"
