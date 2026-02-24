@@ -833,6 +833,10 @@ setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
 # GRUB SETUP (NO ENCRYPTION — VPS)
 ###############################################################################
 
+# Skip GRUB/mkinitcpio on live systems — bootloader is already configured
+# _INSTALL_TYPE is set via env export, INSTALL_TYPE via /root/.install-env
+if [[ "${_INSTALL_TYPE:-${INSTALL_TYPE:-}}" != "vps-harden" ]]; then
+
 echo -e "${BBlue}Setting up GRUB (no encryption for VPS)...${NC}"
 pacman -S grub efibootmgr os-prober --noconfirm
 
@@ -898,6 +902,10 @@ password_pbkdf2 "$USERNAME" "$GRUB_PASS"
 EOF
 
 grub-mkconfig -o /boot/grub/grub.cfg
+
+else
+    echo -e "${BBlue}Skipping GRUB/mkinitcpio (live system — bootloader already configured)${NC}"
+fi # end _INSTALL_TYPE guard
 
 ###############################################################################
 # FILE PERMISSIONS

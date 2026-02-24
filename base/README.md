@@ -12,6 +12,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 | `chroot.sh` | Bare-metal post-install — system hardening inside chroot |
 | `vps-install.sh` | VPS/cloud installer — single partition, swap file, BIOS/UEFI |
 | `vps-chroot.sh` | VPS post-install — same hardening adapted for VPS |
+| `vps-harden.sh` | VPS live hardening — filesystem mounts on a running system |
 | `recovery-mount.sh` | Recovery tool — unmount/remount encrypted installations |
 | `secureBoot.sh` | UEFI Secure Boot key generation and enrollment |
 
@@ -150,6 +151,73 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 | USBGuard | Yes | Skipped |
 | Bluetooth | Auto-detected | Skipped |
 | Software hardening | Full | Full (identical) |
+
+---
+
+## VPS Live Hardening (`vps-harden.sh`)
+
+For VPS providers that pre-install Arch Linux (Hostinger, Linode, etc.), where you cannot boot from a live ISO to run `vps-install.sh`:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-harden.sh
+chmod +x vps-harden.sh
+sudo ./vps-harden.sh
+```
+
+Preview changes without executing:
+
+```bash
+sudo ./vps-harden.sh --dry-run
+```
+
+Filesystem hardening only (no software hardening, no /var separation):
+
+```bash
+sudo ./vps-harden.sh --skip-var --skip-sw
+```
+
+### What it Does
+
+- Mounts `/tmp` as tmpfs with `noexec,nosuid,nodev` (configurable size)
+- Remounts `/dev/shm` with `noexec,nosuid,nodev`
+- Remounts `/proc` with `hidepid=2,gid=proc`
+- Bind-mounts `/var/tmp` to `/tmp` (inherits hardened options)
+- Optionally separates `/var` (auto-detects free space, attached volumes, or loop device)
+- Hardens existing fstab entries (adds `nosuid,nodev` to `/home`, etc.)
+- Generates `/root/undo-vps-harden.sh` for rollback
+- Optionally runs `vps-chroot.sh` for full software hardening (SSH, nftables, sysctl, PAM, etc.)
+
+### CLI Options
+
+```
+  -t SIZE     tmpfs size for /tmp in GB (default: 2)
+  -v SIZE     /var loop image size in GB (default: 10)
+  -u USER     Username for vps-chroot.sh integration (auto-detected)
+  -p PORT     SSH port (default: 22)
+  --skip-var  Skip /var separation (only harden virtual mounts)
+  --skip-sw   Skip software hardening (only do filesystem mounts)
+  --dry-run   Show planned changes without executing
+  -h          Show help
+```
+
+### Safety Mechanisms
+
+- `--dry-run` shows all planned changes without executing
+- `mount -a --fake` validation after every fstab change; reverts on failure
+- Auto-generated rollback script (`/root/undo-vps-harden.sh`)
+- SSH stays up throughout the entire process
+- `/var` migration: rsync + rename (keeps `/var.old` as safety net)
+- fstab, mount state, and lsblk state backed up before changes
+
+### Differences from vps-install.sh
+
+| Feature          | vps-install.sh     | vps-harden.sh       |
+|------------------|--------------------|----------------------|
+| Runs from        | Live ISO           | Running system       |
+| Disk reformat    | Yes                | No                   |
+| Base install     | Yes (pacstrap)     | No                   |
+| Mount hardening  | fstab generation   | Live remount + fstab |
+| Rollback         | No (fresh install) | Yes                  |
 
 ---
 

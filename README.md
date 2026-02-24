@@ -30,6 +30,7 @@ AwesomeArchLinux/
 |   +-- chroot.sh            # Bare-metal chroot configuration & hardening
 |   +-- vps-install.sh       # VPS/cloud installer (no encryption, swap file)
 |   +-- vps-chroot.sh        # VPS chroot configuration & hardening
+|   +-- vps-harden.sh        # VPS live hardening (running system, no reformat)
 |   +-- recovery-mount.sh    # Recovery menu: unmount/remount encrypted install
 |   +-- secureBoot.sh        # UEFI Secure Boot key generation & enrollment
 |   +-- README.md            # Base installation documentation
@@ -117,6 +118,7 @@ AwesomeArchLinux/
 - **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS1 with encrypted boot partition, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time.
 - **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment with configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9).
 - **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
+- **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), optionally separates `/var`, generates rollback script, and runs software hardening — all on a live, running system without reformatting.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
 - **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs GRUB EFI binaries.
 - **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
@@ -453,6 +455,18 @@ The VPS installer will prompt you for:
 - Username, hostname, and SSH port
 - GRUB password
 - User and root passwords
+
+#### VPS Live Hardening (pre-installed Arch Linux)
+
+If your VPS provider already has Arch Linux installed and you **cannot boot from a live ISO**:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-harden.sh
+chmod +x vps-harden.sh
+sudo ./vps-harden.sh
+```
+
+Preview changes first with `--dry-run`, or run filesystem-only hardening with `--skip-var --skip-sw`. A rollback script is generated at `/root/undo-vps-harden.sh`. See [`base/README.md`](base/README.md) for full options.
 
 #### Offline Installation
 
