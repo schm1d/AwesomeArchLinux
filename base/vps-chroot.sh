@@ -769,7 +769,7 @@ echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/"$USERNAME"/.nanorc
 ###############################################################################
 
 echo -e "${BBlue}Configuring and hardening SSH on port $SSH_PORT...${NC}"
-/ssh.sh
+/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
 
 configure_ssh() {
   mkdir -p "/home/$USERNAME/.ssh"
