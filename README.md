@@ -1,156 +1,480 @@
 ![Arch Linux Secure AF](./archLinux.png)
 Wallpaper: [https://www.reddit.com/user/alienpirate5/](https://www.reddit.com/user/alienpirate5/)
 
-
 ## Awesome Arch Linux
 
 A collection of shell scripts for hardened Arch Linux installation, configuration, and security enhancements. The aim is to make this repository a reliable and curated reference for Arch Linux hardened installation setups and configurations.
 
-The encryption method used in the installation script is [LVM on LUKS with encrypted boot partition](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system#Encrypted_boot_partition_(GRUB)) (Full disk encryption (GRUB) for UEFI systems).
+Two installation paths are provided:
 
-The script will prepare everything for you. No need to worry about partitioning or the encryption process. It will also configure GRUB to use the encryption keys. All you have to do is change the variable values according to your system, provide a password to encrypt the disk and specify the username and hostname. If you are using NVIDIA GPUs, the script will also install the appropriate drivers. 🙂
+- **Bare-metal / Desktop** (`archinstall.sh`) &mdash; Full disk encryption with [LVM on LUKS with encrypted boot partition](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system#Encrypted_boot_partition_(GRUB)) (GRUB, UEFI), optional TPM2 binding.
+- **VPS / Cloud** (`vps-install.sh`) &mdash; Simplified partitioning (no LUKS, no TPM, no GRUB encryption), swap file instead of LVM, serial console support for VPS provider access. All software hardening is preserved.
+
+Both paths share the same hardening philosophy: the scripts will prepare everything for you. No need to worry about partitioning or encryption. All you have to do is provide a few inputs (disk, username, hostname, passwords) and the installer handles the rest.
 
 You will get a very clean, solid, and secure base installation.
 
+---
+
+### Repository Structure
+
+```
+AwesomeArchLinux/
++-- base/
+|   +-- archinstall.sh       # Bare-metal installer (LUKS + LVM + UEFI + TPM2)
+|   +-- chroot.sh            # Bare-metal chroot configuration & hardening
+|   +-- vps-install.sh       # VPS/cloud installer (no encryption, swap file)
+|   +-- vps-chroot.sh        # VPS chroot configuration & hardening
+|   +-- recovery-mount.sh    # Recovery menu: unmount/remount encrypted install
+|   +-- secureBoot.sh        # UEFI Secure Boot key generation & enrollment
++-- hardening/
+|   +-- apparmor/
+|   |   +-- apparmor.sh      # AppArmor profiles for 7 services (enforce mode)
+|   |   +-- README.md
+|   +-- chrony/
+|   |   +-- chrony.sh        # Chrony NTS (authenticated time synchronization)
+|   |   +-- README.md
+|   +-- crowdsec/
+|   |   +-- crowdsec.sh      # CrowdSec IDS with nftables & nginx bouncers
+|   |   +-- README.md
+|   +-- fail2ban/
+|   |   +-- fail2ban.sh      # Extended fail2ban jails (SSH, nginx, recidive)
+|   |   +-- README.md
+|   +-- firehol/
+|   |   +-- firehol.sh       # FireHOL firewall with IP blocklist integration
+|   +-- nginx/
+|   |   +-- nginx.sh         # nginx-mainline hardening + Let's Encrypt (SSL Labs A+)
+|   |   +-- README.md
+|   +-- nodejs/
+|   |   +-- nodejs.sh        # Node.js/Express production hardening
+|   |   +-- README.md
+|   +-- postfix/
+|   |   +-- postfix.sh       # Send-only Postfix mail relay for system notifications
+|   |   +-- README.md
+|   +-- react/
+|   |   +-- react.sh         # React/SPA production deployment hardening (nginx)
+|   |   +-- README.md
+|   +-- ssh/
+|   |   +-- ssh.sh           # SSH server hardening (sshd_config, host keys)
+|   |   +-- ssh_client.sh    # SSH client configuration & key generation
+|   +-- sysctl/
+|   |   +-- sysctl.sh        # Kernel parameter hardening (100+ sysctl settings)
+|   +-- totp/
+|   |   +-- totp.sh          # TOTP two-factor authentication for SSH
+|   |   +-- README.md
+|   +-- wireguard/
+|       +-- wireguard.sh     # WireGuard VPN server with client config generation
+|       +-- README.md
++-- utils/
+|   +-- aide-config.sh       # AIDE file integrity monitoring automation
+|   +-- audit-check.sh       # Hardening compliance checker (pass/fail/warn report)
+|   +-- auditd-attack.rules  # Auditd rules mapped to MITRE ATT&CK Framework
+|   +-- backup.sh            # Encrypted borg backups with systemd timer
+|   +-- docker.sh            # Docker/Podman hardening (rootless, seccomp, AppArmor)
+|   +-- monitoring.sh        # Prometheus node_exporter + optional Grafana
+|   +-- gnome.sh             # Minimal GNOME desktop (no bloat)
+|   +-- openbox.sh           # Openbox + Tint2 panel setup
+|   +-- neovim.sh            # NeoVim + Treesitter configuration
+|   +-- vim.sh               # Vim plugins & hardening
+|   +-- nano.sh              # Nano configuration & hardening
+|   +-- zsh.sh               # Zsh configuration & hardening
+|   +-- yay.sh               # yay AUR helper installation
+|   +-- theme.sh             # Desktop theming
+```
+
+---
+
 ### Features
 
-- **Automated Arch Linux Installation**: Automates the entire installation process, including disk partitioning, formatting, mounting, and package installation.
-- **Full Disk Encryption**: Implements LVM on LUKS with an encrypted boot partition for full disk encryption on UEFI systems.
-- **Comprehensive Hardening**: Applies extensive security hardening measures across the system, covering authentication, services, kernel parameters, and more.
-- **NVIDIA GPU Support**: Automatically detects and installs the appropriate NVIDIA drivers if an NVIDIA GPU is present.
-- **Customizable**: Variables and configurations can be adjusted to suit your specific needs.
+#### Installation
+
+- **Automated Arch Linux Installation** &mdash; Automates disk partitioning, formatting, mounting, base system installation, and chroot configuration.
+- **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS1 with encrypted boot partition, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time.
+- **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment with configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9).
+- **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
+- **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
+- **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs GRUB EFI binaries.
+- **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
+- **Dual Kernel** &mdash; Installs both `linux` and `linux-hardened` kernels.
+- **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
+
+#### Encryption & Key Management (bare-metal)
+
+- LUKS1 container with passphrase, boot key file, and recovery key (3 key slots)
+- LUKS header backup with secure external storage prompt
+- Secure cleanup: `shred` of all key material after installation
+- Encrypted swap via `/etc/crypttab`
+
+#### Firewall
+
+- **nftables** &mdash; Default deny policy, SSH rate limiting (2/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
+- **FireHOL** &mdash; Optional advanced firewall with IP blocklist integration from FireHOL's blocklist-ipsets repository. Configurable blocklist levels, automated daily updates via cron.
+- **iptables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script.
+
+#### Mandatory Access Control (AppArmor)
+
+- **AppArmor profiles** for 7 services in enforce mode: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), Stubby DNS, and chronyd.
+- Each profile uses `abi <abi/3.0>`, precise path rules, minimal network access, and least-privilege capabilities.
+- GRUB kernel parameters (`apparmor=1 security=apparmor`) configured automatically.
+- See [`hardening/apparmor/README.md`](hardening/apparmor/README.md) for profile details and customization.
+
+#### VPN (WireGuard)
+
+- **WireGuard server** &mdash; One-command VPN setup with automatic key generation, pre-shared keys (quantum resistance), and client config files.
+- **nftables integration** &mdash; NAT masquerade, port forwarding, and wg0 interface rules.
+- **Client provisioning** &mdash; QR codes generated for each client config (mobile-friendly via `qrencode`).
+- **Multi-client support** &mdash; Generate any number of clients with unique IPs.
+- See [`hardening/wireguard/README.md`](hardening/wireguard/README.md) for usage and client management.
+
+#### Intrusion Detection (CrowdSec)
+
+- **CrowdSec IDS** &mdash; Behavior-based intrusion detection with community-powered threat intelligence.
+- **nftables bouncer** &mdash; Automatic IP banning via nftables sets.
+- **nginx bouncer** &mdash; Layer-7 blocking for web attacks (SQLi, XSS, path traversal).
+- **Collections** &mdash; Pre-installed detection scenarios for Linux, SSH, and nginx.
+- See [`hardening/crowdsec/README.md`](hardening/crowdsec/README.md) for setup and console enrollment.
+
+#### Web Server Hardening (nginx)
+
+- **nginx-mainline** with Let's Encrypt (certbot) &mdash; One-command setup targeting SSL Labs A+ and securityheaders.com A+.
+- **TLS** &mdash; TLS 1.2 + 1.3 only, ECDHE + AEAD ciphers, X25519/P-384 curves, 4096-bit DH params, ECDSA P-384 certificates, session tickets disabled (forward secrecy), HTTP/2.
+- **Security headers** &mdash; All six securityheaders.com graded headers (HSTS with 2-year preload, CSP, Permissions-Policy, Referrer-Policy, X-Content-Type-Options, X-Frame-Options) plus OWASP Cross-Origin headers (COEP, COOP, CORP).
+- **Hardening** &mdash; Buffer limits, Slowloris timeouts, gzip disabled (BREACH prevention), dotfile/sensitive-file blocking, server tokens hidden.
+- **Auto-renewal** &mdash; systemd timer runs certbot twice daily with nginx reload hook.
+- **OCSP** &mdash; Intentionally disabled (Let's Encrypt ended OCSP support in 2025; browsers use CRLs).
+- See [`hardening/nginx/README.md`](hardening/nginx/README.md) for full details.
+
+#### Application Hardening (React & Node.js)
+
+- **React/SPA** (`react.sh`) &mdash; Production deployment hardening via nginx: SPA routing, React-tuned CSP (`script-src 'self'` without `unsafe-eval`), aggressive static asset caching (1yr immutable for hashed files, no-cache for `index.html`), source map blocking, dotfile protection, file permissions (root:http 750/640), `.env.production.example` template with security guidelines.
+- **Node.js/Express** (`nodejs.sh`) &mdash; Dedicated system user, hardened systemd service (ProtectSystem=strict, 14+ security directives, V8 JIT-aware), nginx reverse proxy with rate limiting, WebSocket support, `X-Powered-By` stripping, AppArmor profile, automated weekly `npm audit` via systemd timer, log rotation, secure environment file.
+- See [`hardening/react/README.md`](hardening/react/README.md) and [`hardening/nodejs/README.md`](hardening/nodejs/README.md) for security best practices.
+
+#### SSH Hardening
+
+- **Server** (`ssh.sh`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), enforces modern algorithms only (ChaCha20-Poly1305, AES-256-GCM, Curve25519), disables root login, X11 forwarding, agent forwarding, TCP forwarding, tunneling, and compression. Configures revoked keys file, VERBOSE logging, key-based + password multi-factor auth, strict session limits (MaxSessions 2, MaxStartups 2, MaxAuthTries 3), client alive timeout (300s), and a legal warning banner.
+- **Client** (`ssh_client.sh`) &mdash; Generates Ed25519 key pair, configures SSH client with matching modern algorithms, hashes `known_hosts`, assists with public key deployment to servers.
+- **Key Rotation** &mdash; Automated quarterly SSH key rotation via cron.
+
+#### Two-Factor Authentication (TOTP)
+
+- **SSH 2FA** (`totp.sh`) &mdash; Google Authenticator/TOTP for SSH with `pam_google_authenticator`.
+- **Multi-factor enforcement** &mdash; Configures `AuthenticationMethods publickey,keyboard-interactive` (SSH key + TOTP required).
+- **Gradual rollout** &mdash; `nullok` option allows users without TOTP to still log in during setup phase; remove for mandatory 2FA.
+- **Emergency scratch codes** &mdash; Backup codes generated for account recovery.
+- See [`hardening/totp/README.md`](hardening/totp/README.md) for compatible apps and setup guide.
+
+#### Extended Intrusion Prevention (fail2ban)
+
+- **7 jails** &mdash; SSH (24h ban, 3 retries), SSH-aggressive (7d ban, 1 retry for invalid users), nginx-http-auth, nginx-botsearch (7d ban), nginx-limit-req, and recidive (4-week ban for repeat offenders).
+- **nftables integration** &mdash; Uses `nftables-multiport` and `nftables-allports` ban actions (no iptables dependency).
+- **Custom filters** &mdash; Aggressive SSH filter catches invalid users, unauthenticated disconnects, and bad protocol versions.
+- See [`hardening/fail2ban/README.md`](hardening/fail2ban/README.md) for jail descriptions and ban management.
+
+#### Time Security (Chrony NTS)
+
+- **Network Time Security** &mdash; Authenticated NTP via TLS 1.3 (RFC 8915), preventing MITM attacks on time synchronization.
+- **6 NTS servers** &mdash; Cloudflare, Netnod (Sweden), PTB (Germany), Netnod Stockholm.
+- **Client-only mode** &mdash; `port 0` disables NTP server functionality; `cmdallow` restricted to localhost.
+- **Hardened systemd service** &mdash; `CAP_SYS_TIME` only, strict filesystem protection, clock syscall filter.
+- See [`hardening/chrony/README.md`](hardening/chrony/README.md) for NTS verification and troubleshooting.
+
+#### Send-Only Mail Relay (Postfix)
+
+- **System notifications** &mdash; Send-only Postfix relay through any SMTP provider (Gmail, SendGrid, Mailgun, SES).
+- **Security** &mdash; `loopback-only` (no external listening), TLS 1.2+ with STARTTLS, SASL authentication, VRFY disabled, internal header stripping.
+- **Integration** &mdash; fail2ban notifications, cron job alerts, SMART monitoring, logwatch reports.
+- See [`hardening/postfix/README.md`](hardening/postfix/README.md) for relay provider setup examples.
+
+#### Kernel Hardening (sysctl)
+
+Over 100 kernel parameters configured via `/etc/sysctl.d/99-sysctl.conf`:
+
+- **Memory** &mdash; ASLR maximized (`vm.mmap_rnd_bits=32`), protected symlinks/hardlinks/FIFOs, restricted core dumps, `mmap_min_addr=65536`, strict overcommit.
+- **Network** &mdash; SYN flood protection (syncookies), source validation (reverse path filtering), disabled IP forwarding, disabled ICMP redirects, martian packet logging, TCP Fast Open, BBR congestion control, `challenge_ack_limit` CVE mitigation, keepalive tuning, large buffer sizes for performance.
+- **IPv6** &mdash; Disabled by default with all RA/redirect/source-route acceptance blocked.
+- **Kernel** &mdash; Restricted `dmesg`, `kptr`, `ptrace` (scope 2), BPF JIT hardened, `perf_event_paranoid=3`, panic on oops, kexec disabled, SysRq disabled.
+
+#### Kernel Boot Parameters
+
+Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`, `page_alloc.shuffle=1`, `pti=on`, `randomize_kstack_offset=on`, `vsyscall=none`.
+
+#### DNS Security
+
+- **DNS-over-TLS** via Stubby with privacy-focused upstream resolvers (Quad9 primary, Cloudflare secondary, Google fallback).
+- **systemd-resolved** configured to use Stubby as upstream, with DNSSEC, no multicast DNS, no LLMNR.
+- **DHCP DNS rejected** &mdash; Network configuration ignores DNS from DHCP to prevent DNS hijacking.
+
+#### Authentication Hardening
+
+- **PAM faillock** &mdash; Account lockout after 5 failed attempts, 15-minute unlock time.
+- **Password quality** (`pam_pwquality`) &mdash; Minimum 12 characters, requires uppercase, lowercase, digit, and symbol. Enforced for root.
+- **login.defs** &mdash; YESCRYPT encryption (cost factor 7), HMAC SHA512, UMASK 027, fail delay 5s, login timeout 30s, max retries 3, password max age 730 days.
+
+#### Sudo Hardening
+
+Custom `/etc/sudoers` with: secure path, env reset with curated keep list, `requiretty`, `umask=077`, 30-minute timestamp timeout, 3 password attempts, full I/O logging to `/var/log/sudo.log`, no `rootpw`.
+
+#### Systemd Service Hardening
+
+Granular per-service hardening overrides for 15+ services:
+
+| Service | Key Restrictions |
+|---------|-----------------|
+| **sshd** | `ProtectHome=read-only`, strict syscall filter, device isolation |
+| **NetworkManager** | Minimal capabilities (`CAP_NET_ADMIN/RAW`), kernel protection |
+| **auditd** | Audit-specific capabilities, netlink-only networking |
+| **ClamAV** | Read-only system, task limit (4), file I/O syscalls only |
+| **fail2ban** | Net admin capabilities for nftables/iptables, log access |
+| **Stubby** | Runs as dedicated `stubby` user, network I/O only |
+| **systemd-resolved** | Netlink + inet networking, private temp/devices |
+| **chronyd** | `CAP_SYS_TIME`, clock syscalls allowed, no home access |
+| **rngd** | Full isolation (generic hardening template) |
+| **systemd-journald** | Full isolation (generic hardening template) |
+| **nginx** | `CAP_NET_BIND_SERVICE` only, strict filesystem, syscall filter, private devices |
+| **Bluetooth** | Strict protection, AF_UNIX + AF_BLUETOOTH only (bare-metal) |
+| **CrowdSec** | `ProtectSystem=strict`, limited read-write paths |
+| **Postfix** | `CAP_NET_BIND_SERVICE`, strict filesystem, private temp |
+| **Node.js apps** | Per-app sandboxing, `MemoryDenyWriteExecute=no` (V8 JIT), capability bounding |
+
+Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/tunable/log protection, syscall filtering, namespace/realtime/SUID restrictions, `MemoryDenyWriteExecute`, and private temp/devices.
+
+#### Anti-Malware & Intrusion Detection
+
+- **ClamAV** &mdash; Full configuration with PUA detection, heuristic alerts, encrypted archive alerts, all file type scanning enabled. Auto-updating signatures via `clamav-freshclam.service`.
+- **rkhunter** &mdash; Rootkit detection with daily automated checks via systemd timer.
+- **AIDE** &mdash; File integrity monitoring with custom rules (NORMAL, DIR, PERMS, LOG, DATAONLY), monitors `/boot`, `/etc`, `/usr/bin`, `/usr/sbin`, sensitive config files. Daily checks via systemd timer. See `utils/aide-config.sh`.
+- **auditd** &mdash; MITRE ATT&CK-mapped audit rules (~500 rules covering initial access, execution, persistence, privilege escalation, defense evasion, credential access, discovery, lateral movement, collection, exfiltration, and C2).
+- **fail2ban** &mdash; 7 jails covering SSH, nginx, and recidive (repeat offenders).
+- **CrowdSec** &mdash; Behavior-based IDS with community threat intelligence, nftables and nginx bouncers.
+- **arch-audit** &mdash; Daily vulnerability scanning for installed packages via systemd timer.
+- **lynis** &mdash; Security auditing framework for compliance checking.
+- **arpwatch** &mdash; ARP spoofing detection and monitoring.
+
+#### Encrypted Backups (borg)
+
+- **borg** &mdash; Encrypted, deduplicated backups with `repokey-blake2` encryption and `zstd` compression.
+- **Automatic backup** &mdash; Daily at 2:00 AM via systemd timer with 30-minute random delay.
+- **Configurable retention** &mdash; Default: 7 daily, 4 weekly, 6 monthly archives.
+- **Managed operations** &mdash; `--init`, `--backup`, `--prune`, `--list`, `--restore` modes.
+- Includes: `/etc`, `/home`, `/root`, `/var/lib`, `/var/log`, `/var/spool/cron`, `/opt`.
+
+#### Monitoring (Prometheus & Grafana)
+
+- **node_exporter** &mdash; Prometheus metrics exporter with systemd, filesystem, CPU, memory, network, disk, and process collectors. Listens on localhost only.
+- **Custom security textfile collector** &mdash; Exports pending updates count, failed SSH logins, fail2ban bans, and failed systemd units (runs every 5 minutes).
+- **Prometheus server** (optional) &mdash; 15-second scrape interval, 30-day retention, localhost-only.
+- **Grafana** (optional) &mdash; Hardened configuration with security cookies, CSP headers, Prometheus auto-provisioned as datasource.
+
+#### Container Hardening (Docker & Podman)
+
+- **Podman** (default, recommended) &mdash; Rootless containers with `crun` runtime, `fuse-overlayfs` storage, `short-name-mode=enforcing`, journald logging, auto-update timer, subuid/subgid configuration.
+- **Docker** (optional) &mdash; Hardened `daemon.json` (ICC disabled, no-new-privileges, userland-proxy off, json-file log rotation, overlay2, seccomp profile, `DOCKER_CONTENT_TRUST=1`), systemd service hardening.
+- Both modes include container-specific sysctl settings and a 10-point security best practices checklist.
+
+#### Hardening Compliance Checker
+
+- **audit-check.sh** &mdash; Validates that all AwesomeArchLinux hardening has been correctly applied.
+- **47 checks** across 8 categories: kernel hardening (sysctl), filesystem security, authentication, SSH, network, services, boot security, and disabled modules.
+- **Output modes** &mdash; Color-coded terminal output (`[PASS]`/`[FAIL]`/`[WARN]`), `--verbose` for actual values, `--json` for machine-readable output.
+- **Scoring** &mdash; Final pass/fail score with percentage.
+
+#### Physical Security (bare-metal only)
+
+- **USBGuard** &mdash; Default-block policy for USB devices, auto-generated allow policy for currently connected devices.
+- **Bluetooth** &mdash; Hardware detection, secure connections only, LE mode, minimum 16-byte encryption key, privacy mode, systemd service hardened.
+
+#### File System Security
+
+- **Mount hardening** &mdash; `/tmp` and `/dev/shm` mounted with `nosuid,nodev,noexec`. `/proc` mounted with `hidepid=2`.
+- **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (600).
+- **UMASK 027** &mdash; Set globally in `/etc/profile`, `/etc/bash.bashrc`, and `/etc/login.defs`.
+- **Home directory ACLs** &mdash; Default ACLs restrict group and other access.
+- **Compiler restrictions** &mdash; `gcc`, `g++`, `clang`, `make`, `as`, `ld` restricted to `compilers` group (750).
+
+#### Protocol Hardening
+
+- Disabled kernel modules: `dccp`, `sctp`, `rds`, `tipc`.
+- Core dumps disabled via `/etc/security/limits.conf`.
+- Hardened compiler flags in `makepkg.conf`: `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`, `-Wl,-z,relro,-z,now`, PIE.
+
+#### Monitoring & Maintenance
+
+- **Prometheus + Grafana** &mdash; Full monitoring stack with security-focused textfile collector.
+- **sysstat** &mdash; System performance accounting.
+- **logrotate** &mdash; Daily rotation, 7-day retention, compressed.
+- **journald** &mdash; Persistent storage, compressed, sealed, 200MB max.
+- **Automatic updates** &mdash; Daily `pacman -Syu` via systemd timer.
+
+#### GRUB Security
+
+- **Password protection** &mdash; PBKDF2-hashed GRUB password required to edit boot entries.
+- **Encrypted boot** (bare-metal) &mdash; GRUB unlocks LUKS with embedded key file.
+- **Serial console** (VPS) &mdash; GRUB configured for serial output for VPS provider console access.
+
+#### Utilities
+
+| Script | Description |
+|--------|-------------|
+| `utils/aide-config.sh` | AIDE file integrity monitoring with custom rules and daily systemd timer |
+| `utils/audit-check.sh` | Hardening compliance checker (47 tests, 8 categories, JSON output) |
+| `utils/backup.sh` | Encrypted borg backups with configurable retention and systemd timer |
+| `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
+| `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
+| `utils/gnome.sh` | Minimal GNOME desktop installation (no games/bloat) with security settings |
+| `utils/openbox.sh` | Openbox window manager + Tint2 panel |
+| `utils/neovim.sh` | NeoVim with Treesitter syntax highlighting |
+| `utils/vim.sh` | Vim with plugins and hardening |
+| `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
+| `utils/zsh.sh` | Zsh shell configuration and hardening |
+| `utils/yay.sh` | yay AUR helper installation |
+| `utils/theme.sh` | Desktop theming |
+
+---
 
 ### Installation
 
 First, download the Arch Linux ISO [here](https://archlinux.org/download/).
 
-#### Method 1
+#### Bare-metal (Full Disk Encryption)
 
-Boot the media on the target device where you want to install Arch Linux.
-
-If Git is not installed, you can install it with:
+Boot the media on the target device.
 
 ```bash
 pacman -Sy git
-```
-
-Then, on the live system, do the following:
-
-```bash
 git clone https://github.com/schm1d/AwesomeArchLinux.git
 cd AwesomeArchLinux/base
 chmod +x *.sh
 ./archinstall.sh
 ```
 
-#### Method 2
+The installer will prompt you for:
+- Target disk
+- Swap, root, and optional `/var` partition sizes
+- Username and hostname
+- LUKS encryption passphrase
+- Optional TPM2 binding
+- GRUB password
+- User and root passwords
 
-Boot the media on the target device where you want to install Arch Linux.
+#### VPS / Cloud Server
 
-Download the scripts on another machine and copy them to a removable media (e.g., USB drive).
+Boot the Arch Linux ISO on your VPS (most providers support custom ISOs).
 
-To run the base scripts on your target machine, all you need to do is:
+```bash
+pacman -Sy git
+git clone https://github.com/schm1d/AwesomeArchLinux.git
+cd AwesomeArchLinux/base
+chmod +x *.sh
+./vps-install.sh
+```
 
-1. Copy both **archinstall.sh** and **chroot.sh** to the same directory on the live system.
-2. Make them executable:
+The VPS installer will prompt you for:
+- Target disk (typically `vda` or `sda`)
+- Swap size
+- Username, hostname, and SSH port
+- GRUB password
+- User and root passwords
 
+#### Offline Installation
+
+Download the scripts on another machine and copy them to a removable media.
+
+1. Copy `archinstall.sh` + `chroot.sh` (or `vps-install.sh` + `vps-chroot.sh`) to the same directory on the live system.
+2. Make them executable: `chmod +x *.sh`
+3. Run the installer: `./archinstall.sh` or `./vps-install.sh`
+
+---
+
+### Post-Installation
+
+After rebooting:
+
+1. **Run AUR packages script** (as the created user):
    ```bash
-   chmod +x archinstall.sh chroot.sh
+   /root/install-aur-packages.sh
    ```
 
-3. Run **archinstall.sh**:
-
+2. **Enable security services**:
    ```bash
-   ./archinstall.sh
+   systemctl enable --now apparmor
+   systemctl enable --now auditd
+   systemctl enable --now rkhunter.timer
+   systemctl enable --now arch-audit.timer
    ```
 
-### Hardening Techniques Implemented
+3. **Secure Boot enrollment** (bare-metal, if desired):
+   ```bash
+   sbctl status
+   sbctl sign -s /efi/EFI/GRUB/grubx64.efi
+   sbctl sign -s /boot/vmlinuz-linux
+   sbctl sign -s /boot/vmlinuz-linux-hardened
+   ```
 
-#### Full Disk Encryption
+4. **TPM2 enrollment** (bare-metal, if TPM was selected):
+   ```bash
+   systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 /dev/<partition>
+   ```
 
-- **LVM on LUKS with Encrypted Boot Partition**: Provides full disk encryption using LUKS, including the `/boot` partition.
-- **Strong Encryption Algorithms**: Utilizes `aes-xts-plain64` cipher with a 512-bit key and `sha512` hash for secure encryption.
-- **Randomized Encryption Keys**: Generates a random key file for unlocking the LUKS container, enhancing security.
+5. **Add SSH authorized keys** (VPS):
+   ```bash
+   # From your local machine:
+   ssh-copy-id -p <SSH_PORT> <username>@<server-ip>
+   ```
 
-#### Secure Boot Configuration
+6. **Review**: `/root/POST_INSTALL_README.txt`
 
-- **GRUB Hardening**: Enables GRUB password protection and encrypts GRUB with the LUKS key.
-- **Secure Kernel Parameters**: Configures GRUB to pass security-focused parameters to the kernel.
+---
 
-#### PAM Configuration
+### Standalone Hardening Scripts
 
-- **Updated PAM Modules**: Replaces deprecated `pam_tally2.so` with `pam_faillock.so` for account lockout policies.
-- **Correct PAM File Modifications**: Ensures changes are made to the correct PAM configuration files (`/etc/pam.d/system-auth`).
+The scripts in `hardening/` and `utils/` can be used independently on any Arch Linux system:
 
-#### Password Policies
+```bash
+# --- Mandatory Access Control ---
+sudo ./hardening/apparmor/apparmor.sh          # AppArmor profiles for 7 services
 
-- **Password Complexity Enforcement**: Sets minimum password length to 12 characters and requires the use of uppercase, lowercase, digits, and symbols.
-- **Password Quality Module**: Configures `pam_pwquality.so` with strict settings in `/etc/security/pwquality.conf`.
-- **Password Aging Policies**: Sets maximum and minimum password age in `/etc/login.defs`.
+# --- Network ---
+sudo ./hardening/ssh/ssh.sh                    # Harden SSH server
+sudo ./hardening/totp/totp.sh -u myuser        # Add TOTP 2FA to SSH
+sudo ./hardening/wireguard/wireguard.sh        # WireGuard VPN server
+sudo ./hardening/fail2ban/fail2ban.sh          # Extended fail2ban jails
 
-#### Account Lockout Policies
+# --- Web ---
+sudo ./hardening/nginx/nginx.sh -d example.com -e admin@example.com   # nginx + Let's Encrypt
+sudo ./hardening/react/react.sh -a /var/www/myapp -d app.example.com  # React SPA hardening
+sudo ./hardening/nodejs/nodejs.sh -a /opt/api -n api-server           # Node.js hardening
 
-- **Failed Login Attempt Limits**: Locks accounts after 5 failed login attempts for 15 minutes using `pam_faillock.so`.
-- **Login Retry Limits**: Reduces login retries and timeouts in `/etc/login.defs`.
+# --- System ---
+sudo ./hardening/sysctl/sysctl.sh              # Kernel parameter hardening
+sudo ./hardening/chrony/chrony.sh              # Chrony NTS (authenticated NTP)
+sudo ./hardening/postfix/postfix.sh -r smtp.gmail.com -u user@gmail.com -p 'pass'  # Mail relay
 
-#### Firewall Configuration
+# --- Detection ---
+sudo ./hardening/crowdsec/crowdsec.sh --with-nginx --with-nftables    # CrowdSec IDS
+sudo ./hardening/firehol/firehol.sh -l 1       # FireHOL with IP blocklists
 
-- **iptables Setup**: Configures `iptables` to set default policies, allowing only necessary traffic.
-- **SSH Rate Limiting**: Implements rate limiting on SSH connections to mitigate brute-force attacks.
-- **Loopback and Established Connections**: Allows loopback traffic and established connections.
+# --- Utilities ---
+sudo ./utils/backup.sh --init                  # Initialize encrypted backups
+sudo ./utils/backup.sh --backup --prune        # Run backup with retention
+sudo ./utils/aide-config.sh --init             # Initialize AIDE file integrity DB
+sudo ./utils/monitoring.sh --with-prometheus --with-grafana  # Full monitoring stack
+sudo ./utils/docker.sh --podman -u myuser      # Rootless Podman containers
+sudo ./utils/audit-check.sh                    # Check hardening compliance
+sudo ./utils/audit-check.sh --json             # Machine-readable compliance report
+```
 
-#### Service Hardening
-
-- **Disabled Unnecessary Services**: Disables or removes services and protocols that are not needed (e.g., `dccp`, `sctp`, `rds`, `tipc`).
-- **Secured System Services**: Configures services like `NetworkManager`, `ssh`, `dhcpcd`, and ensures they are enabled securely.
-- **Time Synchronization**: Installs and enables `chrony` and `ntpd` for reliable timekeeping.
-
-#### System Auditing and Monitoring
-
-- **Auditd Installation**: Installs `auditd` and downloads comprehensive audit rules to monitor system activities.
-- **Fail2Ban Configuration**: Installs and configures `fail2ban` to protect against unauthorized access attempts.
-- **System Accounting**: Enables `sysstat` for system performance monitoring.
-
-#### Kernel Hardening
-
-- **Kernel Parameters**: Sets parameters like `slab_nomerge`, `init_on_alloc=1`, `pti=on`, and others to harden the kernel against attacks.
-- **Module Blacklisting**: Blacklists unneeded kernel modules like `nouveau` when installing NVIDIA drivers.
-- **CPU Microcode Updates**: Installs CPU microcode updates for Intel and AMD processors.
-
-#### File System Permissions
-
-- **Securing Key Directories and Files**: Sets appropriate permissions on sensitive files like `/etc/shadow`, `/boot/grub/grub.cfg`, and others.
-- **UMASK Settings**: Changes default `UMASK` to `027` for more restrictive default file permissions.
-- **Home Directory ACLs**: Sets default ACLs on home directories to restrict access.
-
-#### SSH and Network Security
-
-- **SSH Configuration**: Hardened `sshd_config` settings and restricted access via `hosts.allow` and `hosts.deny`.
-- **DNS Configuration**: Prevents DNS leaks by configuring `systemd-resolved` with secure DNS servers and enabling DNSSEC.
-- **ARPWatch Installation**: Installs `arpwatch` to monitor for ARP spoofing attacks.
-
-#### Disabling Unnecessary Protocols and Services
-
-- **Kernel Module Blacklisting**: Disables unneeded protocols by adding entries in `/etc/modprobe.d/disable-protocols.conf`.
-- **Core Dump Disabling**: Prevents core dumps to avoid potential information leakage.
-
-#### Additional Security Enhancements
-
-- **ClamAV Installation**: Provides antivirus scanning capabilities.
-- **Rootkit Hunter**: Installs `rkhunter` to detect rootkits and malware.
-- **USBGuard Configuration**: Controls USB device access to prevent unauthorized devices.
-- **Logrotate Configuration**: Ensures log files are rotated and managed correctly.
-- **Sudo Hardening**: Configures `/etc/sudoers` with secure defaults, logging, and environment restrictions.
-- **Bootloader Security**: Sets a GRUB password and restricts boot options to prevent unauthorized changes.
-- **Banner Creation**: Adds a security banner in `/etc/issue` to warn unauthorized users.
-- **Compiler Access Restriction**: Restricts access to compilers like `gcc`, `g++`, and `clang` to the root user to prevent unauthorized code compilation.
-- **Vulnerability Scanning**: Installs `arch-audit` to detect vulnerable packages and sets up a daily scan using a systemd timer.
+---
 
 ### Customization
 
-- **Variable Configuration**: Modify variables like `DISK`, `USERNAME`, `HOSTNAME`, `TIMEZONE`, and `LOCALE` in the `archinstall.sh` and `chroot.sh` scripts to suit your setup.
-- **Package Selection**: Adjust the list of packages installed during the base system installation in `archinstall.sh`.
-- **SSH Port**: Change the `SSH_PORT` variable in `chroot.sh` to use a custom SSH port.
+- **Variables** &mdash; Modify `TIMEZONE`, `LOCALE`, `SSH_PORT`, and keymap in `chroot.sh` / `vps-chroot.sh`.
+- **Package selection** &mdash; Adjust the `pacstrap` package list in the installer scripts.
+- **Firewall rules** &mdash; Edit `/etc/nftables.conf` to add application-specific ports.
+- **DNS providers** &mdash; Edit `/etc/stubby/stubby.yml` to change upstream DNS resolvers.
+- **CSP headers** &mdash; Customize `Content-Security-Policy` in nginx configs for your application needs.
+- **Backup paths** &mdash; Edit `backup.sh` include/exclude lists for your environment.
+- **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/prometheus/node-exporter/`.
 
 ### Contributing
 
@@ -162,4 +486,4 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ---
 
-**Note**: Arch Linux is a highly customizable, lightweight, and rolling-release distribution suitable for experienced users who want complete control over their system. These scripts aim to automate the installation and hardening process, but reviewing and understanding the configurations is essential to ensure they meet your security requirements.
+**Note**: Arch Linux is a rolling-release distribution suitable for users who want complete control over their system. These scripts automate the installation and hardening process, but reviewing and understanding the configurations is essential to ensure they meet your security requirements.
