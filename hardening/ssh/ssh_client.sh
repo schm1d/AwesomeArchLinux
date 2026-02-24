@@ -44,7 +44,7 @@ check_ssh_version() {
 generate_ssh_key() {
     if [ ! -f "$KEY_FILE" ]; then
         echo -e "${BBlue}Generating a new SSH key pair ($KEY_TYPE)...${NC}"
-        ssh-keygen -t $KEY_TYPE -C "$USERNAME" -f "$KEY_FILE"
+        ssh-keygen -t "$KEY_TYPE" -C "$USERNAME" -f "$KEY_FILE"
     else
         echo -e "${BBlue}SSH key ($KEY_FILE) already exists.${NC}"
     fi
@@ -76,10 +76,16 @@ configure_ssh_client() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     fi
 
-    # Remove any existing configuration for the server
-    sed -i.bak '/^Host myserver$/,/^Host /d' "$CONFIG_FILE" || true
+    # Remove any existing "Host myserver" block safely.
+    # Use awk to handle the last-block edge case (sed /^Host myserver$/,/^Host /d
+    # deletes the last block if no subsequent Host block exists).
+    awk '
+        /^Host myserver$/ { skip=1; next }
+        /^Host / && skip { skip=0 }
+        !skip
+    ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
-    # Append new configuration
+    # Append new configuration (modern ciphers matching the hardened server)
     cat >> "$CONFIG_FILE" <<EOF
 
 Host myserver
@@ -87,11 +93,11 @@ Host myserver
     Port $SSH_PORT
     User $USERNAME
     HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-    KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
-    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+    KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
     MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
     PubkeyAuthentication yes
-    PasswordAuthentication yes
+    PasswordAuthentication no
     IdentitiesOnly yes
     IdentityFile $KEY_FILE
     ServerAliveInterval 10
@@ -141,6 +147,9 @@ else
     echo -e "${BBlue}You can connect to the server using 'ssh <TARGET_SERVER>'${NC}"
 fi
 
-chmod 700 /home/$USER/.ssh
-chmod 600 /home/$USER/.ssh/authorized_keys
-chown -R $USER:$USER /home/$USER/.ssh
+# Set correct permissions on the client SSH directory
+chmod 700 "$HOME/.ssh"
+chmod 600 "$KEY_FILE" 2>/dev/null || true
+chmod 644 "$KEY_FILE.pub" 2>/dev/null || true
+chmod 600 "$CONFIG_FILE"
+chown -R "$USER:$USER" "$HOME/.ssh"

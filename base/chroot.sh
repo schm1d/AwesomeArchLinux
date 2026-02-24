@@ -59,7 +59,7 @@ pacman-key --init
 pacman-key --populate archlinux
 
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
-userdel -r games 2>/dev/null || true
+# games is a group on Arch, not a user — userdel not needed
 groupdel games 2>/dev/null || true
 
 timedatectl set-timezone "$TIMEZONE"
@@ -309,7 +309,7 @@ echo -e "${BBlue}Configuring firewall with nftables...${NC}"
 
 pacman -S --noconfirm nftables
 
-cat <<'EOF' > /etc/nftables.conf
+cat <<EOF > /etc/nftables.conf
 #!/usr/sbin/nft -f
 
 flush ruleset
@@ -317,37 +317,34 @@ flush ruleset
 table inet filter {
     chain input {
         type filter hook input priority filter; policy drop;
-        
+
         # Allow loopback
         iif lo accept
-        
+
         # Allow established connections
         ct state established,related accept
-        
+
         # Drop invalid connections
         ct state invalid drop
-        
+
         # Allow SSH with rate limiting
-        tcp dport $SSH_PORT ct state new limit rate 2/minute accept
-        
+        tcp dport ${SSH_PORT} ct state new limit rate 2/minute accept
+
         # Drop everything else
         counter drop
     }
-    
+
     chain forward {
         type filter hook forward priority filter; policy drop;
     }
-    
+
     chain output {
         type filter hook output priority filter; policy accept;
     }
 }
 EOF
 
-sed -i "s/\$SSH_PORT/$SSH_PORT/g" /etc/nftables.conf
-
 systemctl enable nftables.service
-systemctl start nftables.service
 
 echo -e "${BBlue}Firewall configuration with nftables completed.${NC}"
 
@@ -369,13 +366,12 @@ EOF
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
 systemctl enable rngd
-
-echo -e "${BBlue}Installing and configuring haveged...${NC}"
-pacman -S --noconfirm haveged
-systemctl enable haveged.service
+# NOTE: haveged is NOT installed — rng-tools is sufficient and haveged is
+# considered insecure in VM environments. Modern kernels (5.6+) have adequate
+# entropy from the jitterentropy module.
 
 echo -e "${BBlue}Installing file security utility pax-utils & arch-audit...${NC}"
-pacman -S --noconfirm 	arch-audit pax-utils
+pacman -S --noconfirm arch-audit pax-utils
 
 echo -e "${BBlue}Installing lynis...${NC}"
 pacman -S --noconfirm lynis
@@ -395,19 +391,19 @@ echo -e "${BBlue}Configuring ClamAV...${NC}"
 #    into the current directory. Then we can move them to /etc/clamav/.
 if [ ! -f /etc/clamav/freshclam.conf ]; then
   echo "Generating /etc/clamav/freshclam.conf..."
-  clamconf -g freshclam.conf > freshclam.conf
+  clamconf -g freshclam.conf
   mv freshclam.conf /etc/clamav/freshclam.conf
 fi
 
 if [ ! -f /etc/clamav/clamd.conf ]; then
   echo "Generating /etc/clamav/clamd.conf..."
-  clamconf -g clamd.conf > clamd.conf
+  clamconf -g clamd.conf
   mv clamd.conf /etc/clamav/clamd.conf
 fi
 
 if [ ! -f /etc/clamav/clamav-milter.conf ]; then
   echo "Generating /etc/clamav/clamav-milter.conf..."
-  clamconf -g clamav-milter.conf > clamav-milter.conf
+  clamconf -g clamav-milter.conf
   mv clamav-milter.conf /etc/clamav/clamav-milter.conf
 fi
 
@@ -421,7 +417,7 @@ ensure_clamd_option() {
   local VALUE="$2"
   # If the key exists, replace it; otherwise, append it
   if grep -Eq "^#?\s*${KEY}\s" "$CLAMD_CONF"; then
-    sed -i "s|^#\?\s*${KEY}.*|${KEY} ${VALUE}|" "$CLAMD_CONF"
+    sed -Ei "s|^#?\s*${KEY}.*|${KEY} ${VALUE}|" "$CLAMD_CONF"
   else
     echo "${KEY} ${VALUE}" >> "$CLAMD_CONF"
   fi
@@ -471,18 +467,13 @@ chown clamav:clamav /var/log/clamav/freshclam.log
 systemctl enable clamav-freshclam.service
 # systemctl enable clamav-freshclam-once.timer
 
-# 5) (Optional) Start the freshclam service so definitions update immediately
-echo "Starting clamav-freshclam.service..."
-systemctl start clamav-freshclam.service || true
-
-# 6) Update definitions manually now (optional)
-echo "Updating ClamAV definitions once..."
-freshclam
-
-# 7) Enable and start clamd for on-demand scanning
-echo "Enabling and starting clamd.service..."
+# 5) Enable freshclam and clamd (will start on first boot)
+echo "Enabling ClamAV services..."
+systemctl enable clamav-freshclam.service
 systemctl enable clamav-daemon.service
-systemctl start clamav-daemon.service || true
+
+# freshclam update will run on first boot — cannot reliably update in chroot
+echo -e "${BYellow}ClamAV definitions will update on first boot via freshclam.${NC}"
 
 # If it's not in the official repos, install from AUR (requires e.g. yay):
 #if ! pacman -Qi clamav-unofficial-sigs &>/dev/null; then
@@ -583,12 +574,18 @@ echo -e "${BBlue}Setting additional UMASK 027s...${NC}"
 echo "umask 027" >> /etc/profile
 echo "umask 027" >> /etc/bash.bashrc
 
-# Disable unwanted protocols
+# Disable unwanted protocols (truncate to avoid duplicates on re-run)
 echo -e "${BBlue}Disabling unwanted protocols...${NC}"
-echo "install dccp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
-echo "install sctp /bin/true" >> /etc/modprobe.d/disable-protocols.conf
-echo "install rds /bin/true" >> /etc/modprobe.d/disable-protocols.conf
-echo "install tipc /bin/true" >> /etc/modprobe.d/disable-protocols.conf
+cat > /etc/modprobe.d/disable-protocols.conf << 'MODPROBE_EOF'
+blacklist dccp
+blacklist sctp
+blacklist rds
+blacklist tipc
+install dccp /bin/false
+install sctp /bin/false
+install rds /bin/false
+install tipc /bin/false
+MODPROBE_EOF
 
 # Disabling core dump. Please feel free to comment if you need it.
 echo -e "${BBlue}Disabling core dump...${NC}"
@@ -608,23 +605,17 @@ systemctl enable sysstat
 echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
 pacman -S --noconfirm audit
 
-# Check if wget is installed
-if ! command -v wget &> /dev/null; then
-    echo "wget could not be found, please install wget and try again."
-    exit 1
-fi
-
-# Download the auditd rules
+# Download the auditd rules (prefer curl, fall back to wget)
 echo "Downloading auditd rules from $RULES_URL..."
-wget -O "$LOCAL_RULES_FILE" "$RULES_URL"
-
-# Verify download success
-if [ $? -ne 0 ]; then
-    echo "Failed to download auditd rules."
-    exit 1
+if command -v curl &>/dev/null; then
+    curl -fsSL -o "$LOCAL_RULES_FILE" "$RULES_URL"
+elif command -v wget &>/dev/null; then
+    wget -q -O "$LOCAL_RULES_FILE" "$RULES_URL"
 else
-    echo "Auditd rules downloaded successfully."
+    echo "ERROR: Neither curl nor wget found. Install one to download auditd rules." >&2
+    exit 1
 fi
+echo "Auditd rules downloaded successfully."
 
 # Enable auditd (restart not possible in chroot — rules apply on first boot)
 echo "Auditd rules installed. Will be active on first boot."
@@ -648,7 +639,7 @@ pacman -S --noconfirm fail2ban
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
-port    = "$SSH_PORT"
+port    = ${SSH_PORT}
 logpath = %(sshd_log)s
 maxretry = 5
 EOF
@@ -716,10 +707,7 @@ else
 fi
 rm -f /tmp/sudoers.new
 
-# Install arch-audit to Determine Vulnerable Packages
-echo -e "${BBlue}Installing arch-audit for vulnerability scanning...${NC}"
-pacman -S --noconfirm arch-audit
-
+# arch-audit was already installed above with pax-utils — just set up the scheduled scan
 # Create a script to run arch-audit and log results
 cat <<EOF > /usr/local/bin/arch-audit-check
 #!/bin/bash
@@ -801,22 +789,24 @@ done
 set -e # Re-enable 'exit on error'
 
 # --- Now configure Nano settings (after user creation) ---
-echo -e "${BBlue}Downloading nanorc...${NC}"
-curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
+echo -e "${BBlue}Installing nano syntax highlighting...${NC}"
+# Use the Arch package instead of piping curl to sh (security best practice)
+pacman -S --noconfirm nano-syntax-highlighting 2>/dev/null || true
 
-# Add the following settings to the nano configuration file to harden it
-echo "set constantshow" >> /home/"$USERNAME"/.nanorc
-echo "set locking" >> /home/"$USERNAME"/.nanorc
-echo "set nohelp" >> /home/"$USERNAME"/.nanorc
-echo "set nonewlines" >> /home/"$USERNAME"/.nanorc
-echo "set nowrap" >> /home/"$USERNAME"/.nanorc
-echo "set minibar" >> /home/"$USERNAME"/.nanorc
-echo "set zap" >> /home/"$USERNAME"/.nanorc
-echo "set linenumbers" >> /home/"$USERNAME"/.nanorc
-echo "set tabsize 4" >> /home/"$USERNAME"/.nanorc
-echo "set tabstospaces" >> /home/"$USERNAME"/.nanorc
-echo "set wordbounds punct,alnum" >> /home/"$USERNAME"/.nanorc
-echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/"$USERNAME"/.nanorc
+# Append nano settings (after backup/backupdir lines already written above)
+cat >> /home/"$USERNAME"/.nanorc << 'NANO_EOF'
+set constantshow
+set locking
+set nohelp
+set nonewlines
+set nowrap
+set minibar
+set zap
+set linenumbers
+set tabsize 4
+set tabstospaces
+include "/usr/share/nano-syntax-highlighting/*.nanorc"
+NANO_EOF
 
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
 /ssh.sh
@@ -842,17 +832,16 @@ configure_ssh() {
     cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
   fi
 
-  # Use 'install' for atomic file writing
+  # Use 'install' for atomic file writing — values must NOT be quoted in SSH config
   install -Dm644 /dev/stdin "$SSH_CONFIG_FILE" <<EOF
- Host "$HOSTNAME"  # Use hostname for Host entry
-  HostName "$HOSTNAME" # or IP if needed
-  Port "$SSH_PORT"
-  User "$USERNAME"
-  IdentityFile "$SSH_KEY_FILE"
-  # ... other SSH options as needed ...
+Host ${HOSTNAME}
+  HostName ${HOSTNAME}
+  Port ${SSH_PORT}
+  User ${USERNAME}
+  IdentityFile ${SSH_KEY_FILE}
   HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-  KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
-  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+  KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
 EOF
 
@@ -882,15 +871,23 @@ configure_ssh # Call the SSH configuration function
 sleep 2
 
 echo -e "${BBlue}Setting up SSH key rotation...${NC}"
-cat <<EOF > /usr/local/bin/rotate-ssh-keys.sh
+# Heredoc uses 'EOF' (quoted) to prevent expansion of $(date) at write time
+cat > /usr/local/bin/rotate-ssh-keys.sh <<'ROTATE_EOF'
 #!/bin/bash
-ssh-keygen -t "$SSH_KEY_TYPE" -f "$SSH_KEY_FILE" -q -N "" -C "$USERNAME@$HOSTNAME-$(date +%Y%m%d)"
-chown "$USERNAME:$USERNAME" "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
-chmod 600 "$SSH_KEY_FILE"
-chmod 644 "$SSH_KEY_FILE.pub"
-EOF
+set -euo pipefail
+KEY_TYPE="ed25519"
+KEY_FILE="/home/REPLACE_USER/.ssh/id_${KEY_TYPE}"
+USERNAME="REPLACE_USER"
+HOSTNAME="REPLACE_HOST"
+ssh-keygen -t "$KEY_TYPE" -f "$KEY_FILE" -q -N "" -C "${USERNAME}@${HOSTNAME}-$(date +%Y%m%d)"
+chown "$USERNAME:$USERNAME" "$KEY_FILE" "$KEY_FILE.pub"
+chmod 600 "$KEY_FILE"
+chmod 644 "$KEY_FILE.pub"
+ROTATE_EOF
+# Substitute placeholders with actual values (sed is safe here — controlled values)
+sed -i "s/REPLACE_USER/${USERNAME}/g; s/REPLACE_HOST/${HOSTNAME}/g" /usr/local/bin/rotate-ssh-keys.sh
 chmod +x /usr/local/bin/rotate-ssh-keys.sh
-echo "0 0 1 */3 * /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
+echo "0 0 1 */3 * root /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
 
 sleep 1
 
@@ -898,7 +895,8 @@ echo -e "${BBlue}Applying hardened compiler flags...${NC}"
 sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
 sed -i '/^CXXFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
 sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
-sed -i '/^OPTIONS=/ s/!/!pie /' /etc/makepkg.conf
+# Enable PIE: replace !pie with pie (if present), otherwise no change needed
+sed -i '/^OPTIONS=/ s/!pie/pie/' /etc/makepkg.conf
 
 # Harden Compilers by Restricting Access to Root User Only
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
@@ -1186,9 +1184,10 @@ done
 
 set -e # Re-enable 'exit on error'
 
+# Use a generic "admin" superuser instead of leaking the system username
 cat <<EOF >> /etc/grub.d/40_custom
-set superusers="$USERNAME"
-password_pbkdf2 "$USERNAME" "$GRUB_PASS"
+set superusers="admin"
+password_pbkdf2 admin $GRUB_PASS
 EOF
 
 grub-mkconfig -o /boot/grub/grub.cfg
@@ -1337,13 +1336,15 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-cat <<EOF > /etc/systemd/system/pacman-autoupdate.service
+cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.service
 [Unit]
-Description=Update system packages automatically
+Description=Check for available package updates (notification only)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pacman -Syu --noconfirm
+# Sync databases and check for updates — do NOT auto-install (--noconfirm -Syu
+# can break a system with partial upgrades or ABI changes).
+ExecStart=/bin/sh -c '/usr/bin/pacman -Sy && /usr/bin/pacman -Qu > /var/log/pacman-updates.log 2>&1 || true'
 EOF
 systemctl enable pacman-autoupdate.timer
 
@@ -1710,7 +1711,7 @@ RestartSec=5s
 EOF
 
 # Apply hardening to other common services
-for service in rngd.service haveged.service systemd-journald.service; do
+for service in rngd.service systemd-journald.service; do
     echo -e "${BBlue}Hardening ${service}...${NC}"
     harden_systemd_service "$service"
 done
@@ -1746,5 +1747,7 @@ harden_sysctl
 sleep 2
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
+# Securely remove sensitive files
+shred -u /root/.install-env 2>/dev/null || true
 shred -u /chroot.sh
 exit
