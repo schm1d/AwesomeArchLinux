@@ -563,14 +563,23 @@ systemctl enable auditd
 # SERVICES
 ###############################################################################
 
-echo -e "${BBlue}Enabling NetworkManager...${NC}"
-systemctl enable NetworkManager
+# Enable networking — NetworkManager or systemd-networkd (VPS providers vary)
+if systemctl list-unit-files NetworkManager.service &>/dev/null; then
+    echo -e "${BBlue}Enabling NetworkManager...${NC}"
+    systemctl enable NetworkManager
+else
+    echo -e "${BBlue}NetworkManager not installed — ensuring systemd-networkd is enabled...${NC}"
+    systemctl enable systemd-networkd 2>/dev/null || true
+fi
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
 
-echo -e "${BBlue}Enabling DHCP...${NC}"
-systemctl enable dhcpcd.service
+# dhcpcd may not be installed on VPS with systemd-networkd
+if systemctl list-unit-files dhcpcd.service &>/dev/null; then
+    echo -e "${BBlue}Enabling DHCP...${NC}"
+    systemctl enable dhcpcd.service
+fi
 
 # Enable serial console for VPS provider access
 echo -e "${BBlue}Enabling serial console (for VPS provider console)...${NC}"
