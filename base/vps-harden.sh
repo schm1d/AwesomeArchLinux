@@ -48,7 +48,8 @@ log_action() {
 # --- Defaults ---
 TMP_SIZE=2                  # tmpfs /tmp size in GB
 VAR_LOOP_SIZE=10            # /var loop image size in GB
-USERNAME=""                 # auto-detected or user-specified
+USERNAME=""                 # interactive or -u flag
+NEW_HOSTNAME=""             # interactive or -H flag
 SSH_PORT=22
 SKIP_VAR=false
 SKIP_SW=false
@@ -91,7 +92,8 @@ Unlike vps-install.sh, this does NOT reformat or repartition the disk.
 Options:
   -t SIZE     tmpfs size for /tmp in GB (default: $TMP_SIZE)
   -v SIZE     /var loop image size in GB, if using loop device (default: $VAR_LOOP_SIZE)
-  -u USER     Username for vps-chroot.sh integration (auto-detected from /home)
+  -u USER     Username for vps-chroot.sh (prompted if not given)
+  -H HOST     Hostname to set (prompted if not given)
   -p PORT     SSH port for vps-chroot.sh (default: $SSH_PORT)
   --skip-var  Skip /var separation (only harden virtual mounts)
   --skip-sw   Skip software hardening (only do filesystem mounts)
@@ -99,10 +101,10 @@ Options:
   -h          Show this help
 
 Examples:
-  sudo $0                            # Full hardening with defaults
-  sudo $0 --dry-run                  # Preview changes
-  sudo $0 --skip-var --skip-sw       # Only tmpfs/shm/proc/var-tmp
-  sudo $0 -t 4 -v 20 -u admin       # Custom sizes and user
+  sudo $0                                # Full hardening (interactive prompts)
+  sudo $0 --dry-run                      # Preview changes
+  sudo $0 --skip-var --skip-sw           # Only tmpfs/shm/proc/var-tmp
+  sudo $0 -u admin -H myvps -p 2222     # Non-interactive with all values
 EOF
     exit 0
 }
@@ -130,6 +132,10 @@ parse_args() {
                 ;;
             -u)
                 USERNAME="$2"
+                shift 2
+                ;;
+            -H)
+                NEW_HOSTNAME="$2"
                 shift 2
                 ;;
             -p)
@@ -177,18 +183,6 @@ preflight_checks() {
             err "Required tool not found: $tool — install it first"
         fi
     done
-
-    # Auto-detect username if not provided
-    if [[ -z "$USERNAME" ]]; then
-        local home_users
-        home_users=$(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
-        if [[ -n "$home_users" ]]; then
-            USERNAME="$home_users"
-            info "Auto-detected user: $USERNAME"
-        else
-            warn "No user found in /home — vps-chroot.sh will require -u flag"
-        fi
-    fi
 
     # Ensure SSH is running (safety — never lose remote access)
     if ! systemctl is-active --quiet sshd; then
@@ -300,7 +294,7 @@ show_plan() {
         echo
         echo -e "${C_OK}Software hardening:${C_NC}"
         echo "  Will run vps-chroot.sh (SSH, nftables, sysctl, PAM, etc.)"
-        [[ -n "$USERNAME" ]] && echo "  User: $USERNAME"
+        echo "  Username and hostname will be prompted before running"
         echo "  SSH port: $SSH_PORT"
     else
         echo
@@ -908,6 +902,54 @@ harden_fstab_options() {
 # SOFTWARE HARDENING (vps-chroot.sh integration)
 ###############################################################################
 
+prompt_user_config() {
+    echo
+    echo -e "${C_INFO}User configuration for software hardening:${C_NC}"
+    echo
+
+    # Prompt for username if not provided via -u
+    if [[ -z "$USERNAME" ]]; then
+        local default_user
+        default_user=$(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
+
+        while true; do
+            if [[ -n "$default_user" ]]; then
+                read -r -p "Username [${default_user}]: " USERNAME
+                USERNAME="${USERNAME:-$default_user}"
+            else
+                read -r -p "Username: " USERNAME
+            fi
+            if [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#USERNAME} -le 32 ]]; then
+                break
+            else
+                warn "Invalid username. Must begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
+            fi
+        done
+    fi
+
+    # Prompt for hostname if not provided via -H
+    if [[ -z "$NEW_HOSTNAME" ]]; then
+        local current_host
+        current_host=$(cat /etc/hostname 2>/dev/null || echo "archlinux")
+
+        while true; do
+            read -r -p "Hostname [${current_host}]: " NEW_HOSTNAME
+            NEW_HOSTNAME="${NEW_HOSTNAME:-$current_host}"
+            if [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] && [[ ${#NEW_HOSTNAME} -le 64 ]]; then
+                break
+            else
+                warn "Invalid hostname. Must begin with alphanumeric, contain only [a-zA-Z0-9.-], max 64 chars."
+            fi
+        done
+    fi
+
+    echo
+    info "Username:  $USERNAME"
+    info "Hostname:  $NEW_HOSTNAME"
+    info "SSH port:  $SSH_PORT"
+    echo
+}
+
 create_install_env() {
     info "Creating install environment for vps-chroot.sh..."
 
@@ -918,8 +960,8 @@ create_install_env() {
 
     cat > /root/.install-env <<EOF
 export INSTALL_DISK="$PARENT_DISK"
-export INSTALL_USER="${USERNAME:-root}"
-export INSTALL_HOST="$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo "archlinux")"
+export INSTALL_USER="$USERNAME"
+export INSTALL_HOST="$NEW_HOSTNAME"
 export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps-harden"
 export INSTALL_SSH_PORT="$SSH_PORT"
@@ -970,8 +1012,8 @@ run_software_hardening() {
 
     # Set up environment variables and run
     export _INSTALL_DISK="$PARENT_DISK"
-    export _INSTALL_USER="${USERNAME:-root}"
-    export _INSTALL_HOST="$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo "archlinux")"
+    export _INSTALL_USER="$USERNAME"
+    export _INSTALL_HOST="$NEW_HOSTNAME"
     export _INSTALL_SSH_PORT="$SSH_PORT"
     export _INSTALL_TYPE="vps-harden"
 
@@ -1092,6 +1134,7 @@ main() {
 
     # Software hardening
     if [[ "$SKIP_SW" == false ]]; then
+        prompt_user_config
         create_install_env
         run_software_hardening
     fi
