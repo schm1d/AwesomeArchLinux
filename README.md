@@ -37,6 +37,9 @@ AwesomeArchLinux/
 |   +-- docker/
 |   |   +-- docker.sh        # Docker runtime security (CIS benchmark, Trivy, seccomp)
 |   |   +-- README.md
+|   +-- openclaw/
+|   |   +-- openclaw.sh      # OpenClaw/ClawdBot AI agent hardening (27 steps)
+|   |   +-- README.md
 |   +-- crowdsec/
 |   |   +-- crowdsec.sh      # CrowdSec IDS with nftables & nginx bouncers
 |   |   +-- README.md
@@ -197,6 +200,21 @@ AwesomeArchLinux/
 - **Security profiles** &mdash; Hardened AppArmor profile (`docker-default-hardened`) and seccomp profile (`seccomp-hardened.json`) with blocked syscalls.
 - See [`hardening/docker/README.md`](hardening/docker/README.md) for container security best practices.
 
+#### AI Agent Hardening (OpenClaw/ClawdBot)
+
+- **Gateway lockdown** &mdash; Bind to loopback only, cryptographic token authentication (`openssl rand -hex 32`), TrustedProxies hardening, Control UI secured. Addresses the 923+ OpenClaw gateways found exposed on Shodan with zero auth and full shell access.
+- **Channel & DM policy** &mdash; All messaging channels (WhatsApp, Telegram, Discord, Slack, Signal, Matrix, Teams, iMessage) locked to `pairing` mode with per-channel allowlists. Groups require `@mention` gating. Sessions isolated per-channel-peer.
+- **Tool policy** &mdash; Minimal `messaging` profile, exec restricted to sandbox with allowlist-only binaries (jq, grep, cut, sort, etc.), browser automation disabled, cross-context messaging blocked, elevated mode disabled by default.
+- **Docker sandbox** (optional) &mdash; All tool execution in isolated containers: `network: none`, `readOnlyRoot: true`, `capDrop: ALL`, PID/memory/CPU limits, non-root user.
+- **Plugin & skill lockdown** &mdash; Deny-by-default plugin policy, ClawHub auto-install disabled, hooks disabled to prevent prompt injection.
+- **Secure logging** &mdash; 9 API key redaction patterns (Anthropic, OpenAI, bearer tokens, PEM keys), log rotation, `redactSensitive: tools`.
+- **systemd user service** &mdash; Hardened drop-in with `ProtectSystem=strict`, `NoNewPrivileges`, `IPAddressAllow=localhost`, syscall filtering, `MemoryDenyWriteExecute=no` (V8 JIT).
+- **AppArmor confinement** (optional) &mdash; Enforce mode profile denying mount/ptrace/raw, restricting file access to `~/.openclaw/` only.
+- **nftables firewall** (optional) &mdash; Block all inbound except loopback, rate limit WebSocket connections, allow outbound HTTPS for API calls.
+- **Secret scanning** &mdash; `detect-secrets` with baseline and pre-commit hook, workspace git init for rollback.
+- **27 hardening steps** across 15 phases with weekly automated security audit via systemd timer.
+- See [`hardening/openclaw/README.md`](hardening/openclaw/README.md) for the complete deep-dive security reference.
+
 #### SSH Hardening
 
 - **Server** (`ssh.sh`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), enforces modern algorithms only (ChaCha20-Poly1305, AES-256-GCM, Curve25519), disables root login, X11 forwarding, agent forwarding, TCP forwarding, tunneling, and compression. Configures revoked keys file, VERBOSE logging, key-based + password multi-factor auth, strict session limits (MaxSessions 2, MaxStartups 2, MaxAuthTries 3), client alive timeout (300s), and a legal warning banner.
@@ -287,6 +305,7 @@ Granular per-service hardening overrides for 15+ services:
 | **PostgreSQL** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE` for data directory, syscall filter |
 | **MariaDB** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE`, `CAP_IPC_LOCK`, private network |
 | **WordPress (nginx+FPM)** | Combined nginx + PHP-FPM hardening, `wp-cron.timer` replacement |
+| **OpenClaw Gateway** | User service, `IPAddressAllow=localhost`, `MemoryDenyWriteExecute=no` (V8 JIT), `ProtectHome=read-only` |
 
 Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/tunable/log protection, syscall filtering, namespace/realtime/SUID restrictions, `MemoryDenyWriteExecute`, and private temp/devices.
 
@@ -497,6 +516,9 @@ sudo ./hardening/react/react.sh -a /var/www/myapp -d app.example.com  # React SP
 sudo ./hardening/nodejs/nodejs.sh -a /opt/api -n api-server           # Node.js hardening
 sudo ./hardening/php/php.sh -a /var/www/myapp                         # PHP production hardening
 sudo ./hardening/wordpress/wordpress.sh -a /var/www/wordpress -d wp.example.com  # WordPress hardening
+
+# --- AI Agent ---
+sudo ./hardening/openclaw/openclaw.sh -u myuser --with-sandbox --with-firewall --with-apparmor  # OpenClaw hardening
 
 # --- Database ---
 sudo ./hardening/postgresql/postgresql.sh                             # PostgreSQL hardening
