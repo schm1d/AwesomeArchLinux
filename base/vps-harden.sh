@@ -756,18 +756,25 @@ create_var_filesystem() {
                 info "[DRY-RUN] Would create /root/var.img and mount as /var"
                 return 0
             fi
+            # Remove leftover image from a previous failed attempt
+            if [[ -f /root/var.img ]]; then
+                chattr -i /root/var.img 2>/dev/null || true
+                rm -f /root/var.img
+            fi
+
             # Create image file — try fallocate, then dd (truncate often blocked on VPS)
             if fallocate -l "${VAR_LOOP_SIZE}G" /root/var.img 2>/dev/null; then
                 msg "Image allocated with fallocate"
             elif dd if=/dev/zero of=/root/var.img bs=1M count=$((VAR_LOOP_SIZE * 1024)) status=progress 2>&1; then
                 msg "Image created with dd"
             else
+                rm -f /root/var.img 2>/dev/null || true
                 err "Failed to create /root/var.img — filesystem may not support large file allocation"
             fi
             mkfs.ext4 -F -m 1 -L var /root/var.img
             VAR_DEVICE="/root/var.img"
 
-            # Protect from accidental deletion
+            # Protect from accidental deletion (only after successful format)
             chattr +i /root/var.img 2>/dev/null || true
 
             # Ensure loop module loads on boot
