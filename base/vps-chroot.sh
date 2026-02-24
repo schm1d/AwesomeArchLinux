@@ -735,6 +735,12 @@ while true; do
 done
 set -e
 
+# Ensure unzip is available (installed by pacstrap in vps-install.sh, may be missing on live VPS)
+if ! command -v unzip &>/dev/null; then
+    echo -e "${BBlue}Installing unzip (required for nanorc)...${NC}"
+    pacman -S --noconfirm unzip
+fi
+
 # Download nanorc
 echo -e "${BBlue}Downloading nanorc...${NC}"
 curl -sL https://raw.githubusercontent.com/scopatz/nanorc/master/install.sh | sh -s -- -y
