@@ -1,0 +1,46 @@
+name: ShellCheck
+
+on:
+  push:
+    branches: [main]
+    paths: ['**.sh']
+  pull_request:
+    branches: [main]
+    paths: ['**.sh']
+
+jobs:
+  shellcheck:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Find and lint all shell scripts
+        run: |
+          echo "::group::Scripts found"
+          find . -name '*.sh' -type f | sort
+          echo "::endgroup::"
+
+          FAILED=0
+          while IFS= read -r script; do
+            echo "::group::Checking $script"
+            if shellcheck --severity=warning --shell=bash "$script"; then
+              echo "PASS: $script"
+            else
+              echo "::error file=$script::ShellCheck found issues"
+              FAILED=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -name '*.sh' -type f | sort)
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::ShellCheck found issues in one or more scripts"
+            exit 1
+          fi
+
+          echo "All scripts passed ShellCheck."
