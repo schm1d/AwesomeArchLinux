@@ -676,20 +676,34 @@ choose_var_strategy() {
     fi
 
     # Option 3: File-backed loop device
-    local root_avail
-    root_avail=$(df --output=avail / | tail -1 | tr -d ' ')  # in KB
-    local loop_kb=$((VAR_LOOP_SIZE * 1048576))
+    # First check if loop devices are supported (blocked on OpenVZ/LXC containers)
+    local loop_supported=false
+    if losetup --find &>/dev/null && touch /root/.loop-test 2>/dev/null; then
+        rm -f /root/.loop-test
+        loop_supported=true
+    else
+        rm -f /root/.loop-test 2>/dev/null
+    fi
 
-    if [[ "$root_avail" -gt $((loop_kb + 2097152)) ]]; then  # Need loop size + 2GB headroom
-        echo
-        info "No free disk/partition available"
-        info "Can create a ${VAR_LOOP_SIZE}G file-backed loop device (/root/var.img)"
-        if ask_yes_no "Create loop device for /var? (${VAR_LOOP_SIZE}G from root filesystem)"; then
-            VAR_STRATEGY="loop"
-            return 0
+    if [[ "$loop_supported" == true ]]; then
+        local root_avail
+        root_avail=$(df --output=avail / | tail -1 | tr -d ' ')  # in KB
+        local loop_kb=$((VAR_LOOP_SIZE * 1048576))
+
+        if [[ "$root_avail" -gt $((loop_kb + 2097152)) ]]; then  # Need loop size + 2GB headroom
+            echo
+            info "No free disk/partition available"
+            info "Can create a ${VAR_LOOP_SIZE}G file-backed loop device (/root/var.img)"
+            if ask_yes_no "Create loop device for /var? (${VAR_LOOP_SIZE}G from root filesystem)"; then
+                VAR_STRATEGY="loop"
+                return 0
+            fi
+        else
+            warn "Insufficient disk space for loop device (need ${VAR_LOOP_SIZE}G + 2G headroom)"
         fi
     else
-        warn "Insufficient disk space for loop device (need ${VAR_LOOP_SIZE}G + 2G headroom)"
+        warn "Loop devices not supported on this VPS (container-based virtualization)"
+        warn "/var separation requires a dedicated disk or partition"
     fi
 
     # User declined all options
