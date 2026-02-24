@@ -810,7 +810,7 @@ include "/usr/share/nano-syntax-highlighting/*.nanorc"
 NANO_EOF
 
 echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
-/ssh.sh
+/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
 
 # --- SSH Configuration ---
 configure_ssh() {
@@ -903,7 +903,7 @@ sed -i '/^OPTIONS=/ s/!pie/pie/' /etc/makepkg.conf
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
 
 # Alternative approach using a 'compilers' group
-groupadd compilers
+groupadd compilers 2>/dev/null || true
 usermod -aG compilers "$USERNAME"
 for compiler in gcc g++ clang make as ld; do
     if command -v "$compiler" &> /dev/null; then

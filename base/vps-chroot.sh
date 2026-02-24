@@ -843,7 +843,7 @@ sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
 sed -i '/^OPTIONS=/ s/!/!pie /' /etc/makepkg.conf
 
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
-groupadd compilers
+groupadd compilers 2>/dev/null || true
 usermod -aG compilers "$USERNAME"
 for compiler in gcc g++ clang make as ld; do
     if command -v "$compiler" &> /dev/null; then
