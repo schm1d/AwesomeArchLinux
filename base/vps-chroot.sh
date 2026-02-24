@@ -623,7 +623,7 @@ systemctl restart systemd-journald
 ###############################################################################
 
 echo -e "${BBlue}Hardening sudo...${NC}"
-groupadd sudo
+groupadd sudo 2>/dev/null || true
 
 echo "Defaults secure_path=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"" > /etc/sudoers
 echo "Defaults !rootpw" >> /etc/sudoers
