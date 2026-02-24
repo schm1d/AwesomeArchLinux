@@ -1,38 +1,43 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Description: This script installs and configures NeoVim on Arch Linux.
-#              It also installs https://github.com/nvim-treesitter/nvim-treesitter?tab=readme-ov-file
-# Author: Bruno Schmid @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# =============================================================================
+# Script:      neovim.sh
+# Description: Installs NeoVim with vim-plug and nvim-treesitter for enhanced
+#              syntax highlighting. Applies secure permissions on config files.
+#
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
+#
+# Usage:       ./neovim.sh
+# =============================================================================
 
 set -euo pipefail
 
 BBlue='\033[1;34m'
+BRed='\033[1;31m'
+BGreen='\033[1;32m'
 NC='\033[0m'
 
-# Function to handle errors
-handle_error() {
-    echo "Error: $1" >&2
+# Must NOT run as root — config goes into user home
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "${BRed}Do not run this script as root. Run as your normal user.${NC}" >&2
     exit 1
-}
-
-# Update the system (optional but recommended for security)
-echo "Updating system packages..."
-sudo pacman -Syu --noconfirm || handle_error "Failed to update system."
-
-# Install Neovim if not already installed
-if ! command -v nvim &> /dev/null; then
-    echo "Installing Neovim..."
-    sudo pacman -S neovim --noconfirm || handle_error "Failed to install Neovim."
 fi
 
-# Create Neovim config directory if it doesn't exist
-mkdir -p ~/.config/nvim
+# Install Neovim if not already installed
+if ! command -v nvim &>/dev/null; then
+    echo -e "${BBlue}Installing Neovim...${NC}"
+    sudo pacman -S --noconfirm neovim
+fi
+
+# Create Neovim config directory
+mkdir -p "$HOME/.config/nvim"
 
 # Create init.vim with basic configurations if it doesn't exist
-if [ ! -f ~/.config/nvim/init.vim ]; then
-    echo "Creating basic init.vim..."
-    cat > ~/.config/nvim/init.vim <<EOL
+INITVIM="$HOME/.config/nvim/init.vim"
+if [ ! -f "$INITVIM" ]; then
+    echo -e "${BBlue}Creating init.vim...${NC}"
+    cat > "$INITVIM" <<'EOL'
 set encoding=utf-8
 filetype on
 syntax on
@@ -41,17 +46,18 @@ EOL
 fi
 
 # Install vim-plug if not already installed
-if [ ! -f ~/.local/share/nvim/site/autoload/plug.vim ]; then
-    echo "Installing vim-plug..."
-    curl -fLo ~/.local/share/nvim/site/autoload/plug.vim --create-dirs \
-        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim || handle_error "Failed to install vim-plug."
+PLUG_VIM="$HOME/.local/share/nvim/site/autoload/plug.vim"
+if [ ! -f "$PLUG_VIM" ]; then
+    echo -e "${BBlue}Installing vim-plug...${NC}"
+    curl -fLo "$PLUG_VIM" --create-dirs \
+        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
 fi
 
-# Create or append to plugins.vim for nvim-treesitter
-PLUGINS_FILE=~/.config/nvim/plugins.vim
+# Create plugins.vim with nvim-treesitter if it doesn't exist
+PLUGINS_FILE="$HOME/.config/nvim/plugins.vim"
 if [ ! -f "$PLUGINS_FILE" ]; then
-    echo "Creating plugins.vim with nvim-treesitter..."
-    cat > "$PLUGINS_FILE" <<EOL
+    echo -e "${BBlue}Creating plugins.vim with nvim-treesitter...${NC}"
+    cat > "$PLUGINS_FILE" <<'EOL'
 call plug#begin()
 Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}
 call plug#end()
@@ -67,32 +73,23 @@ end
 EOF
 EOL
 else
-    if ! grep -q "Plug 'nvim-treesitter/nvim-treesitter'" "$PLUGINS_FILE"; then
-        echo "Adding nvim-treesitter to existing plugins.vim..."
+    if ! grep -q "nvim-treesitter/nvim-treesitter" "$PLUGINS_FILE"; then
+        echo -e "${BBlue}Adding nvim-treesitter to existing plugins.vim...${NC}"
         sed -i "/call plug#begin()/a Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}" "$PLUGINS_FILE"
-        echo -e "\nlua << EOF\nlocal status, configs = pcall(require, 'nvim-treesitter.configs')\nif status then\n    configs.setup {\n        ensure_installed = { \"c\", \"lua\", \"vim\", \"vimdoc\", \"query\" },\n        highlight = { enable = true },\n    }\nend\nEOF" >> "$PLUGINS_FILE"
     fi
 fi
 
 # Ensure plugins.vim is sourced in init.vim
-if ! grep -q "source ~/.config/nvim/plugins.vim" ~/.config/nvim/init.vim; then
-    echo "Sourcing plugins.vim in init.vim..."
-    echo "source ~/.config/nvim/plugins.vim" >> ~/.config/nvim/init.vim
+if ! grep -q "source.*plugins.vim" "$INITVIM"; then
+    echo "source $PLUGINS_FILE" >> "$INITVIM"
 fi
 
-# Install plugins using Neovim in headless mode
-echo "Installing plugins..."
-nvim --headless +PlugInstall +qall || handle_error "Failed to install plugins."
+# Install plugins in headless mode
+echo -e "${BBlue}Installing plugins...${NC}"
+nvim --headless +PlugInstall +qall 2>/dev/null || true
 
-# Create a secure directory for future plugin management (optional)
-mkdir -p ~/.config/nvim/secure-plugins
-chmod 700 ~/.config/nvim/secure-plugins
+# Set secure permissions (no sudo needed — user files)
+chmod 600 "$INITVIM" "$PLUGINS_FILE"
+chmod 700 "$HOME/.config/nvim"
 
-# Set secure permissions on config files
-echo "Setting secure permissions on config files..."
-sudo chown $USER:$USER ~/.config/nvim/init.vim
-sudo chown $USER:$USER ~/.config/nvim/plugins.vim
-sudo chmod 600 ~/.config/nvim/init.vim
-sudo chmod 600 ~/.config/nvim/plugins.vim
-
-echo "Neovim is set up with nvim-treesitter for enhanced syntax highlighting and hardened configurations."
+echo -e "${BGreen}NeoVim configured with nvim-treesitter.${NC}"

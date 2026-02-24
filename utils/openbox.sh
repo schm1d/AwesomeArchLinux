@@ -1,88 +1,90 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Description: This script installs and configures Openbox on Arch Linux.
-#              It includes a Tint2 panel configured at the top of the screen
-#              and applies optional hardening steps.
-# Author: Bruno Schmid @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# =============================================================================
+# Script:      openbox.sh
+# Description: Installs and configures Openbox with Tint2 panel, LightDM,
+#              and applies basic hardening on Arch Linux.
+#
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
+#
+# Usage:       sudo ./openbox.sh
+# =============================================================================
 
 set -euo pipefail
 
 BBlue='\033[1;34m'
+BRed='\033[1;31m'
+BGreen='\033[1;32m'
 NC='\033[0m'
 
-# -- EDIT THIS to your actual desktop user --
-TARGET_USER="$USER"
+# Must run as root (installs packages, enables services)
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${BRed}This script must be run as root (e.g., with sudo).${NC}" >&2
+    exit 1
+fi
+
+# Resolve target user from SUDO_USER or prompt
+TARGET_USER="${SUDO_USER:-}"
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    echo -e "${BRed}Run this script via sudo as a non-root user.${NC}" >&2
+    echo "Example: sudo ./openbox.sh" >&2
+    exit 1
+fi
+
 HOME_DIR="/home/$TARGET_USER"
-
-if [ "$TARGET_USER" = "root" ]; then
-    echo "Please set TARGET_USER to a non-root user."
-    exit 1
-fi
-
 if [ ! -d "$HOME_DIR" ]; then
-    echo "Home directory '$HOME_DIR' doesn't exist. Please create it or adjust TARGET_USER."
+    echo -e "${BRed}Home directory '$HOME_DIR' does not exist.${NC}" >&2
     exit 1
 fi
-
-
-# Function to handle errors
-handle_error() {
-    echo "Error: $1" >&2
-    exit 1
-}
-
 
 # 1) Install Openbox and related packages
 echo -e "${BBlue}Installing Openbox and essential desktop packages...${NC}"
-sudo pacman -Syu --noconfirm || handle_error "Failed to update system."
-sudo pacman -S --noconfirm \
-  xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs chatblade \
-  lightdm lightdm-gtk-greeter terminator lxpolkit vagrant ipython notepadqq \
-  tint2 pcmanfm xterm networkmanager network-manager-applet pidgin pidgin-otr\
-  thunar-archive-plugin xarchiver feh lxappearance neofetch elinks dhex hexer\
-  xdg-user-dirs-gtk xdg-utils networkmanager-openvpn torbrowser-launcher code \
-  networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine \
-  gtk-engines veracrypt onionshare chromium libforensic1394 jdk21-openjdk
-  || handle_error "Failed to install Openbox packages."
+pacman -S --noconfirm \
+  xorg-server xorg-xinit openbox obconf-qt xdg-user-dirs \
+  lightdm lightdm-gtk-greeter terminator lxpolkit \
+  tint2 pcmanfm xterm networkmanager network-manager-applet \
+  thunar-archive-plugin xarchiver feh lxappearance neofetch \
+  xdg-user-dirs-gtk xdg-utils networkmanager-openvpn \
+  networkmanager-openconnect networkmanager-strongswan \
+  gtk-engine-murrine gtk-engines chromium
 
 # 2) Bluetooth detection and installation
 if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
     echo -e "${BBlue}Bluetooth hardware detected. Installing Bluetooth packages...${NC}"
-    sudo pacman -S --noconfirm bluez bluez-utils blueman || handle_error "Failed to install Bluetooth packages."
-    sudo systemctl enable bluetooth.service || handle_error "Failed to enable Bluetooth service."
+    pacman -S --noconfirm bluez bluez-utils blueman
+    systemctl enable bluetooth.service
 else
-    echo -e "${BBlue}No Bluetooth hardware detected. Skipping Bluetooth installation.${NC}"
+    echo -e "${BBlue}No Bluetooth hardware detected. Skipping.${NC}"
 fi
 
 # 3) Enable LightDM display manager
-echo -e "${BBlue}Enabling LightDM (Display Manager)...${NC}"
+echo -e "${BBlue}Enabling LightDM...${NC}"
 
-# 1) Disable GDM (if it exists and is running)
+# Disable GDM if enabled
 if systemctl is-enabled gdm.service &>/dev/null; then
-    sudo systemctl disable gdm.service --now || handle_error "Failed to disable GDM."
+    systemctl disable gdm.service --now 2>/dev/null || true
 fi
 
-# 2) Remove the existing display-manager.service symlink if it's pointing to gdm
+# Remove stale display-manager symlink
 if [ -L /etc/systemd/system/display-manager.service ]; then
-    sudo rm -f /etc/systemd/system/display-manager.service || handle_error "Failed to remove existing display-manager.service symlink."
+    rm -f /etc/systemd/system/display-manager.service
 fi
 
-# 3) Now enable LightDM
-sudo systemctl enable lightdm.service || handle_error "Failed to enable LightDM service."
+systemctl enable lightdm.service
 
 # 4) Apply Openbox settings for the target user
 echo -e "${BBlue}Applying Openbox settings for user $TARGET_USER...${NC}"
-sudo -u "$TARGET_USER" mkdir -p "$HOME_DIR/.config/openbox" || handle_error "Failed to create Openbox config directory."
+sudo -u "$TARGET_USER" mkdir -p "$HOME_DIR/.config/openbox"
 
 # Copy default Openbox config if available
 if [ -d "/etc/xdg/openbox" ]; then
-  sudo -u "$TARGET_USER" cp /etc/xdg/openbox/* "$HOME_DIR/.config/openbox" || handle_error "Failed to copy default Openbox configs."
+    sudo -u "$TARGET_USER" cp /etc/xdg/openbox/* "$HOME_DIR/.config/openbox/"
 fi
 
-# Create a tint2 configuration folder and file to place the panel at the top
-sudo -u "$TARGET_USER" mkdir -p "$HOME_DIR/.config/tint2" || handle_error "Failed to create Tint2 config directory."
-cat << 'EOF' > "$HOME_DIR/.config/tint2/tint2rc"
+# Create Tint2 configuration (panel at top)
+sudo -u "$TARGET_USER" mkdir -p "$HOME_DIR/.config/tint2"
+cat > "$HOME_DIR/.config/tint2/tint2rc" << 'EOF'
 #---------------------------------------------
 # Tint2 Panel Configuration for Top Position
 #---------------------------------------------
@@ -99,11 +101,10 @@ task_icon_size = 0
 font = Sans 10
 #---------------------------------------------
 EOF
+chown -R "$TARGET_USER:$TARGET_USER" "$HOME_DIR/.config/tint2"
 
-chown -R "$TARGET_USER":"$TARGET_USER" "$HOME_DIR/.config/tint2"
-
-# Create a basic autostart script for Openbox
-cat << 'EOF' > "$HOME_DIR/.config/openbox/autostart"
+# Create autostart script for Openbox
+cat > "$HOME_DIR/.config/openbox/autostart" << 'EOF'
 #!/bin/bash
 # Start a top-panel with Tint2
 tint2 &
@@ -112,16 +113,22 @@ feh --bg-scale /usr/share/backgrounds/archbtw.jpg
 # Start NetworkManager applet
 nm-applet &
 EOF
-sudo chown "$TARGET_USER":"$TARGET_USER" "$HOME_DIR/.config/openbox/autostart"
-sudo chmod +x "$HOME_DIR/.config/openbox/autostart"
+chown "$TARGET_USER:$TARGET_USER" "$HOME_DIR/.config/openbox/autostart"
+chmod +x "$HOME_DIR/.config/openbox/autostart"
 
-echo -e "${BBlue}Adding themes...${NC}"
-git clone https://github.com/addy-dclxvi/openbox-theme-collections ~/.themes
+# Install themes into user directory (safe clone into tmpdir, then move)
+echo -e "${BBlue}Installing Openbox themes...${NC}"
+THEMES_DIR="$HOME_DIR/.themes"
+if [ ! -d "$THEMES_DIR" ]; then
+    sudo -u "$TARGET_USER" git clone --depth=1 \
+        https://github.com/addy-dclxvi/openbox-theme-collections "$THEMES_DIR"
+else
+    echo "Themes directory already exists, skipping clone."
+fi
 
-# 5) Hardening (general example: limit permissions on ~/.config)
-echo -e "${BBlue}Applying basic hardening steps...${NC}"
-sudo chmod 700 "$HOME_DIR/.config" || handle_error "Failed to set permissions on .config directory."
-sudo chmod 700 "$HOME_DIR/.themes" || handle_error "Failed to set permissions on .themes directory."
+# 5) Hardening — restrict access to user config directories
+echo -e "${BBlue}Applying basic hardening...${NC}"
+chmod 700 "$HOME_DIR/.config"
+chmod 700 "$THEMES_DIR" 2>/dev/null || true
 
-sleep 2
-echo -e "${BBlue}Openbox installation and configuration completed.\nYou can reboot to start LightDM (and Openbox) now.${NC}"
+echo -e "${BGreen}Openbox installation complete. Reboot to start LightDM.${NC}"

@@ -1,32 +1,44 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Description: This script installs and configures a minimal GNOME Desktop on Arch Linux.
-#              It avoids games and bloatware, applies GNOME settings, and hardens the setup.
-# Author: Bruno Schmid @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# =============================================================================
+# Script:      gnome.sh
+# Description: Installs and configures a minimal GNOME Desktop on Arch Linux.
+#              Avoids games and bloatware, applies GNOME settings, and hardens
+#              the setup.
+#
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
+#
+# Usage:       sudo ./gnome.sh
+# =============================================================================
 
 set -euo pipefail
 
 BBlue='\033[1;34m'
+BRed='\033[1;31m'
+BGreen='\033[1;32m'
 NC='\033[0m'
 
-# Target user configuration
-TARGET_USER="${SUDO_USER:-$USER}"
-HOME_DIR="/home/$TARGET_USER"
-
-# Check for root privileges
+# Must run as root
 if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root (e.g., with sudo or as root)." >&2
-  exit 1
+    echo -e "${BRed}This script must be run as root (e.g., with sudo).${NC}" >&2
+    exit 1
 fi
 
-# Function to handle errors
-handle_error() {
-    echo "Error: $1" >&2
+# Resolve target user from SUDO_USER
+TARGET_USER="${SUDO_USER:-}"
+if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+    echo -e "${BRed}Run this script via sudo as a non-root user.${NC}" >&2
+    echo "Example: sudo ./gnome.sh" >&2
     exit 1
-}
+fi
 
-# Function to prompt user for yes/no input
+HOME_DIR="/home/$TARGET_USER"
+if [ ! -d "$HOME_DIR" ]; then
+    echo -e "${BRed}Home directory '$HOME_DIR' does not exist.${NC}" >&2
+    exit 1
+fi
+
 prompt_yes_no() {
     while true; do
         read -p "$1 (y/n): " yn
@@ -39,8 +51,7 @@ prompt_yes_no() {
 }
 
 # 1) Update system and install core GNOME packages
-echo -e "${BBlue}Updating system and installing core GNOME packages...${NC}"
-pacman -Syu --noconfirm || handle_error "Failed to update system."
+echo -e "${BBlue}Installing core GNOME packages...${NC}"
 pacman -S --noconfirm \
   gdm gnome gnome-backgrounds gnome-connections gnome-logs evince glib2 \
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware eog \
@@ -48,52 +59,48 @@ pacman -S --noconfirm \
   baobab deja-dup sushi xdg-desktop-portal-gnome gnome-font-viewer gnome-nettool gnome-session \
   gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin \
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
-  xdg-user-dirs-gtk xorg-server xdg-utils xdg-desktop-portal-gnome xorg-xinit torbrowser-launcher \
-  networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine gtk-engines \
-  || handle_error "Failed to install core GNOME packages."
+  xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit torbrowser-launcher \
+  networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine gtk-engines
 
 # 2) Optional packages prompt
-echo -e "${BBlue}Optional packages installation...${NC}"
-if prompt_yes_no "Install GNOME Shell extensions (e.g., arc-menu, caffeine)?"; then
+echo -e "${BBlue}Optional packages...${NC}"
+if prompt_yes_no "Install GNOME Shell extensions (arc-menu, caffeine, dash-to-panel, vitals)?"; then
     pacman -S --noconfirm \
       gnome-shell-extension-arc-menu gnome-shell-extension-caffeine \
       gnome-shell-extension-dash-to-panel gnome-shell-extension-desktop-icons-ng \
-      gnome-shell-extension-vitals || handle_error "Failed to install extensions."
+      gnome-shell-extension-vitals
 fi
-if prompt_yes_no "Install additional tools (e.g., imagemagick, parted)?"; then
-    pacman -S --noconfirm imagemagick parted || handle_error "Failed to install additional tools."
+if prompt_yes_no "Install additional tools (imagemagick, parted)?"; then
+    pacman -S --noconfirm imagemagick parted
 fi
 
 # 3) Bluetooth detection and installation
 if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
     echo -e "${BBlue}Bluetooth hardware detected. Installing Bluetooth packages...${NC}"
-    pacman -S --noconfirm bluez bluez-utils gnome-bluetooth-3.0 blueman || handle_error "Failed to install Bluetooth packages."
-    systemctl enable bluetooth.service || handle_error "Failed to enable Bluetooth service."
+    pacman -S --noconfirm bluez bluez-utils gnome-bluetooth-3.0 blueman
+    systemctl enable bluetooth.service
 else
-    echo -e "${BBlue}No Bluetooth hardware detected. Skipping Bluetooth installation.${NC}"
+    echo -e "${BBlue}No Bluetooth hardware detected. Skipping.${NC}"
 fi
 
 # 4) Enable GDM service
-echo -e "${BBlue}Enabling GDM (GNOME Display Manager)...${NC}"
-systemctl enable gdm.service || handle_error "Failed to enable GDM service."
+echo -e "${BBlue}Enabling GDM...${NC}"
+systemctl enable gdm.service
 
-echo -e "${BBlue}Enabling pipewire for Wayland...${NC}"
-systemctl --user enable --now pipewire pipewire-pulse
+# 5) Enable PipeWire for the target user (runs as user service on login)
+echo -e "${BBlue}PipeWire will start automatically on user login via systemd user units.${NC}"
 
-# 5) Apply GNOME settings for the target user
+# 6) Apply GNOME settings for the target user
 echo -e "${BBlue}Applying GNOME settings for user $TARGET_USER...${NC}"
-sudo -u "$TARGET_USER" dbus-launch gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || handle_error "Failed to set GNOME settings."
+sudo -u "$TARGET_USER" dbus-launch gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
 
-# 6) Harden GNOME configuration
+# 7) Harden GNOME configuration
 echo -e "${BBlue}Hardening GNOME configuration...${NC}"
-systemctl disable --now geoclue.service || handle_error "Failed to disable geoclue service."
-chmod 700 "$HOME_DIR/.config" || handle_error "Failed to set permissions on .config directory."
+systemctl disable --now geoclue.service 2>/dev/null || true
+chmod 700 "$HOME_DIR/.config" 2>/dev/null || true
 
-# Set Keyboard X11 layout: https://wiki.archlinux.org/title/Xorg/Keyboard_configuration
-# sudo localectl set-x11-keymap ch pc105 de_nodeadkeys
-
-# 7) Clean up package cache
+# 8) Clean up package cache
 echo -e "${BBlue}Cleaning up package cache...${NC}"
-pacman -Sc --noconfirm || handle_error "Failed to clean package cache."
+pacman -Sc --noconfirm
 
-echo -e "${BBlue}GNOME Desktop configuration completed.\nReboot to start GNOME.${NC}"
+echo -e "${BGreen}GNOME Desktop configuration complete. Reboot to start GNOME.${NC}"

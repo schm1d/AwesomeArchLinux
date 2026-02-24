@@ -1,42 +1,53 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Description: This script configures Vim with plugins and hardening settings
-# Author: @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# =============================================================================
+# Script:      vim.sh
+# Description: Installs Vim with vim-plug and a curated set of plugins,
+#              then applies secure permissions on configuration files.
+#
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
+#
+# Usage:       ./vim.sh
+# =============================================================================
 
-# Function to handle errors
-handle_error() {
-    echo "Error: $1" >&2
+set -euo pipefail
+
+BBlue='\033[1;34m'
+BRed='\033[1;31m'
+BGreen='\033[1;32m'
+NC='\033[0m'
+
+# Must NOT run as root — vim-plug installs into the user's home
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "${BRed}Do not run this script as root. Run as your normal user.${NC}" >&2
     exit 1
-}
+fi
 
 # Install Vim if not already installed
-if ! command -v vim &> /dev/null; then
-    echo "Installing Vim..."
-    sudo pacman -S vim --noconfirm || handle_error "Failed to install Vim."
-else
-    echo "Vim is already installed."
+if ! command -v vim &>/dev/null; then
+    echo -e "${BBlue}Installing Vim...${NC}"
+    sudo pacman -S --noconfirm vim
 fi
 
 # Install vim-plug if not already installed
-PLUG_VIM=~/.vim/autoload/plug.vim
+PLUG_VIM="$HOME/.vim/autoload/plug.vim"
 if [ ! -f "$PLUG_VIM" ]; then
-    echo "Installing vim-plug..."
+    echo -e "${BBlue}Installing vim-plug...${NC}"
     curl -fLo "$PLUG_VIM" --create-dirs \
-        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim || handle_error "Failed to install vim-plug."
+        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
 fi
 
 # Create .vimrc if it doesn't exist
-VIMRC=~/.vimrc
+VIMRC="$HOME/.vimrc"
 if [ ! -f "$VIMRC" ]; then
-    echo "Creating .vimrc..."
-    touch "$VIMRC" || handle_error "Failed to create .vimrc."
+    touch "$VIMRC"
 fi
 
 # Add vim-plug configuration to .vimrc if not already present
-echo "Adding vim-plug configuration to .vimrc..."
-if ! grep -q "call plug#begin('~/.vim/plugged')" "$VIMRC"; then
-    cat <<EOL >> "$VIMRC"
+if ! grep -q "call plug#begin" "$VIMRC"; then
+    echo -e "${BBlue}Adding vim-plug configuration to .vimrc...${NC}"
+    cat >> "$VIMRC" <<'EOL'
 
 " vim-plug configuration
 call plug#begin('~/.vim/plugged')
@@ -52,12 +63,11 @@ EOL
 fi
 
 # Install plugins using vim-plug
-echo "Installing Vim plugins..."
-vim +PlugInstall +qall || handle_error "Failed to install Vim plugins."
+echo -e "${BBlue}Installing Vim plugins...${NC}"
+vim +PlugInstall +qall
 
-# Hardening: Set secure permissions on .vimrc
-echo "Setting secure permissions on .vimrc..."
-sudo chown "$USER:$USER" "$VIMRC" || handle_error "Failed to set ownership."
-sudo chmod 600 "$VIMRC" || handle_error "Failed to set permissions."
+# Set secure permissions (no sudo needed — these are user files)
+chmod 600 "$VIMRC"
+chmod 700 "$HOME/.vim"
 
-echo "Vim configuration completed successfully!"
+echo -e "${BGreen}Vim configuration completed successfully.${NC}"

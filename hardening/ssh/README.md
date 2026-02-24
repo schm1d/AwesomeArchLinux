@@ -1,141 +1,192 @@
-# SSH Hardening Script
+# SSH Hardening
 
-
-This script enhances the security of your system's SSH server (sshd) and client configurations. It generates new host keys, hardens the SSH daemon configuration (sshd_config), and applies strict security measures to the SSH client configuration (ssh_config). It also sets up a legal banner and implements rate-limiting  iptables to prevent brute-force attacks.
+Hardens OpenSSH server and client configuration on Arch Linux. Regenerates host keys (Ed25519 + RSA 4096), enforces modern cryptographic algorithms, restricts access, and applies CIS Benchmark recommendations for SSH.
 
 Author: [Bruno Schmid](https://www.linkedin.com/in/schmidbruno/) X: @brulliant
 
-
-### Table of Contents
-
-- Prerequisites
-- Usage
-- Configurations Applied
-	- 1. Host Key Generation
-	- 2. SSH Daemon Configuration (/etc/ssh/sshd_config)
-	- 3. SSH Client Configuration (/etc/ssh/ssh_config)
-	- 4. Permissions and Ownership
-	- 5. Legal Banner
-	- 6. Rate Limiting with iptables
-- Important Notes
-- Testing
 ---
 
-## Prerequisites
+## Scripts
 
-- Root Privileges: This script must be run as the root user.
-- Operating System: Designed for Linux systems using OpenSSH.
+| Script | Purpose |
+|--------|---------|
+| `ssh.sh` | Server-side hardening (sshd_config, host keys, banner, iptables rate limiting) |
+| `ssh_client.sh` | Client-side setup (key generation, ssh_config, public key deployment) |
+
 ---
 
 ## Usage
 
-1. Clone or Download the Script: Save the script to your local machine.
-2. Make the Script Executable:
-3. Run the Script as Root:
+### Server Hardening
+
+```bash
+sudo ./ssh.sh -u <username> [-p <port>]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-u USER` | User to allow SSH access (required, must not be root) | `$SUDO_USER` if available |
+| `-p PORT` | SSH listening port | 22 |
+| `-h` | Show help | — |
+
+The script automatically detects `SUDO_USER` when run via `sudo`, so in most cases:
+
+```bash
+sudo ./ssh.sh
+```
+
+### Client Configuration
+
+```bash
+./ssh_client.sh
+```
+
+Edit the variables at the top of the script before running:
+- `SERVER_IP` — your server's IP or hostname
+- `USERNAME` — your username on the server
+- `SSH_PORT` — the SSH port (must match the server)
+
 ---
 
-## Configurations Applied
+## What ssh.sh Does
 
+### 1. Host Key Generation
 
-1. Host Key Generation
+- Securely shreds all existing host keys
+- Generates new Ed25519 and RSA 4096-bit host keys with empty passphrases
+- Sets correct permissions (600 for private keys, 644 for public keys)
 
-- Old Keys Cleanup:
-	- Securely deletes existing SSH host keys to prevent unauthorized access using old keys.
-- Generate New Host Keys:
-	- ed25519 Key: Creates a new ED25519 host key for secure and efficient authentication.
-	- RSA Key: Generates a 4096-bit RSA host key for compatibility with clients that may not support ED25519.
+### 2. SSH Daemon Configuration (sshd_config)
 
-2. SSH Daemon Configuration (/etc/ssh/sshd_config)
+Writes a complete hardened `sshd_config` (truncate, not append — avoids first-match-wins issues). Backs up the original before overwriting.
 
-The script hardens the SSH daemon by modifying /etc/ssh/sshd_config with the following settings:
-1. StrictModes:
-	- Ensures SSH daemon checks file permissions and ownership of user files and directories.
-2. Port Configuration:
-	- Sets the SSH listening port. Default is 22.
-3. Authentication Methods:
-	- Requires both password and public key authentication for increased security.
-4. Public Key Authentication:
-	- Enables public key authentication and specifies the location of authorized keys and host keys.
-5. Algorithms and Key Exchange:
-	- Specifies secure host key algorithms, key exchange algorithms, ciphers, and MACs.
-	- Points to a file containing revoked keys (/etc/ssh/revokedKeys).
-6. Access Control:
-	- Disables root login.
-	- Restricts SSH access to specified users.
-	- Limits authentication attempts and sessions per user.
-7. Authentication Settings:
-	- Enables password authentication (used in combination with public key).
-	- Disables empty passwords, host-based authentication, and other less secure authentication methods.
-	- Disables X11 forwarding and user environment modification.
-8. Logging and DNS:
-	- Sets verbose logging for detailed authentication logs.
-	- Specifies syslog facility.
-	- Disables DNS reverse lookup to speed up SSH connections.
-	- Disables compression to prevent attacks exploiting compression algorithms.
-9. Forwarding and Tunneling:
-	- Disables various forwarding and tunneling features to prevent port forwarding and tunneling through SSH.
-10. Banner and Messages:
-	- Displays a legal banner before authentication.
-	- Shows the last login message upon successful authentication.
-	- Sets rekeying limits to enhance security over long connections.
-11. Client Keepalive and Timeouts:
-	- Sets keepalive intervals and timeouts to disconnect idle sessions.
-	- Limits the number of concurrent unauthenticated connections.
-12. Environment and Subsystems:
-	- Allows clients to pass locale environment variables.
-	- Enables the SFTP subsystem with logging.
-	- Uses Pluggable Authentication Modules (PAM) for authentication.
+**Network:**
+- Configurable port, IPv4 only (`AddressFamily inet`), `StrictModes yes`
 
-3. SSH Client Configuration (/etc/ssh/ssh_config)
+**Cryptographic Algorithms (OpenSSH 9.x+ modern):**
+- Host keys: `ssh-ed25519-cert-v01`, `ssh-ed25519`, `rsa-sha2-512`, `rsa-sha2-256`
+- KEX: `sntrup761x25519-sha512` (post-quantum), `curve25519-sha256`, `diffie-hellman-group18-sha512`, `diffie-hellman-group16-sha512`
+- Ciphers: `chacha20-poly1305`, `aes256-gcm`, `aes128-gcm` (AEAD only)
+- MACs: `hmac-sha2-512-etm`, `hmac-sha2-256-etm`, `umac-128-etm` (ETM only)
 
-The script hardens the SSH client configuration with the following settings:
-1. Known Hosts Hashing:
-	- Hashes host names and addresses in the known hosts file for privacy.
-2. Host Configuration:
-	- Applies settings to all hosts.
-	- Sets connection timeout.
-	- Specifies preferred algorithms, ciphers, and MACs.
-	- Enables persistent connections and control sockets.
-	- Asks before adding new host keys to known hosts (enhances security against MITM attacks).
+**Authentication:**
+- Public key only (`AuthenticationMethods publickey`)
+- Password authentication disabled
+- Empty passwords, keyboard-interactive, Kerberos, GSSAPI, host-based all disabled
 
-4. Permissions and Ownership
+**Access Control:**
+- Root login disabled (`PermitRootLogin no`)
+- `AllowUsers` restricted to the specified user
+- Max 3 auth tries, 2 sessions, 60s login grace time
+- `MaxStartups 10:30:60` (rate limiting at the protocol level)
 
-- Set Ownership and Permissions for sshd_config:
-	- Ensures the root owns the SSH daemon configuration file and that it is readable.
+**Session Hardening:**
+- All forwarding disabled (`DisableForwarding yes`)
+- X11 forwarding disabled
+- No compression, no user RC files, no user environment
+- `ClientAliveInterval 300`, `ClientAliveCountMax 0` (idle timeout)
+- `RekeyLimit 512M 1h`
+- `VersionAddendum none` (hide software details)
 
-5. Legal Banner
+**Logging:**
+- `LogLevel VERBOSE`, `SyslogFacility AUTH`
 
-- Create a Legal Banner in /etc/issue.net:
-	- Displays a legal warning to unauthorized users before logging in.
+### 3. SSH Client Configuration (ssh_config)
 
-6. Rate Limiting with iptables
+Writes a hardened global client config with:
+- `HashKnownHosts yes` (privacy)
+- Matching modern algorithms (same as server)
+- `StrictHostKeyChecking accept-new`
+- Connection multiplexing (`ControlMaster auto`, `ControlPersist 10m`)
 
-- Implement Rate Limiting to Prevent Brute-Force Attacks:
-	- Limits new SSH connection attempts to prevent brute-force attacks.
-	- Blocks an IP address if it makes more than four new connection attempts within 60 seconds.
+### 4. Legal Banner
+
+Creates `/etc/issue.net` with an ASCII art banner and legal warning text.
+
+### 5. Configuration Validation
+
+Runs `sshd -t` to validate the configuration before restarting. On failure, automatically rolls back to the backed-up config.
+
+### 6. Rate Limiting with iptables
+
+Adds conntrack-based rate limiting: drops IPs making more than 4 new SSH connections within 60 seconds. Persists rules via `iptables-save`.
+
 ---
 
-## Important Notes
+## What ssh_client.sh Does
 
-- Backup Existing Configurations: Before running the script, consider backing up your existing SSH configurations:
-- Test Access: Ensure you have a console or out-of-band access to the server in case the new configuration prevents SSH access.
-Legal Disclaimer: Please modify the banner content in /etc/issue.net to comply with your organization's policies and legal requirements.
-- Persistence of iptables Rules: The rate-limiting rules may not persist after a reboot. To make them persistent:
+1. Checks OpenSSH client version (requires 7.6+)
+2. Generates an Ed25519 key pair if one doesn't exist
+3. Optionally copies the public key to the server via `ssh-copy-id`
+4. Writes a hardened `~/.ssh/config` with modern algorithms matching the server
+5. Hashes `~/.ssh/known_hosts` for privacy
+6. Sets correct permissions on all SSH files (700 for `.ssh/`, 600 for private key, 644 for public key)
+
+---
+
+## Customization
+
+### Change the SSH Port
+
+```bash
+sudo ./ssh.sh -u myuser -p 2222
+```
+
+The port is applied to sshd_config, iptables rules, and the banner.
+
+### Allow Multiple Users
+
+Edit the generated `/etc/ssh/sshd_config` after running the script:
+
+```
+AllowUsers user1 user2
+```
+
+### Add TOTP Two-Factor Authentication
+
+Use the companion `hardening/totp/totp.sh` script to add Google Authenticator (TOTP) as a second factor. After setup, update `AuthenticationMethods` in sshd_config:
+
+```
+AuthenticationMethods publickey,keyboard-interactive
+```
+
 ---
 
 ## Testing
 
 After running the script:
-1. Verify SSH Service Status:
-2. Attempt SSH Connection:
-	- Attempt SSH into the server from a remote machine using the allowed user.
-3. Check Authentication Methods:
-	- Password and public key authentication are required if that's the intended configuration.
-4. Monitor Logs:
-	- Check /var/log/auth.log for any authentication errors or issues.
 
-## TODO:
+1. **Verify sshd status:**
+   ```bash
+   systemctl status sshd
+   ```
 
-- Add OTP
-- Add client configuration
-- Use public key for authentication 
+2. **Test connection from a remote machine:**
+   ```bash
+   ssh -p <port> <username>@<server_ip>
+   ```
+
+3. **Verify algorithms in use:**
+   ```bash
+   ssh -vvv -p <port> <username>@<server_ip> 2>&1 | grep "kex:"
+   ```
+
+4. **Check iptables rules:**
+   ```bash
+   sudo iptables -L INPUT -n --line-numbers
+   ```
+
+5. **Audit with ssh-audit:**
+   ```bash
+   pacman -S ssh-audit
+   ssh-audit localhost
+   ```
+
+---
+
+## Important Notes
+
+- **Backup access:** Ensure you have console or out-of-band access before applying. The script backs up the original config automatically.
+- **Authorized keys:** Copy your public key to `~/.ssh/authorized_keys` on the server *before* disconnecting, as password authentication is disabled.
+- **iptables persistence:** Rules are saved to `/etc/iptables/iptables.rules` and the service is enabled. They persist across reboots.
+- **Banner:** Modify `/etc/issue.net` to match your organization's legal requirements.

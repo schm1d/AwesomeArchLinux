@@ -1,93 +1,113 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Description: This script configures and hardens Zsh on Arch Linux.
-# Author: @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# =============================================================================
+# Script:      zsh.sh
+# Description: Installs and configures Zsh with Oh My Zsh, syntax highlighting,
+#              autosuggestions, and Powerlevel10k theme on Arch Linux.
+#
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
+#
+# Usage:       ./zsh.sh
+# =============================================================================
 
-# Function to handle errors
-handle_error() {
-    echo "Error: $1" >&2
+set -euo pipefail
+
+BBlue='\033[1;34m'
+BRed='\033[1;31m'
+BGreen='\033[1;32m'
+NC='\033[0m'
+
+# Must NOT run as root — Oh My Zsh installs into user home
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "${BRed}Do not run this script as root. Run as your normal user.${NC}" >&2
     exit 1
-}
-
-# Update the system (optional but recommended)
-echo "Updating system packages..."
-sudo pacman -Syu --noconfirm || handle_error "Failed to update system."
-
-# Install Zsh if not already installed
-if ! command -v zsh &> /dev/null; then
-    echo "Installing Zsh..."
-    sudo pacman -S zsh --noconfirm || handle_error "Failed to install Zsh."
 fi
 
-# Set Zsh as the default shell for the current user
-echo "Setting Zsh as the default shell..."
-chsh -s $(which zsh) || handle_error "Failed to set Zsh as default shell."
+# Check dependencies
+for cmd in git curl; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo -e "${BRed}Required command '$cmd' not found. Install it first.${NC}" >&2
+        exit 1
+    fi
+done
+
+# Install Zsh if not already installed
+if ! command -v zsh &>/dev/null; then
+    echo -e "${BBlue}Installing Zsh...${NC}"
+    sudo pacman -S --noconfirm zsh
+fi
+
+# Set Zsh as the default shell
+ZSH_PATH="$(command -v zsh)"
+if [ "$(basename "$SHELL")" != "zsh" ]; then
+    echo -e "${BBlue}Setting Zsh as the default shell...${NC}"
+    chsh -s "$ZSH_PATH" || {
+        echo -e "${BRed}chsh failed. You can set it manually: chsh -s $ZSH_PATH${NC}" >&2
+    }
+fi
 
 # Install Oh My Zsh if not already installed
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    echo "Installing Oh My Zsh..."
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)" "" --unattended || handle_error "Failed to install Oh My Zsh."
+    echo -e "${BBlue}Installing Oh My Zsh...${NC}"
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)" "" --unattended
 fi
 
-# Install zsh-syntax-highlighting plugin if not already installed
-if [ ! -d "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting" ]; then
-    echo "Installing zsh-syntax-highlighting..."
-    git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting || handle_error "Failed to install zsh-syntax-highlighting."
+ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+
+# Install zsh-syntax-highlighting plugin
+if [ ! -d "$ZSH_CUSTOM/plugins/zsh-syntax-highlighting" ]; then
+    echo -e "${BBlue}Installing zsh-syntax-highlighting...${NC}"
+    git clone https://github.com/zsh-users/zsh-syntax-highlighting.git \
+        "$ZSH_CUSTOM/plugins/zsh-syntax-highlighting"
 fi
 
-# Install zsh-autosuggestions plugin if not already installed
-if [ ! -d "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" ]; then
-    echo "Installing zsh-autosuggestions..."
-    git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions || handle_error "Failed to install zsh-autosuggestions."
+# Install zsh-autosuggestions plugin
+if [ ! -d "$ZSH_CUSTOM/plugins/zsh-autosuggestions" ]; then
+    echo -e "${BBlue}Installing zsh-autosuggestions...${NC}"
+    git clone https://github.com/zsh-users/zsh-autosuggestions.git \
+        "$ZSH_CUSTOM/plugins/zsh-autosuggestions"
 fi
 
-# Enable plugins in .zshrc if not already enabled
+# Enable plugins in .zshrc
 ZSHRC="$HOME/.zshrc"
-if ! grep -q "plugins=(.*zsh-syntax-highlighting.*zsh-autosuggestions.*)" "$ZSHRC"; then
-    echo "Enabling plugins in .zshrc..."
-    sed -i 's/plugins=(git)/plugins=(git zsh-syntax-highlighting zsh-autosuggestions)/' "$ZSHRC" || handle_error "Failed to enable plugins."
+if [ -f "$ZSHRC" ]; then
+    if ! grep -q "zsh-syntax-highlighting" "$ZSHRC"; then
+        echo -e "${BBlue}Enabling plugins in .zshrc...${NC}"
+        sed -i 's/plugins=(git)/plugins=(git zsh-syntax-highlighting zsh-autosuggestions)/' "$ZSHRC"
+    fi
+
+    # Add source lines if not present
+    if ! grep -q "source.*zsh-syntax-highlighting.zsh" "$ZSHRC"; then
+        echo "source $ZSH_CUSTOM/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" >> "$ZSHRC"
+    fi
+    if ! grep -q "source.*zsh-autosuggestions.zsh" "$ZSHRC"; then
+        echo "source $ZSH_CUSTOM/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" >> "$ZSHRC"
+    fi
+
+    # Set highlight styles (only once)
+    if ! grep -q "ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE" "$ZSHRC"; then
+        echo "ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'" >> "$ZSHRC"
+    fi
 fi
 
-# Add syntax highlighting and autosuggestions source lines if not present
-if ! grep -q "source.*zsh-syntax-highlighting.zsh" "$ZSHRC"; then
-    echo "Adding syntax highlighting to .zshrc..."
-    echo "source ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" >> "$ZSHRC"
+# Install Powerlevel10k via yay (requires yay — install with utils/yay.sh first)
+if command -v yay &>/dev/null; then
+    echo -e "${BBlue}Installing Powerlevel10k font and theme...${NC}"
+    yay -S --noconfirm --needed ttf-meslo-nerd-font-powerlevel10k zsh-theme-powerlevel10k-git
+else
+    echo -e "${BRed}yay not found — skipping Powerlevel10k installation.${NC}" >&2
+    echo "Install yay first (utils/yay.sh), then re-run this script." >&2
 fi
-if ! grep -q "source.*zsh-autosuggestions.zsh" "$ZSHRC"; then
-    echo "Adding autosuggestions to .zshrc..."
-    echo "source ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" >> "$ZSHRC"
-fi
-
-# Set highlight styles
-echo "Setting highlight styles..."
-echo "ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'" >> "$ZSHRC"
-echo "ZSH_HIGHLIGHT_STYLES[default]='fg=8'" >> "$ZSHRC"
-
-# Install yay if not already installed (AUR helper)
-if ! command -v yay &> /dev/null; then
-    echo "Installing yay (AUR helper)..."
-    sudo pacman -S --needed git base-devel || handle_error "Failed to install dependencies for yay."
-    git clone https://aur.archlinux.org/yay.git || handle_error "Failed to clone yay repository."
-    cd yay
-    makepkg -si --noconfirm || handle_error "Failed to install yay."
-    cd ..
-    rm -rf yay
-fi
-
-# Install ttf-meslo-nerd-font-powerlevel10k and zsh-theme-powerlevel10k-git using yay
-echo "Installing Powerlevel10k font and theme..."
-yay -Sy --noconfirm ttf-meslo-nerd-font-powerlevel10k zsh-theme-powerlevel10k-git || handle_error "Failed to install Powerlevel10k packages."
 
 # Add Powerlevel10k theme to .zshrc if not already present
-if ! grep -q "source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme" "$ZSHRC"; then
-    echo "Adding Powerlevel10k theme to .zshrc..."
+if [ -f "$ZSHRC" ] && ! grep -q "powerlevel10k.zsh-theme" "$ZSHRC"; then
     echo 'source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme' >> "$ZSHRC"
 fi
 
-# Set secure permissions on .zshrc
-echo "Setting secure permissions on .zshrc..."
-sudo chown "$USER:$USER" "$ZSHRC" || handle_error "Failed to set ownership."
-sudo chmod 600 "$ZSHRC" || handle_error "Failed to set permissions."
+# Set secure permissions (no sudo needed — user files)
+if [ -f "$ZSHRC" ]; then
+    chmod 600 "$ZSHRC"
+fi
 
-echo "Zsh configuration completed successfully! Please log out and log back in to use Zsh."
+echo -e "${BGreen}Zsh configuration completed. Log out and back in to use Zsh.${NC}"
