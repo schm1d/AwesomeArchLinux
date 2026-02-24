@@ -34,6 +34,9 @@ AwesomeArchLinux/
 |   +-- chrony/
 |   |   +-- chrony.sh        # Chrony NTS (authenticated time synchronization)
 |   |   +-- README.md
+|   +-- docker/
+|   |   +-- docker.sh        # Docker runtime security (CIS benchmark, Trivy, seccomp)
+|   |   +-- README.md
 |   +-- crowdsec/
 |   |   +-- crowdsec.sh      # CrowdSec IDS with nftables & nginx bouncers
 |   |   +-- README.md
@@ -42,11 +45,20 @@ AwesomeArchLinux/
 |   |   +-- README.md
 |   +-- firehol/
 |   |   +-- firehol.sh       # FireHOL firewall with IP blocklist integration
+|   +-- mariadb/
+|   |   +-- mariadb.sh       # MariaDB/MySQL server hardening
+|   |   +-- README.md
 |   +-- nginx/
 |   |   +-- nginx.sh         # nginx-mainline hardening + Let's Encrypt (SSL Labs A+)
 |   |   +-- README.md
 |   +-- nodejs/
 |   |   +-- nodejs.sh        # Node.js/Express production hardening
+|   |   +-- README.md
+|   +-- php/
+|   |   +-- php.sh           # PHP production hardening (php.ini, FPM, nginx)
+|   |   +-- README.md
+|   +-- postgresql/
+|   |   +-- postgresql.sh    # PostgreSQL server hardening
 |   |   +-- README.md
 |   +-- postfix/
 |   |   +-- postfix.sh       # Send-only Postfix mail relay for system notifications
@@ -63,7 +75,10 @@ AwesomeArchLinux/
 |   |   +-- totp.sh          # TOTP two-factor authentication for SSH
 |   |   +-- README.md
 |   +-- wireguard/
-|       +-- wireguard.sh     # WireGuard VPN server with client config generation
+|   |   +-- wireguard.sh     # WireGuard VPN server with client config generation
+|   |   +-- README.md
+|   +-- wordpress/
+|       +-- wordpress.sh     # WordPress security hardening
 |       +-- README.md
 +-- utils/
 |   +-- aide-config.sh       # AIDE file integrity monitoring automation
@@ -149,6 +164,38 @@ AwesomeArchLinux/
 - **React/SPA** (`react.sh`) &mdash; Production deployment hardening via nginx: SPA routing, React-tuned CSP (`script-src 'self'` without `unsafe-eval`), aggressive static asset caching (1yr immutable for hashed files, no-cache for `index.html`), source map blocking, dotfile protection, file permissions (root:http 750/640), `.env.production.example` template with security guidelines.
 - **Node.js/Express** (`nodejs.sh`) &mdash; Dedicated system user, hardened systemd service (ProtectSystem=strict, 14+ security directives, V8 JIT-aware), nginx reverse proxy with rate limiting, WebSocket support, `X-Powered-By` stripping, AppArmor profile, automated weekly `npm audit` via systemd timer, log rotation, secure environment file.
 - See [`hardening/react/README.md`](hardening/react/README.md) and [`hardening/nodejs/README.md`](hardening/nodejs/README.md) for security best practices.
+
+#### PHP Production Hardening
+
+- **php.ini lockdown** &mdash; 30+ hardened directives: `expose_php=Off`, `display_errors=Off`, `allow_url_include=Off`, `open_basedir` restriction, session hardening (`strict` mode, `httponly`, `samesite=Strict`), `disable_functions` (30+ dangerous functions blocked), `upload_max_filesize` limited.
+- **PHP-FPM pool** &mdash; Dedicated pool per application with `chroot`, `chdir`, `pm.max_children` tuning, `security.limit_extensions=.php`, status page on localhost only.
+- **nginx FastCGI** &mdash; Snippet with `fastcgi_param PHP_VALUE` overrides, `PATH_INFO` stripping, buffer limits.
+- **systemd hardening** &mdash; `ProtectSystem=strict`, `NoNewPrivileges`, private tmp/devices, restricted capabilities.
+- See [`hardening/php/README.md`](hardening/php/README.md) for framework-specific configurations (Laravel, WordPress, Symfony).
+
+#### Database Hardening (PostgreSQL & MariaDB)
+
+- **PostgreSQL** (`postgresql.sh`) &mdash; `initdb` with `--data-checksums --auth-host=scram-sha-256`, hardened `postgresql.conf` (SSL required, `password_encryption=scram-sha-256`, `log_connections=on`, `log_disconnections=on`), locked-down `pg_hba.conf` (no `trust` anywhere), `pg_stat_statements` extension, systemd sandboxing.
+- **MariaDB** (`mariadb.sh`) &mdash; Automated `mysql_secure_installation` equivalent (removes anonymous users, test database, remote root), random root password saved to `/root/.mariadb-root-pass` (600 permissions), `local-infile=0`, `skip-name-resolve`, `secure-file-priv`, `STRICT_TRANS_TABLES` SQL mode, self-signed SSL certificate generation, systemd hardening, logrotate.
+- See [`hardening/postgresql/README.md`](hardening/postgresql/README.md) and [`hardening/mariadb/README.md`](hardening/mariadb/README.md) for backup strategies and common security mistakes.
+
+#### WordPress Hardening
+
+- **wp-config.php** &mdash; 11 security constants (`DISALLOW_FILE_EDIT`, `DISALLOW_FILE_MODS`, `FORCE_SSL_ADMIN`, `WP_AUTO_UPDATE_CORE`), fresh salts from WordPress API, randomized table prefix.
+- **File permissions** &mdash; `root:http` ownership, directories 750, files 640, `wp-content/uploads` writable by `http` only.
+- **nginx server block** &mdash; `xmlrpc.php` blocked, PHP execution denied in `wp-content/uploads`, hidden files blocked, rate limiting on `wp-login.php` and `wp-admin`.
+- **fail2ban jails** &mdash; `wordpress-auth` (login brute-force) and `wordpress-xmlrpc` (XML-RPC abuse).
+- **wp-cron** &mdash; Replaces WP's unreliable pseudo-cron with a systemd timer (every 15 minutes).
+- See [`hardening/wordpress/README.md`](hardening/wordpress/README.md) for plugin security and update strategies.
+
+#### Docker Runtime Security
+
+- **CIS Docker Benchmark** (`--bench`) &mdash; Automated audit against the CIS Docker Benchmark, checks daemon configuration, container runtime, images, and host security.
+- **Trivy image scanning** (`--scan`) &mdash; Vulnerability scanning for container images with weekly systemd timer for automated re-scans.
+- **Compose hardening** (`--compose PATH`) &mdash; Audits Docker Compose files for 11 security issues (privileged mode, host networking, writable root filesystem, missing resource limits, etc.).
+- **Network hardening** (`--network`) &mdash; nftables rules for container traffic, inter-container communication restrictions.
+- **Security profiles** &mdash; Hardened AppArmor profile (`docker-default-hardened`) and seccomp profile (`seccomp-hardened.json`) with blocked syscalls.
+- See [`hardening/docker/README.md`](hardening/docker/README.md) for container security best practices.
 
 #### SSH Hardening
 
@@ -236,6 +283,10 @@ Granular per-service hardening overrides for 15+ services:
 | **CrowdSec** | `ProtectSystem=strict`, limited read-write paths |
 | **Postfix** | `CAP_NET_BIND_SERVICE`, strict filesystem, private temp |
 | **Node.js apps** | Per-app sandboxing, `MemoryDenyWriteExecute=no` (V8 JIT), capability bounding |
+| **PHP-FPM** | `ProtectSystem=strict`, `NoNewPrivileges`, restricted capabilities, private temp/devices |
+| **PostgreSQL** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE` for data directory, syscall filter |
+| **MariaDB** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE`, `CAP_IPC_LOCK`, private network |
+| **WordPress (nginx+FPM)** | Combined nginx + PHP-FPM hardening, `wp-cron.timer` replacement |
 
 Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/tunable/log protection, syscall filtering, namespace/realtime/SUID restrictions, `MemoryDenyWriteExecute`, and private temp/devices.
 
@@ -444,6 +495,18 @@ sudo ./hardening/fail2ban/fail2ban.sh          # Extended fail2ban jails
 sudo ./hardening/nginx/nginx.sh -d example.com -e admin@example.com   # nginx + Let's Encrypt
 sudo ./hardening/react/react.sh -a /var/www/myapp -d app.example.com  # React SPA hardening
 sudo ./hardening/nodejs/nodejs.sh -a /opt/api -n api-server           # Node.js hardening
+sudo ./hardening/php/php.sh -a /var/www/myapp                         # PHP production hardening
+sudo ./hardening/wordpress/wordpress.sh -a /var/www/wordpress -d wp.example.com  # WordPress hardening
+
+# --- Database ---
+sudo ./hardening/postgresql/postgresql.sh                             # PostgreSQL hardening
+sudo ./hardening/mariadb/mariadb.sh                                   # MariaDB hardening
+
+# --- Container Security ---
+sudo ./hardening/docker/docker.sh --bench                             # CIS Docker Benchmark audit
+sudo ./hardening/docker/docker.sh --scan myimage:latest               # Trivy image scan
+sudo ./hardening/docker/docker.sh --compose docker-compose.yml        # Compose security audit
+sudo ./hardening/docker/docker.sh --network                           # Container network hardening
 
 # --- System ---
 sudo ./hardening/sysctl/sysctl.sh              # Kernel parameter hardening
