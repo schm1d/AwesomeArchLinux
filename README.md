@@ -1,6 +1,8 @@
 ![Arch Linux Secure AF](./archLinux.png)
 Wallpaper: [https://www.reddit.com/user/alienpirate5/](https://www.reddit.com/user/alienpirate5/)
 
+[![ShellCheck](https://github.com/schm1d/AwesomeArchLinux/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/schm1d/AwesomeArchLinux/actions/workflows/shellcheck.yml)
+
 ## Awesome Arch Linux
 
 A collection of shell scripts for hardened Arch Linux installation, configuration, and security enhancements. The aim is to make this repository a reliable and curated reference for Arch Linux hardened installation setups and configurations.
@@ -20,6 +22,9 @@ You will get a very clean, solid, and secure base installation.
 
 ```
 AwesomeArchLinux/
++-- .github/
+|   +-- workflows/
+|       +-- shellcheck.yml   # CI: ShellCheck linting for all scripts
 +-- base/
 |   +-- archinstall.sh       # Bare-metal installer (LUKS + LVM + UEFI + TPM2)
 |   +-- chroot.sh            # Bare-metal chroot configuration & hardening
@@ -27,6 +32,7 @@ AwesomeArchLinux/
 |   +-- vps-chroot.sh        # VPS chroot configuration & hardening
 |   +-- recovery-mount.sh    # Recovery menu: unmount/remount encrypted install
 |   +-- secureBoot.sh        # UEFI Secure Boot key generation & enrollment
+|   +-- README.md            # Base installation documentation
 +-- hardening/
 |   +-- apparmor/
 |   |   +-- apparmor.sh      # AppArmor profiles for 7 services (enforce mode)
@@ -72,6 +78,7 @@ AwesomeArchLinux/
 |   +-- ssh/
 |   |   +-- ssh.sh           # SSH server hardening (sshd_config, host keys)
 |   |   +-- ssh_client.sh    # SSH client configuration & key generation
+|   |   +-- README.md
 |   +-- sysctl/
 |   |   +-- sysctl.sh        # Kernel parameter hardening (100+ sysctl settings)
 |   +-- totp/
@@ -217,9 +224,10 @@ AwesomeArchLinux/
 
 #### SSH Hardening
 
-- **Server** (`ssh.sh`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), enforces modern algorithms only (ChaCha20-Poly1305, AES-256-GCM, Curve25519), disables root login, X11 forwarding, agent forwarding, TCP forwarding, tunneling, and compression. Configures revoked keys file, VERBOSE logging, key-based + password multi-factor auth, strict session limits (MaxSessions 2, MaxStartups 2, MaxAuthTries 3), client alive timeout (300s), and a legal warning banner.
+- **Server** (`ssh.sh -u <user> [-p <port>]`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), writes a complete hardened `sshd_config` with post-quantum KEX (`sntrup761x25519-sha512`), AEAD-only ciphers (ChaCha20-Poly1305, AES-256-GCM, AES-128-GCM), ETM-only MACs, public-key-only authentication (passwords disabled), all forwarding disabled (`DisableForwarding yes`), strict session limits (MaxSessions 2, MaxAuthTries 3), client alive timeout (300s), VERBOSE logging, revoked keys file, and a legal warning banner. Validates config with `sshd -t` and automatically rolls back on failure. Rate limits via iptables.
 - **Client** (`ssh_client.sh`) &mdash; Generates Ed25519 key pair, configures SSH client with matching modern algorithms, hashes `known_hosts`, assists with public key deployment to servers.
 - **Key Rotation** &mdash; Automated quarterly SSH key rotation via cron.
+- See [`hardening/ssh/README.md`](hardening/ssh/README.md) for algorithm details and testing commands.
 
 #### Two-Factor Authentication (TOTP)
 
@@ -357,7 +365,7 @@ Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/
 #### File System Security
 
 - **Mount hardening** &mdash; `/tmp` and `/dev/shm` mounted with `nosuid,nodev,noexec`. `/proc` mounted with `hidepid=2`.
-- **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (600).
+- **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (644).
 - **UMASK 027** &mdash; Set globally in `/etc/profile`, `/etc/bash.bashrc`, and `/etc/login.defs`.
 - **Home directory ACLs** &mdash; Default ACLs restrict group and other access.
 - **Compiler restrictions** &mdash; `gcc`, `g++`, `clang`, `make`, `as`, `ld` restricted to `compilers` group (750).
@@ -374,7 +382,7 @@ Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/
 - **sysstat** &mdash; System performance accounting.
 - **logrotate** &mdash; Daily rotation, 7-day retention, compressed.
 - **journald** &mdash; Persistent storage, compressed, sealed, 200MB max.
-- **Automatic updates** &mdash; Daily `pacman -Syu` via systemd timer.
+- **Update notifications** &mdash; Daily `pacman -Sy && pacman -Qu` check via systemd timer (logs available updates to `/var/log/pacman-updates.log` without auto-installing).
 
 #### GRUB Security
 
@@ -505,7 +513,7 @@ The scripts in `hardening/` and `utils/` can be used independently on any Arch L
 sudo ./hardening/apparmor/apparmor.sh          # AppArmor profiles for 7 services
 
 # --- Network ---
-sudo ./hardening/ssh/ssh.sh                    # Harden SSH server
+sudo ./hardening/ssh/ssh.sh -u myuser           # Harden SSH server
 sudo ./hardening/totp/totp.sh -u myuser        # Add TOTP 2FA to SSH
 sudo ./hardening/wireguard/wireguard.sh        # WireGuard VPN server
 sudo ./hardening/fail2ban/fail2ban.sh          # Extended fail2ban jails
