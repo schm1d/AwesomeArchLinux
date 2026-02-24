@@ -892,7 +892,7 @@ create_install_env() {
     cat > /root/.install-env <<EOF
 export INSTALL_DISK="$PARENT_DISK"
 export INSTALL_USER="${USERNAME:-root}"
-export INSTALL_HOST="$(hostname)"
+export INSTALL_HOST="$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo "archlinux")"
 export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps-harden"
 export INSTALL_SSH_PORT="$SSH_PORT"
@@ -944,7 +944,7 @@ run_software_hardening() {
     # Set up environment variables and run
     export _INSTALL_DISK="$PARENT_DISK"
     export _INSTALL_USER="${USERNAME:-root}"
-    export _INSTALL_HOST="$(hostname)"
+    export _INSTALL_HOST="$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo "archlinux")"
     export _INSTALL_SSH_PORT="$SSH_PORT"
     export _INSTALL_TYPE="vps-harden"
 

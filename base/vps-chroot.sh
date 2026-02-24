@@ -337,9 +337,16 @@ EOF
 sed -i "s/\$SSH_PORT/$SSH_PORT/g" /etc/nftables.conf
 
 systemctl enable nftables.service
-systemctl start nftables.service
 
-echo -e "${BBlue}Firewall configuration with nftables completed.${NC}"
+# Start nftables — may fail on VPS kernels without nf_tables module support
+if nft list ruleset &>/dev/null; then
+    systemctl start nftables.service
+    echo -e "${BBlue}Firewall configuration with nftables completed.${NC}"
+else
+    echo -e "${BYellow}WARNING: nftables not supported by this kernel (common on VPS).${NC}"
+    echo -e "${BYellow}nftables is enabled and will start if the kernel supports it after reboot.${NC}"
+    echo -e "${BYellow}If your VPS uses iptables instead, configure iptables rules manually.${NC}"
+fi
 
 ###############################################################################
 # LOGGING & ENTROPY
