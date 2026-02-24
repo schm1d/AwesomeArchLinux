@@ -695,6 +695,12 @@ systemctl start arch-audit.timer
 # USER CREATION
 ###############################################################################
 
+# Ensure zsh is installed (installed by pacstrap in vps-install.sh, may be missing on live VPS)
+if ! command -v zsh &>/dev/null; then
+    echo -e "${BBlue}Installing zsh...${NC}"
+    pacman -S --noconfirm zsh zsh-completions
+fi
+
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
   useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"
