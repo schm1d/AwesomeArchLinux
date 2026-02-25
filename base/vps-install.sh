@@ -14,6 +14,7 @@
 set -euo pipefail
 
 # --- Color variables ---
+# shellcheck disable=SC2034  # Color palette — all referenced in echo -e strings
 BBlue='\033[1;34m'
 BRed='\033[1;31m'
 BGreen='\033[1;32m'
@@ -358,12 +359,12 @@ BBlue='\033[1;34m'
 NC='\033[0m'
 
 echo -e "${BBlue}Installing yay AUR helper...${NC}"
-cd /tmp
-git clone https://aur.archlinux.org/yay.git
-cd yay
+YAY_BUILD="/tmp/yay"
+git clone https://aur.archlinux.org/yay.git "$YAY_BUILD"
+cd "$YAY_BUILD"
 makepkg -si --noconfirm
 cd /
-rm -rf /tmp/yay
+rm -rf "$YAY_BUILD"
 
 echo -e "${BBlue}Installing AUR security packages...${NC}"
 yay -S --noconfirm aide
