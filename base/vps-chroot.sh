@@ -40,7 +40,7 @@ SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
 SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
 
-CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
+CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')
 
 ###############################################################################
 # BASIC SYSTEM CONFIGURATION

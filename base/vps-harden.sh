@@ -488,9 +488,13 @@ harden_tmp() {
     if findmnt -n /tmp &>/dev/null; then
         # Already mounted — remount with new options
         mount -o remount,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" /tmp 2>/dev/null || {
-            # If remount fails, do a fresh mount
+            # If remount fails, do a fresh mount (preserve existing files)
             local tmp_backup
-            tmp_backup=$(mktemp -d /root/tmp_backup.XXXXXX)
+            tmp_backup=$(mktemp -d /root/tmp_backup.XXXXXX) || {
+                warn "mktemp failed — mounting /tmp without preserving contents"
+                mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
+                return 0
+            }
             cp -a /tmp/. "$tmp_backup/" 2>/dev/null || true
             mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
             cp -a "$tmp_backup/." /tmp/ 2>/dev/null || true

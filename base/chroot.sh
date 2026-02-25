@@ -53,7 +53,7 @@ PARTITION3="${DISK}${PART_SUFFIX}3"
 
 LUKS_UUID=$(cryptsetup luksUUID "$PARTITION3")
 
-CPU_VENDOR_ID=$(lscpu | grep 'Vendor ID' | awk '{print $3}')
+CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')
 
 # --- Basic System Configuration ---
 pacman-key --init

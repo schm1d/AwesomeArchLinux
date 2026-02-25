@@ -102,7 +102,7 @@ if ! id "$TARGET_USER" &>/dev/null; then
     err "User '$TARGET_USER' does not exist."
 fi
 
-TARGET_HOME="$(eval echo "~${TARGET_USER}")"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
 info "Mode: $MODE"
 info "Target user: $TARGET_USER (home: $TARGET_HOME)"
@@ -152,13 +152,8 @@ if [[ "$MODE" == "docker" ]]; then
     mkdir -p /etc/docker
 
     # Build the JSON — conditionally include seccomp-profile if available
-    SECCOMP_LINE=""
-    if [[ -f /etc/docker/seccomp-default.json ]]; then
-        SECCOMP_LINE='"seccomp-profile": "/etc/docker/seccomp-default.json",'
-    fi
-
-    cat > /etc/docker/daemon.json <<EOF
-{
+    local daemon_json
+    daemon_json='{
     "icc": false,
     "no-new-privileges": true,
     "userland-proxy": false,
@@ -173,15 +168,20 @@ if [[ "$MODE" == "docker" ]]; then
         "nofile": { "Hard": 64000, "Soft": 64000 },
         "nproc":  { "Hard": 4096,  "Soft": 4096  }
     },
-    ${SECCOMP_LINE}
     "default-address-pools": [
         { "base": "172.17.0.0/16", "size": 24 }
     ],
     "iptables": true,
     "ip-forward": true,
     "ip-masq": true
-}
-EOF
+}'
+
+    if [[ -f /etc/docker/seccomp-default.json ]]; then
+        # Insert seccomp-profile key before the closing brace
+        daemon_json=$(printf '%s' "$daemon_json" | sed '$ s/}$/,\n    "seccomp-profile": "\/etc\/docker\/seccomp-default.json"\n}/')
+    fi
+
+    printf '%s\n' "$daemon_json" > /etc/docker/daemon.json
 
     chmod 600 /etc/docker/daemon.json
     msg "daemon.json written with hardened defaults"
