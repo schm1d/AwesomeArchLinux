@@ -1506,32 +1506,19 @@ echo -e "${BBlue}Hardening auditd...${NC}"
 mkdir -p /etc/systemd/system/auditd.service.d/
 cat > /etc/systemd/system/auditd.service.d/hardening.conf <<'EOF'
 [Service]
-ProtectSystem=strict
+# auditd manages the kernel audit subsystem — it needs broad access to
+# /proc, /sys/kernel, and netlink sockets. Heavy sandboxing breaks it.
+ProtectSystem=full
 ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
-ReadWritePaths=/var/log/audit
-
-# Audit needs special capabilities
-CapabilityBoundingSet=CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH
-NoNewPrivileges=yes
-
+ReadWritePaths=/var/log/audit /run
+CapabilityBoundingSet=CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH CAP_SYS_NICE CAP_SYS_RESOURCE
 PrivateDevices=yes
 PrivateTmp=yes
-
-SystemCallFilter=@system-service @privileged
-SystemCallErrorNumber=EPERM
-
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
-RestrictNamespaces=yes
-RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
-
-Restart=on-failure
-RestartSec=5s
 EOF
 
 # ClamAV hardening
