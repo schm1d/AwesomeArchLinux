@@ -291,6 +291,11 @@ systemctl enable systemd-resolved
 systemctl start stubby 2>/dev/null || true
 systemctl start systemd-resolved 2>/dev/null || true
 
+# Prefer IPv4 over IPv6 — many VPS providers lack IPv6 routing, and
+# sshd is configured with AddressFamily inet (IPv4 only)
+echo -e "${BBlue}Configuring IPv4 preference...${NC}"
+echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+
 echo -e "${BBlue}DNS-over-TLS configuration completed!${NC}"
 
 ###############################################################################
