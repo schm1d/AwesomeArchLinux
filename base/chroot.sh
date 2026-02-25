@@ -1432,7 +1432,7 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only  # SSH needs to read authorized_keys
-ReadWritePaths=/var/log
+ReadWritePaths=/var/log /run
 
 # Kernel protections
 ProtectKernelTunables=yes
