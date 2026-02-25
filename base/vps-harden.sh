@@ -845,7 +845,9 @@ migrate_var_data() {
     _rollback_var() {
         warn "Rolling back /var migration..."
         umount /var 2>/dev/null || true
-        rm -rf /var 2>/dev/null || true
+        # Remove the empty mountpoint created during migration
+        local var_dir="/var"
+        [[ -d "$var_dir" ]] && rm -rf "$var_dir"
         mv /var.old /var
         cp "$FSTAB_BACKUP" /etc/fstab
         warn "/var restored from /var.old and fstab reverted."
@@ -1077,7 +1079,7 @@ show_summary() {
     echo
     echo -e "${C_INFO}Mount point status:${C_NC}"
 
-    local check mark
+    local mark
     for mp in /tmp /dev/shm /proc /var/tmp; do
         if findmnt -n "$mp" &>/dev/null; then
             local opts
