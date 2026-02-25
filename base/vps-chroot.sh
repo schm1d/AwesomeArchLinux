@@ -1225,7 +1225,7 @@ cat > /etc/systemd/system/clamav-daemon.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/clamav /var/log/clamav
+ReadWritePaths=/var/lib/clamav /var/log/clamav /run
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -1285,7 +1285,7 @@ User=stubby
 Group=stubby
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/cache/stubby
+ReadWritePaths=/var/cache/stubby /run
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -1344,7 +1344,7 @@ cat > /etc/systemd/system/chronyd.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/chrony /var/log/chrony
+ReadWritePaths=/var/lib/chrony /var/log/chrony /run
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
