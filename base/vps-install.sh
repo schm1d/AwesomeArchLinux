@@ -13,12 +13,16 @@
 
 set -euo pipefail
 
-# --- Color variables ---
-# shellcheck disable=SC2034  # Color palette — all referenced in echo -e strings
+# --- Color variables (all used in echo -e strings) ---
+# shellcheck disable=SC2034
 BBlue='\033[1;34m'
+# shellcheck disable=SC2034
 BRed='\033[1;31m'
+# shellcheck disable=SC2034
 BGreen='\033[1;32m'
+# shellcheck disable=SC2034
 BYellow='\033[1;33m'
+# shellcheck disable=SC2034
 NC='\033[0m'
 
 # --- Logging setup ---
@@ -147,10 +151,11 @@ validate_network
 # Select mirrors
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+MIRROR_TMP="/tmp/mirrorlist.tmp"
 curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
-    sed -e 's/^#Server/Server/' -e '/^#/d' > /tmp/mirrorlist.tmp
-head -20 /tmp/mirrorlist.tmp > /etc/pacman.d/mirrorlist
-rm -f /tmp/mirrorlist.tmp
+    sed -e 's/^#Server/Server/' -e '/^#/d' > "$MIRROR_TMP"
+head -20 "$MIRROR_TMP" > /etc/pacman.d/mirrorlist
+rm -f "$MIRROR_TMP"
 
 # -----------------------
 # 3. GATHER USER INPUT
@@ -446,17 +451,16 @@ arch-chroot /mnt bash -c "source /set-install-vars.sh && /vps-chroot.sh"
 echo -e "${BBlue}Performing cleanup...${NC}"
 log_action "Performing cleanup"
 
-# Clean up scripts
-shred -vzu /mnt/vps-chroot.sh 2>/dev/null || true
-shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
-shred -vzu /mnt/sysctl.sh 2>/dev/null || true
-shred -vzu /mnt/ssh.sh 2>/dev/null || true
+# Clean up scripts copied into chroot
+for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/ssh.sh; do
+    [[ -f "$f" ]] && shred -vzu "$f" 2>/dev/null || true
+done
 
 # Clear pacman cache
 arch-chroot /mnt bash -c "pacman -Scc --noconfirm"
 
 # Clear bash history
-arch-chroot /mnt bash -c "history -c && rm -f /root/.bash_history"
+arch-chroot /mnt bash -c 'history -c && rm -f "$HOME/.bash_history"'
 
 # -----------------------
 # 10. COMPLETION

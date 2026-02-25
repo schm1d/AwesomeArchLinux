@@ -6,12 +6,16 @@
 
 set -euo pipefail
 
-# --- Color variables ---
-# shellcheck disable=SC2034  # Color palette — all referenced in echo -e strings
+# --- Color variables (all used in echo -e strings) ---
+# shellcheck disable=SC2034
 BBlue='\033[1;34m'
+# shellcheck disable=SC2034
 BRed='\033[1;31m'
+# shellcheck disable=SC2034
 BGreen='\033[1;32m'
+# shellcheck disable=SC2034
 BYellow='\033[1;33m'
+# shellcheck disable=SC2034
 NC='\033[0m'
 
 # --- Global variables ---
@@ -310,10 +314,11 @@ validate_network
 # Select mirrors - avoid SIGPIPE from head
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+MIRROR_TMP="/tmp/mirrorlist.tmp"
 curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
-    sed -e 's/^#Server/Server/' -e '/^#/d' > /tmp/mirrorlist.tmp
-head -20 /tmp/mirrorlist.tmp > /etc/pacman.d/mirrorlist
-rm -f /tmp/mirrorlist.tmp
+    sed -e 's/^#Server/Server/' -e '/^#/d' > "$MIRROR_TMP"
+head -20 "$MIRROR_TMP" > /etc/pacman.d/mirrorlist
+rm -f "$MIRROR_TMP"
 
 # Detect and setup TPM
 detect_tpm || true
@@ -812,7 +817,7 @@ shred -vzu /mnt/ssh.sh 2>/dev/null || true
 arch-chroot /mnt bash -c "pacman -Scc --noconfirm"
 
 # Clear bash history
-arch-chroot /mnt bash -c "history -c && rm -f /root/.bash_history"
+arch-chroot /mnt bash -c 'history -c && rm -f "$HOME/.bash_history"'
 
 # -----------------------
 # 14. COMPLETION
