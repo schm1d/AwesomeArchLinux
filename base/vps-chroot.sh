@@ -878,10 +878,10 @@ echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${N
 groupadd compilers 2>/dev/null || true
 usermod -aG compilers "$USERNAME"
 for compiler in gcc g++ clang make as ld; do
-    if command -v "$compiler" &> /dev/null; then
-        chown root:compilers "$(which $compiler)"
-        chmod 750 "$(which $compiler)"
-    fi
+    local compiler_path
+    compiler_path=$(command -v "$compiler" 2>/dev/null) || continue
+    chown root:compilers "$compiler_path"
+    chmod 750 "$compiler_path"
 done
 
 # Set default ACLs on home directories

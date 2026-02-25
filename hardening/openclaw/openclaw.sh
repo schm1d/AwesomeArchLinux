@@ -996,7 +996,7 @@ chown -R "$OC_USER:$OC_USER" "$OC_HOME/.config"
 # Detect openclaw binary path
 OPENCLAW_BIN=""
 if command -v openclaw &>/dev/null; then
-    OPENCLAW_BIN=$(which openclaw)
+    OPENCLAW_BIN=$(command -v openclaw)
     info "OpenClaw binary found: $OPENCLAW_BIN"
 elif [[ -x "/usr/local/bin/openclaw" ]]; then
     OPENCLAW_BIN="/usr/local/bin/openclaw"
@@ -1298,7 +1298,7 @@ if [[ "$WITH_APPARMOR" == true ]]; then
 
     if [[ -d "$APPARMOR_DIR" ]]; then
         # Resolve node binary path
-        NODE_BIN=$(which node 2>/dev/null || echo "/usr/bin/node")
+        NODE_BIN=$(command -v node 2>/dev/null || echo "/usr/bin/node")
         NODE_BIN_REAL=$(realpath "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")
 
         cat > "$APPARMOR_DIR/openclaw-gateway" <<EOF
