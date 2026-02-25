@@ -633,9 +633,11 @@ pacman -S --noconfirm fail2ban
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
-port    = "$SSH_PORT"
-logpath = %(sshd_log)s
+port    = ${SSH_PORT}
 maxretry = 5
+# OpenSSH 10.x splits into sshd, sshd-auth, sshd-session — match all via journal
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=sshd.service
 EOF
 
 systemctl enable fail2ban
@@ -825,15 +827,16 @@ configure_ssh() {
     cp "$SSH_CONFIG_FILE" "$SSH_CONFIG_FILE.bak"
   fi
 
+  # Values must NOT be quoted in SSH config
   install -Dm644 /dev/stdin "$SSH_CONFIG_FILE" <<EOF
- Host "$HOSTNAME"
-  HostName "$HOSTNAME"
-  Port "$SSH_PORT"
-  User "$USERNAME"
-  IdentityFile "$SSH_KEY_FILE"
+Host ${HOSTNAME}
+  HostName ${HOSTNAME}
+  Port ${SSH_PORT}
+  User ${USERNAME}
+  IdentityFile ${SSH_KEY_FILE}
   HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
-  KexAlgorithms curve25519-sha256@libssh.org,curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256
-  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+  KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+  Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
   MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
 EOF
 
@@ -872,7 +875,7 @@ chmod 600 "$SSH_KEY_FILE"
 chmod 644 "$SSH_KEY_FILE.pub"
 EOF
 chmod +x /usr/local/bin/rotate-ssh-keys.sh
-echo "0 0 1 */3 * /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
+echo "0 0 1 */3 * root /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
 
 sleep 1
 
@@ -1152,7 +1155,11 @@ mkdir -p /etc/systemd/system/sshd.service.d/
 cat > /etc/systemd/system/sshd.service.d/hardening.conf <<'EOF'
 [Service]
 PrivateTmp=yes
-NoNewPrivileges=yes
+# sshd spawns user shells that need sudo/su and PTY allocation.
+# NoNewPrivileges/RestrictSUIDSGID break sudo; PrivateDevices breaks PTYs;
+# RemoveIPC destroys shared memory on last session close;
+# RestrictNamespaces blocks containers/unshare in SSH sessions.
+NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/log /run
@@ -1163,16 +1170,10 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 IPAddressAllow=any
 IPAddressDeny=
-PrivateDevices=yes
-DevicePolicy=closed
-SystemCallFilter=@system-service @privileged @resources
-SystemCallErrorNumber=EPERM
-RestrictNamespaces=yes
+PrivateDevices=no
+DevicePolicy=auto
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RemoveIPC=yes
 Restart=on-failure
 RestartSec=5s
 EOF

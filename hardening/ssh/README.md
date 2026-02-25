@@ -84,7 +84,7 @@ Writes a complete hardened `sshd_config` (truncate, not append — avoids first-
 - All forwarding disabled (`DisableForwarding yes`)
 - X11 forwarding disabled
 - No compression, no user RC files, no user environment
-- `ClientAliveInterval 300`, `ClientAliveCountMax 0` (idle timeout)
+- `ClientAliveInterval 300`, `ClientAliveCountMax 3` (idle timeout ~15 min)
 - `RekeyLimit 512M 1h`
 - `VersionAddendum none` (hide software details)
 

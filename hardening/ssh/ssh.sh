@@ -141,10 +141,9 @@ DisableForwarding yes
 # --- Session ---
 X11Forwarding no
 Banner /etc/issue.net
-PrintLastLog yes
 RekeyLimit 512M 1h
 ClientAliveInterval 300
-ClientAliveCountMax 0
+ClientAliveCountMax 3
 TCPKeepAlive no
 Compression no
 PermitUserRC no
@@ -184,6 +183,14 @@ Host *
     ControlPersist 10m
     ControlPath ~/.ssh/sockets/%r@%h:%p
 SSH_CLIENT_EOF
+
+# Create ControlPath socket directory for SSH multiplexing
+ALLOWED_HOME=$(getent passwd "$ALLOWED_USERS" | cut -d: -f6)
+if [ -n "$ALLOWED_HOME" ]; then
+    mkdir -p "$ALLOWED_HOME/.ssh/sockets"
+    chown "$ALLOWED_USERS:$ALLOWED_USERS" "$ALLOWED_HOME/.ssh/sockets"
+    chmod 700 "$ALLOWED_HOME/.ssh/sockets"
+fi
 
 echo -e "${BBlue}Hardening permissions...${NC}"
 chown root:root /etc/ssh/sshd_config
@@ -260,6 +267,7 @@ fi
 echo -e "${BBlue}Rate Limiting to avoid brute-forcing...${NC}"
 if command -v nft &>/dev/null && nft list table inet filter &>/dev/null; then
     nft add rule inet filter input tcp dport "$SSH_PORT" ct state new limit rate 4/minute accept 2>/dev/null || true
+    nft add rule inet filter input tcp dport "$SSH_PORT" ct state new drop 2>/dev/null || true
     echo -e "${BGreen}nftables SSH rate-limit rule applied.${NC}"
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
     # iptables fallback (legacy kernel or VPS without nf_tables)

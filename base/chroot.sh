@@ -647,8 +647,10 @@ cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
 port    = ${SSH_PORT}
-logpath = %(sshd_log)s
 maxretry = 5
+# OpenSSH 10.x splits into sshd, sshd-auth, sshd-session — match all via journal
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=sshd.service
 EOF
 
 systemctl enable fail2ban
@@ -1432,41 +1434,26 @@ echo -e "${BBlue}Hardening SSH service...${NC}"
 mkdir -p /etc/systemd/system/sshd.service.d/
 cat > /etc/systemd/system/sshd.service.d/hardening.conf <<'EOF'
 [Service]
-# SSH-specific hardening
 PrivateTmp=yes
-NoNewPrivileges=yes
+# sshd spawns user shells that need sudo/su and PTY allocation.
+# NoNewPrivileges/RestrictSUIDSGID break sudo; PrivateDevices breaks PTYs;
+# RemoveIPC destroys shared memory on last session close;
+# RestrictNamespaces blocks containers/unshare in SSH sessions.
+NoNewPrivileges=no
 ProtectSystem=strict
-ProtectHome=read-only  # SSH needs to read authorized_keys
+ProtectHome=read-only
 ReadWritePaths=/var/log /run
-
-# Kernel protections
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-
-# Network restrictions
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 IPAddressAllow=any
 IPAddressDeny=
-
-# Device access
-PrivateDevices=yes
-DevicePolicy=closed
-
-# System call filtering
-SystemCallFilter=@system-service @privileged @resources
-SystemCallErrorNumber=EPERM
-
-# Additional security
-RestrictNamespaces=yes
+PrivateDevices=no
+DevicePolicy=auto
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RemoveIPC=yes
-
-# Restart on failure
 Restart=on-failure
 RestartSec=5s
 EOF
