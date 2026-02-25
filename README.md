@@ -136,7 +136,7 @@ AwesomeArchLinux/
 
 - **nftables** &mdash; Default deny policy, SSH rate limiting (2/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
 - **FireHOL** &mdash; Optional advanced firewall with IP blocklist integration from FireHOL's blocklist-ipsets repository. Configurable blocklist levels, automated daily updates via cron.
-- **iptables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script.
+- **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
 
 #### Mandatory Access Control (AppArmor)
 
@@ -226,7 +226,7 @@ AwesomeArchLinux/
 
 #### SSH Hardening
 
-- **Server** (`ssh.sh -u <user> [-p <port>]`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), writes a complete hardened `sshd_config` with post-quantum KEX (`sntrup761x25519-sha512`), AEAD-only ciphers (ChaCha20-Poly1305, AES-256-GCM, AES-128-GCM), ETM-only MACs, public-key-only authentication (passwords disabled), all forwarding disabled (`DisableForwarding yes`), strict session limits (MaxSessions 2, MaxAuthTries 3), client alive timeout (300s), VERBOSE logging, revoked keys file, and a legal warning banner. Validates config with `sshd -t` and automatically rolls back on failure. Rate limits via iptables.
+- **Server** (`ssh.sh -u <user> [-p <port>]`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), writes a complete hardened `sshd_config` with post-quantum KEX (`sntrup761x25519-sha512`), AEAD-only ciphers (ChaCha20-Poly1305, AES-256-GCM, AES-128-GCM), ETM-only MACs, public-key-only authentication (passwords disabled), all forwarding disabled (`DisableForwarding yes`), strict session limits (MaxSessions 2, MaxAuthTries 3), client alive timeout (300s), VERBOSE logging, revoked keys file, and a legal warning banner. Validates config with `sshd -t` and automatically rolls back on failure. Rate limits via nftables (iptables fallback on legacy VPS kernels).
 - **Client** (`ssh_client.sh`) &mdash; Generates Ed25519 key pair, configures SSH client with matching modern algorithms, hashes `known_hosts`, assists with public key deployment to servers.
 - **Key Rotation** &mdash; Automated quarterly SSH key rotation via cron.
 - See [`hardening/ssh/README.md`](hardening/ssh/README.md) for algorithm details and testing commands.

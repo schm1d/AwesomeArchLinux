@@ -10,7 +10,7 @@ Author: [Bruno Schmid](https://www.linkedin.com/in/schmidbruno/) X: @brulliant
 
 | Script | Purpose |
 |--------|---------|
-| `ssh.sh` | Server-side hardening (sshd_config, host keys, banner, iptables rate limiting) |
+| `ssh.sh` | Server-side hardening (sshd_config, host keys, banner, nftables/iptables rate limiting) |
 | `ssh_client.sh` | Client-side setup (key generation, ssh_config, public key deployment) |
 
 ---
@@ -107,9 +107,9 @@ Creates `/etc/issue.net` with an ASCII art banner and legal warning text.
 
 Runs `sshd -t` to validate the configuration before restarting. On failure, automatically rolls back to the backed-up config.
 
-### 6. Rate Limiting with iptables
+### 6. Rate Limiting (nftables / iptables)
 
-Adds conntrack-based rate limiting: drops IPs making more than 4 new SSH connections within 60 seconds. Persists rules via `iptables-save`.
+Adds rate limiting for SSH: allows up to 4 new connections per minute, dropping excess. Prefers nftables (integrates with the `inet filter` table created by the base installation). Falls back to iptables automatically on VPS kernels that lack the `nf_tables` module.
 
 ---
 
@@ -132,7 +132,7 @@ Adds conntrack-based rate limiting: drops IPs making more than 4 new SSH connect
 sudo ./ssh.sh -u myuser -p 2222
 ```
 
-The port is applied to sshd_config, iptables rules, and the banner.
+The port is applied to sshd_config, nftables rules, and the banner.
 
 ### Allow Multiple Users
 
@@ -171,9 +171,10 @@ After running the script:
    ssh -vvv -p <port> <username>@<server_ip> 2>&1 | grep "kex:"
    ```
 
-4. **Check iptables rules:**
+4. **Check firewall rules:**
    ```bash
-   sudo iptables -L INPUT -n --line-numbers
+   sudo nft list ruleset          # nftables
+   sudo iptables -L INPUT -n -v   # iptables fallback
    ```
 
 5. **Audit with ssh-audit:**
@@ -188,5 +189,5 @@ After running the script:
 
 - **Backup access:** Ensure you have console or out-of-band access before applying. The script backs up the original config automatically.
 - **Authorized keys:** Copy your public key to `~/.ssh/authorized_keys` on the server *before* disconnecting, as password authentication is disabled.
-- **iptables persistence:** Rules are saved to `/etc/iptables/iptables.rules` and the service is enabled. They persist across reboots.
+- **Firewall persistence:** nftables rules persist via `/etc/nftables.conf` and `nftables.service`. If the iptables fallback is used, rules are saved to `/etc/iptables/iptables.rules` with `iptables.service` enabled.
 - **Banner:** Modify `/etc/issue.net` to match your organization's legal requirements.

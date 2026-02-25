@@ -256,18 +256,29 @@ else
     exit 1
 fi
 
-# Rate limiting with iptables
-echo -e "${BBlue}Rate Limiting with iptables to avoid brute-forcing...${NC}"
-if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -m recent --set 2>/dev/null; then
-    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -m recent --set
-    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
-fi
-
-# Persist iptables rules
-if command -v iptables-save &>/dev/null; then
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/iptables.rules
-    systemctl enable iptables.service 2>/dev/null || true
+# Rate limiting — prefer nftables, fall back to iptables
+echo -e "${BBlue}Rate Limiting to avoid brute-forcing...${NC}"
+if command -v nft &>/dev/null && nft list table inet filter &>/dev/null; then
+    nft add rule inet filter input tcp dport "$SSH_PORT" ct state new limit rate 4/minute accept 2>/dev/null || true
+    echo -e "${BGreen}nftables SSH rate-limit rule applied.${NC}"
+elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
+    # iptables fallback (legacy kernel or VPS without nf_tables)
+    if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
+            -m limit --limit 4/min --limit-burst 4 -j ACCEPT 2>/dev/null; then
+        iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
+            -m limit --limit 4/min --limit-burst 4 -j ACCEPT
+        iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
+    fi
+    # Persist rules
+    if command -v iptables-save &>/dev/null; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/iptables.rules
+        systemctl enable iptables.service 2>/dev/null || true
+    fi
+    echo -e "${BGreen}iptables SSH rate-limit rule applied (legacy fallback).${NC}"
+else
+    echo -e "${BYellow}Neither nftables nor iptables is functional — skipping rate limiting.${NC}"
+    echo -e "${BYellow}Rate limiting is already configured if you ran the base installation.${NC}"
 fi
 
 echo -e "${BGreen}SSH hardening complete. Running on port ${SSH_PORT}.${NC}"

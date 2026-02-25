@@ -341,11 +341,43 @@ systemctl enable nftables.service
 # Start nftables — may fail on VPS kernels without nf_tables module support
 if nft list ruleset &>/dev/null; then
     systemctl start nftables.service
-    echo -e "${BBlue}Firewall configuration with nftables completed.${NC}"
+    echo -e "${BGreen}Firewall configuration with nftables completed.${NC}"
+elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
+    # nft backend unavailable but iptables works (legacy kernel module present)
+    echo -e "${BYellow}WARNING: nftables kernel module not available — falling back to iptables.${NC}"
+    systemctl disable nftables.service 2>/dev/null || true
+
+    # Flush existing rules and set default deny
+    iptables -F
+    iptables -X
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT ACCEPT
+
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+
+    # Allow established connections
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Drop invalid connections
+    iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+    # Allow SSH with rate limiting (matches nftables: 2/min for new connections)
+    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
+        -m limit --limit 2/min --limit-burst 2 -j ACCEPT
+    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
+
+    # Persist rules
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/iptables.rules
+    systemctl enable iptables.service 2>/dev/null || true
+
+    echo -e "${BGreen}Firewall configured with iptables (legacy fallback).${NC}"
 else
-    echo -e "${BYellow}WARNING: nftables not supported by this kernel (common on VPS).${NC}"
+    echo -e "${BYellow}WARNING: Neither nftables nor iptables is functional on this kernel.${NC}"
     echo -e "${BYellow}nftables is enabled and will start if the kernel supports it after reboot.${NC}"
-    echo -e "${BYellow}If your VPS uses iptables instead, configure iptables rules manually.${NC}"
+    echo -e "${BYellow}You may need to configure firewall rules manually once the system is booted.${NC}"
 fi
 
 ###############################################################################
