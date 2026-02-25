@@ -292,32 +292,104 @@ Custom `/etc/sudoers` with: secure path, env reset with curated keep list, `requ
 
 #### Systemd Service Hardening
 
-Granular per-service hardening overrides for 15+ services:
+Granular per-service hardening overrides applied via drop-in files in `/etc/systemd/system/<service>.d/hardening.conf`.
 
-| Service | Key Restrictions |
-|---------|-----------------|
-| **sshd** | `ProtectHome=read-only`, strict syscall filter, device isolation |
-| **NetworkManager** | Minimal capabilities (`CAP_NET_ADMIN/RAW`), kernel protection |
-| **auditd** | Audit-specific capabilities, netlink-only networking |
-| **ClamAV** | Read-only system, task limit (4), file I/O syscalls only |
-| **fail2ban** | Net admin capabilities for nftables/iptables, log access |
-| **Stubby** | Runs as dedicated `stubby` user, network I/O only |
-| **systemd-resolved** | Netlink + inet networking, private temp/devices |
-| **chronyd** | `CAP_SYS_TIME`, clock syscalls allowed, no home access |
-| **rngd** | Full isolation (generic hardening template) |
-| **systemd-journald** | Full isolation (generic hardening template) |
-| **nginx** | `CAP_NET_BIND_SERVICE` only, strict filesystem, syscall filter, private devices |
-| **Bluetooth** | Strict protection, AF_UNIX + AF_BLUETOOTH only (bare-metal) |
-| **CrowdSec** | `ProtectSystem=strict`, limited read-write paths |
-| **Postfix** | `CAP_NET_BIND_SERVICE`, strict filesystem, private temp |
-| **Node.js apps** | Per-app sandboxing, `MemoryDenyWriteExecute=no` (V8 JIT), capability bounding |
-| **PHP-FPM** | `ProtectSystem=strict`, `NoNewPrivileges`, restricted capabilities, private temp/devices |
-| **PostgreSQL** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE` for data directory, syscall filter |
-| **MariaDB** | `ProtectSystem=strict`, `CAP_DAC_OVERRIDE`, `CAP_IPC_LOCK`, private network |
-| **WordPress (nginx+FPM)** | Combined nginx + PHP-FPM hardening, `wp-cron.timer` replacement |
-| **OpenClaw Gateway** | User service, `IPAddressAllow=localhost`, `MemoryDenyWriteExecute=no` (V8 JIT), `ProtectHome=read-only` |
+##### Directive Reference
 
-Each override applies: `ProtectSystem=strict`, `NoNewPrivileges`, kernel module/tunable/log protection, syscall filtering, namespace/realtime/SUID restrictions, `MemoryDenyWriteExecute`, and private temp/devices.
+Every directive below is a systemd `[Service]` option. Understanding what each one does — and what it **breaks** — is critical to avoiding service failures.
+
+**Filesystem Protection**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `ProtectSystem=strict` | Makes the entire filesystem tree read-only. Only paths listed in `ReadWritePaths=` are writable. | Service cannot write state, PID files, logs, or caches unless every writable path is listed. Most services need at minimum `/run` for PID/sockets. |
+| `ProtectSystem=full` | Makes `/usr` and `/boot` read-only but leaves `/etc` and `/var` writable. Less restrictive than `strict`. | Less dangerous than `strict`, but services that write to `/usr` (rare) will fail. |
+| `ReadWritePaths=` | Whitelist of paths the service can write to when `ProtectSystem=strict` is active. Space-separated. | Forgetting a path means silent write failures. Common misses: `/run` (PID files, sockets), `/var/lib/<service>` (state), `/etc/<service>` (dynamic config). |
+| `ProtectHome=yes` | Makes `/home`, `/root`, and `/run/user` completely inaccessible (empty). | **ClamAV** cannot scan user files. **sshd** cannot read `authorized_keys` (use `read-only` instead). Any service that reads user data breaks. |
+| `ProtectHome=read-only` | Makes home directories visible but read-only. | Services that write to home directories fail. Appropriate for sshd (reads `authorized_keys`) and ClamAV (scans files). |
+| `PrivateTmp=yes` | Gives the service its own `/tmp` and `/var/tmp` (isolated from other processes). | Breaks services that communicate with other processes via temp files. Safe for most services. |
+
+**Privilege Escalation**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `NoNewPrivileges=yes` | Prevents the service and ALL child processes from gaining privileges via setuid/setgid bits, file capabilities, or other mechanisms. Inherited by every spawned process. | **sshd**: breaks `sudo` for all SSH sessions (children inherit the flag). **fail2ban**: ban action scripts that call `sudo` or setuid binaries fail. Safe for leaf services that don't spawn user processes. |
+| `NoNewPrivileges=no` | Explicitly allows privilege escalation. Required for services that spawn user sessions (sshd) or execute setuid binaries (fail2ban ban actions). | No security restriction — this is the default. |
+| `RestrictSUIDSGID=yes` | Prevents creating or executing files with setuid/setgid bits. | Same impact as `NoNewPrivileges` for setuid — breaks `sudo`, `su`, `passwd`, `ping` in child processes. Must be `no` (or omitted) for sshd and fail2ban. |
+| `RemoveIPC=yes` | Destroys all System V and POSIX IPC objects (shared memory, semaphores, message queues) when the last process of the service exits. | **sshd**: destroys shared memory used by databases (PostgreSQL, Redis) when the last SSH session closes. **journald**: corrupts memory-mapped journal files during restart. |
+
+**Kernel Protection**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `ProtectKernelTunables=yes` | Makes `/proc/sys`, `/sys`, `/proc/sysrq-trigger`, and `/proc/acpi` read-only. | **NetworkManager**: cannot write to `/proc/sys/net/` (IP forwarding, rp_filter, IPv6 params). **Chrony**: cannot read kernel PLL status from `/proc/sys/kernel/`. **auditd**: cannot access `/proc/sys/kernel/audit*`. |
+| `ProtectKernelModules=yes` | Blocks `finit_module()`/`init_module()` syscalls and makes `/usr/lib/modules` inaccessible. | **NetworkManager**: cannot load VPN, bridge, VLAN, bonding, or WireGuard kernel modules on demand. Safe for services that never load modules. |
+| `ProtectKernelLogs=yes` | Blocks access to `/dev/kmsg` and `/proc/kmsg` (kernel log buffer). | **journald**: cannot capture kernel messages (`dmesg`). Safe for all other services. |
+| `ProtectControlGroups=yes` | Makes `/sys/fs/cgroup` read-only. | Safe for most services. Only breaks services that dynamically create or modify cgroups. |
+| `ProtectClock=yes` | Blocks `adjtimex()`, `clock_adjtime()`, and write access to `/dev/rtc`. | **Chrony**: cannot set system time (must be `no`). Safe for all non-NTP services. |
+
+**Device Access**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `PrivateDevices=yes` | Creates a private `/dev` mount with only pseudo-devices (`null`, `zero`, `full`, `random`, `urandom`). Hardware devices and `/dev/ptmx` are NOT available. | **sshd**: cannot allocate PTYs — interactive SSH sessions fail with "PTY allocation request failed". **rngd**: cannot access `/dev/hwrng`. Safe for network-only daemons (stubby, chrony, fail2ban). |
+| `DevicePolicy=closed` | Only allows access to pseudo-devices (`/dev/null`, `/dev/zero`, `/dev/random`). More restrictive than `auto`. | Similar to `PrivateDevices=yes`. Combined with it, doubly ensures no hardware access. |
+| `DevicePolicy=auto` | Default policy — no device restrictions. | No restriction. Use when `PrivateDevices=no` is needed. |
+
+**Memory & Execution**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `MemoryDenyWriteExecute=yes` | Blocks `mmap()` with `PROT_WRITE\|PROT_EXEC` and `mprotect()` to add `PROT_EXEC`. Prevents JIT compilation and self-modifying code. | **fail2ban**: Python's `ctypes`/`libffi` needs W^X trampolines — service crashes. **ClamAV**: bytecode JIT engine disabled, falls back to slow interpreter. **NetworkManager/Bluetooth**: GLib's `libffi` signal marshalling may crash. **Node.js/V8**: JIT broken. Safe for C daemons without JIT (stubby, chrony, sshd). |
+| `LockPersonality=yes` | Prevents changing the execution personality (e.g., switching to 32-bit mode). | Safe for virtually all services. |
+
+**System Call Filtering**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `SystemCallFilter=` | Whitelist of allowed syscall groups. Calls outside the list return `EPERM` (or `SIGSYS`). Common groups: `@system-service` (base), `@network-io`, `@file-system`, `@privileged`, `@clock`, `@module`, `@raw-io`. | **Replaces** (not extends) any upstream filter. If the upstream unit already has a tuned filter, your drop-in will override it — this is why **systemd-resolved** should NOT get a custom drop-in. Too-restrictive filters cause silent failures or crashes. |
+| `SystemCallErrorNumber=EPERM` | Blocked syscalls return `EPERM` instead of killing the process with `SIGSYS`. | Safer than the default (`SIGSYS`) — service gets an error code it can handle instead of being killed. Always use this with `SystemCallFilter`. |
+| `SystemCallArchitectures=native` | Only allows syscalls for the native architecture (blocks 32-bit compat). | Safe for most services. May break 32-bit binaries or multilib applications. |
+
+**Network Restrictions**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `RestrictAddressFamilies=` | Whitelist of allowed socket address families. Common: `AF_UNIX` (local), `AF_INET`/`AF_INET6` (network), `AF_NETLINK` (kernel comms), `AF_BLUETOOTH`. | Missing `AF_NETLINK` breaks iptables/nftables, routing, and many system queries. Missing `AF_INET6` breaks IPv6. **Bluetooth** needs `AF_BLUETOOTH`. **auditd** needs `AF_NETLINK`. |
+| `IPAddressAllow=` / `IPAddressDeny=` | IP-level firewall within systemd. `IPAddressDeny=any` blocks all network traffic. | Blocks ALL IP traffic including localhost. Use `IPAddressAllow=any` to override. |
+
+**Namespace & Misc Restrictions**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `RestrictNamespaces=yes` | Prevents creating new namespaces (mount, UTS, IPC, PID, network, user, cgroup). Inherited by child processes. | **sshd**: user sessions cannot use `podman`, `flatpak`, `unshare`, `systemd-run --user`, or any containerization tool. Safe for leaf services. |
+| `RestrictRealtime=yes` | Blocks realtime scheduling policies (`SCHED_FIFO`, `SCHED_RR`). | Safe for most services. Only breaks services that explicitly need realtime scheduling (audio, some databases). |
+| `RestrictSUIDSGID=yes` | Prevents creating files with setuid/setgid bits and executing them. | See `NoNewPrivileges` — same impact on sudo/su. |
+| `CapabilityBoundingSet=` | Limits which Linux capabilities the service can hold. Empty value (`=`) drops ALL capabilities. | Empty bounding set breaks any service that needs privileged operations. **rngd** needs `CAP_SYS_ADMIN`. **Chrony** needs `CAP_SYS_TIME`. **NetworkManager** needs `CAP_NET_ADMIN`. |
+| `AmbientCapabilities=` | Grants capabilities to non-root processes. Used with `User=` to give specific powers without running as root. | Must be paired with a matching `CapabilityBoundingSet` that includes the capability. |
+
+**Resource Limits**
+
+| Directive | What it does | What it breaks if misused |
+|-----------|-------------|--------------------------|
+| `TasksMax=` | Maximum number of threads/processes the service can create. | **ClamAV** with `TasksMax=4` is starved — default `MaxThreads` is 12. **journald** with low limits drops log connections. Set to at least the service's expected thread count. |
+| `LimitNOFILE=` | Maximum open file descriptors. | **journald** default is 524288; setting 1024 causes log loss. Set appropriately per service. |
+
+##### Per-Service Hardening Applied
+
+| Service | Key Settings | Notes |
+|---------|-------------|-------|
+| **sshd** | `ProtectSystem=strict`, `ProtectHome=read-only`, `NoNewPrivileges=no`, `PrivateDevices=no` | sshd spawns user shells — must allow sudo, PTY allocation, and privilege escalation. No syscall filter (too restrictive for user sessions). |
+| **NetworkManager** | `ProtectSystem=strict`, `ReadWritePaths=...`, `ProtectKernelTunables=no`, `ProtectKernelModules=no`, `NoNewPrivileges=no` | Needs to load modules, write tunables, manage devices. No `MemoryDenyWriteExecute` (GLib/libffi). |
+| **auditd** | `ProtectSystem=full`, `ReadWritePaths=/var/log/audit /run`, `AF_UNIX AF_NETLINK` | Manages kernel audit subsystem. Needs netlink for audit interface. Cannot use `strict` or `ProtectKernelTunables`. |
+| **ClamAV** | `ProtectSystem=strict`, `ProtectHome=read-only`, `TasksMax=16` | Needs to read home dirs for scanning. No `MemoryDenyWriteExecute` (bytecode JIT). |
+| **fail2ban** | `ProtectSystem=strict`, `NoNewPrivileges=no`, `CAP_NET_ADMIN CAP_NET_RAW` | Python app — no `MemoryDenyWriteExecute`. Ban actions may need privilege escalation. |
+| **Stubby** | `User=stubby`, `ProtectSystem=strict`, `PrivateDevices=yes`, `AF_UNIX AF_INET AF_INET6` | Dedicated user, network I/O only. Safe for full isolation. |
+| **Chrony** | `ProtectKernelTunables=no`, `ProtectClock=no`, `CAP_SYS_TIME`, `@clock` syscalls | Needs kernel tunable reads and clock adjustment. |
+| **Bluetooth** | `ProtectSystem=strict`, `ReadWritePaths=/var/lib/bluetooth /run`, `AF_UNIX AF_BLUETOOTH` | Needs to save pairing data. No `MemoryDenyWriteExecute` (GLib). Bare-metal only. |
+| **systemd-resolved** | No custom drop-in — upstream is already hardened | Custom drop-ins replace (not extend) upstream's tuned syscall filter, breaking resolved. |
+| **systemd-journald** | No custom drop-in — upstream is already hardened | Needs `/dev/kmsg`, capabilities, full proc access. Generic templates break all logging. |
+| **rngd** | No custom drop-in — needs `/dev/hwrng` and `CAP_SYS_ADMIN` | Generic templates block device access and drop capabilities, making it useless. |
 
 #### Anti-Malware & Intrusion Detection
 
