@@ -1030,15 +1030,13 @@ EOF
 
   # Systemd override (using install -Dm)
   mkdir -p /etc/systemd/system/bluetooth.service.d
-cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf # Install with correct permissions
+cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
 [Service]
 ProtectSystem=strict
+ReadWritePaths=/var/lib/bluetooth /run
 ProtectHome=read-only
 PrivateTmp=true
-NoNewPrivileges=true
-CapabilityBoundingSet=~CAP_SYS_ADMIN
 RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-MemoryDenyWriteExecute=true
 EOF
 
     systemctl daemon-reload
@@ -1463,32 +1461,19 @@ echo -e "${BBlue}Hardening NetworkManager...${NC}"
 mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
-# NetworkManager needs some privileges for network management
 ProtectSystem=strict
+ReadWritePaths=/var/lib/NetworkManager /run/NetworkManager /etc/NetworkManager /etc/resolv.conf
 ProtectHome=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
+ProtectKernelTunables=no
+ProtectKernelModules=no
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
-
-# Network operations need certain capabilities
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
-NoNewPrivileges=no  # NM needs to acquire privileges
-
-# Device access for network interfaces
+NoNewPrivileges=no
 PrivateDevices=no
 DevicePolicy=auto
-
-# System calls - NM needs broader access
-SystemCallFilter=@system-service @module @raw-io @privileged
-SystemCallErrorNumber=EPERM
-
-RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-
 Restart=on-failure
 RestartSec=5s
 EOF
@@ -1519,33 +1504,20 @@ mkdir -p /etc/systemd/system/clamav-daemon.service.d/
 cat > /etc/systemd/system/clamav-daemon.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 ReadWritePaths=/var/lib/clamav /var/log/clamav /run
-
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
-
-SystemCallFilter=@system-service @file-system @io-event
-SystemCallErrorNumber=EPERM
-
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-
-# Resource limits for scanning
-LimitNICE=19
 LimitNOFILE=8192
-TasksMax=4
-
+TasksMax=16
 Restart=on-failure
 RestartSec=10s
 EOF
@@ -1558,29 +1530,17 @@ cat > /etc/systemd/system/fail2ban.service.d/hardening.conf <<'EOF'
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/fail2ban /var/log /run/fail2ban
-
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-
-# fail2ban needs CAP_NET_ADMIN and CAP_NET_RAW for iptables
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
-NoNewPrivileges=yes
-
+NoNewPrivileges=no
 PrivateTmp=yes
 PrivateDevices=yes
-
-SystemCallFilter=@system-service @network-io @privileged
-SystemCallErrorNumber=EPERM
-
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-
 Restart=on-failure
 RestartSec=5s
 EOF
@@ -1627,37 +1587,9 @@ Restart=always
 RestartSec=5s
 EOF
 
-# systemd-resolved hardening
-echo -e "${BBlue}Hardening systemd-resolved...${NC}"
-mkdir -p /etc/systemd/system/systemd-resolved.service.d/
-cat > /etc/systemd/system/systemd-resolved.service.d/hardening.conf <<'EOF'
-[Service]
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/run/systemd/resolve
-
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-
-SystemCallFilter=@system-service @network-io
-SystemCallErrorNumber=EPERM
-
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-RestrictNamespaces=yes
-RestrictRealtime=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-
-Restart=on-failure
-RestartSec=5s
-EOF
+# systemd-resolved is already well-hardened by its upstream unit file.
+# A custom drop-in would replace (not extend) its tuned SystemCallFilter,
+# which can break resolved. Trust the upstream hardening.
 
 # Chrony NTP hardening
 echo -e "${BBlue}Hardening Chrony NTP...${NC}"
@@ -1667,40 +1599,28 @@ cat > /etc/systemd/system/chronyd.service.d/hardening.conf <<'EOF'
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/chrony /var/log/chrony /run
-
-ProtectKernelTunables=yes
+ProtectKernelTunables=no
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-ProtectClock=no  # Chrony needs to set system time
-
+ProtectClock=no
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
-
-# Chrony needs CAP_SYS_TIME
 CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_SYS_TIME
-
 SystemCallFilter=@system-service @clock
 SystemCallErrorNumber=EPERM
-
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-
 Restart=on-failure
 RestartSec=5s
 EOF
 
-# Apply hardening to other common services
-for service in rngd.service systemd-journald.service; do
-    echo -e "${BBlue}Hardening ${service}...${NC}"
-    harden_systemd_service "$service"
-done
+# NOTE: systemd-journald and rngd are NOT hardened via the generic template.
+# journald is already well-hardened upstream; the generic template breaks logging.
+# rngd needs direct device access (/dev/hwrng) which the generic template blocks.
 
 # Reload systemd to apply all changes
 echo -e "${BBlue}Reloading systemd daemon to apply hardening...${NC}"
