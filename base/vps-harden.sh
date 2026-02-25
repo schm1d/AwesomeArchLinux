@@ -727,9 +727,9 @@ create_var_filesystem() {
                 info "[DRY-RUN] Would create partition and format for /var"
                 return 0
             fi
-            # Find next partition number
+            # Find next partition number by counting existing partitions (not the disk itself)
             local last_part
-            last_part=$(lsblk -n -o NAME "$PARENT_DISK" | grep -c '^[^[:space:]]' || echo 0)
+            last_part=$(lsblk -ln -o TYPE "$PARENT_DISK" | grep -c '^part$' || echo 0)
             local next_part=$((last_part + 1))
             # Determine partition suffix
             local part_suffix=""
@@ -832,27 +832,59 @@ migrate_var_data() {
         warn "File count mismatch > 10, proceeding anyway (services were writing)"
     fi
 
-    # Step 5: Swap directories
+    # Step 5: Swap directories and mount — with rollback on failure
+    #
+    # Once we move /var to /var.old, any failure must undo the swap.
+    # We use a helper function so set -e doesn't exit mid-rollback.
     umount /mnt/newvar
+
+    _rollback_var() {
+        warn "Rolling back /var migration..."
+        umount /var 2>/dev/null || true
+        rm -rf /var 2>/dev/null || true
+        mv /var.old /var
+        cp "$FSTAB_BACKUP" /etc/fstab
+        warn "/var restored from /var.old and fstab reverted."
+    }
+
     mv /var /var.old
     mkdir /var
 
     # Step 6: Mount new /var
     if [[ "$VAR_STRATEGY" == "loop" ]]; then
-        mount -o loop,defaults,nosuid,nodev /root/var.img /var
-        # Add fstab entry for loop device
+        if ! mount -o loop,defaults,nosuid,nodev /root/var.img /var; then
+            _rollback_var
+            err "Failed to mount loop device on /var"
+        fi
         sed -i '\|^[^#].*[[:space:]]/var[[:space:]]|d' /etc/fstab
         echo "/root/var.img /var ext4 loop,defaults,nosuid,nodev 0 2" >> /etc/fstab
     else
-        mount -o defaults,nosuid,nodev "$VAR_DEVICE" /var
-        # Add fstab entry using UUID
+        if ! mount -o defaults,nosuid,nodev "$VAR_DEVICE" /var; then
+            _rollback_var
+            err "Failed to mount $VAR_DEVICE on /var"
+        fi
+        # Add fstab entry using UUID (fall back to device path if blkid fails)
         local var_uuid
         var_uuid=$(blkid -s UUID -o value "$VAR_DEVICE")
         sed -i '\|^[^#].*[[:space:]]/var[[:space:]]|d' /etc/fstab
-        echo "UUID=$var_uuid /var ext4 defaults,nosuid,nodev 0 2" >> /etc/fstab
+        if [[ -n "$var_uuid" ]]; then
+            echo "UUID=$var_uuid /var ext4 defaults,nosuid,nodev 0 2" >> /etc/fstab
+        else
+            warn "blkid returned empty UUID for $VAR_DEVICE — using device path in fstab"
+            echo "$VAR_DEVICE /var ext4 defaults,nosuid,nodev 0 2" >> /etc/fstab
+        fi
     fi
 
-    validate_fstab
+    # Validate fstab — rollback the entire swap if it fails
+    info "Validating fstab with mount -a --fake..."
+    local fstab_err
+    if fstab_err=$(mount -a --fake 2>&1); then
+        msg "fstab validation passed"
+    else
+        warn "fstab validation FAILED: $fstab_err"
+        _rollback_var
+        err "/var migration aborted — system restored to previous state."
+    fi
 
     # Step 7: Restart stopped services
     for svc in "${stopped_services[@]}"; do
