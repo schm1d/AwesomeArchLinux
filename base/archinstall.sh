@@ -382,8 +382,19 @@ fi
 echo -e "${BBlue}\nUser configuration:\n${NC}"
 USERNAME=$(ask_for_username)
 HOSTNAME=$(ask_for_hostname)
+
+# Ask for SSH public key (critical: password auth will be disabled)
+echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
+echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
+read -r SSH_PUBKEY
+if [[ -z "$SSH_PUBKEY" ]]; then
+    echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
+    echo -e "${BRed}You will need console access to add one after installation.${NC}"
+fi
+
 echo -e "\nUsername: $USERNAME"
-echo -e "Hostname: $HOSTNAME\n"
+echo -e "Hostname: $HOSTNAME"
+echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
 log_action "User: $USERNAME, Hostname: $HOSTNAME"
 
@@ -650,6 +661,7 @@ export INSTALL_CRYPT="$CRYPT_NAME"
 export INSTALL_LVM="$LVM_NAME"
 export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_DATE="$(date)"
 EOF
 chmod 600 /mnt/root/.install-env
@@ -661,6 +673,7 @@ export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 EOF
 
 chmod +x /mnt/set-install-vars.sh

@@ -28,6 +28,7 @@ TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
+SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
 # shellcheck disable=SC2034  # Referenced in GRUB config and comments
 CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
 LVM_NAME="lvm_arch"
@@ -856,6 +857,12 @@ echo -e "${BBlue}Hashing known_hosts file...${NC}"
 ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true # Suppress stderr if file doesn't exist
 
 touch "/home/$USERNAME/.ssh/authorized_keys"
+if [[ -n "$SSH_PUBKEY" ]]; then
+    echo "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
+    echo -e "${BGreen}SSH public key installed for $USERNAME.${NC}"
+else
+    echo -e "${BYellow}No SSH public key provided — add one manually before disconnecting.${NC}"
+fi
 chmod 700 "/home/$USERNAME/.ssh"
 chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"

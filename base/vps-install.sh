@@ -193,9 +193,19 @@ HOSTNAME=$(ask_for_hostname)
 read -p "SSH port (default 22): " SSH_PORT_INPUT
 SSH_PORT="${SSH_PORT_INPUT:-22}"
 
+# Ask for SSH public key (critical: password auth will be disabled)
+echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
+echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
+read -r SSH_PUBKEY
+if [[ -z "$SSH_PUBKEY" ]]; then
+    echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
+    echo -e "${BRed}You will need VPS console access to add one after installation.${NC}"
+fi
+
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
-echo -e "SSH Port: $SSH_PORT\n"
+echo -e "SSH Port: $SSH_PORT"
+echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
 log_action "User: $USERNAME, Hostname: $HOSTNAME, SSH Port: $SSH_PORT"
 
@@ -329,6 +339,7 @@ export INSTALL_HOST="$HOSTNAME"
 export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps"
 export INSTALL_SSH_PORT="$SSH_PORT"
+export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 EOF
 chmod 600 /mnt/root/.install-env
 
@@ -337,6 +348,7 @@ export _INSTALL_DISK="$DISK"
 export _INSTALL_USER="$USERNAME"
 export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_SSH_PORT="$SSH_PORT"
+export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_TYPE="vps"
 EOF
 
@@ -474,9 +486,12 @@ echo -e "${BBlue}Next steps:${NC}"
 echo "1. Reboot: reboot"
 echo "2. Login as root"
 echo "3. Run: /root/install-aur-packages.sh"
-echo "4. Add your SSH public key to /home/$USERNAME/.ssh/authorized_keys"
-echo "5. Test SSH access, then disable password authentication"
-echo "6. Review: /root/POST_INSTALL_README.txt"
+if [[ -n "$SSH_PUBKEY" ]]; then
+    echo "4. SSH key already installed — test: ssh -p $SSH_PORT $USERNAME@<server_ip>"
+else
+    echo "4. Add your SSH public key to /home/$USERNAME/.ssh/authorized_keys"
+fi
+echo "5. Review: /root/POST_INSTALL_README.txt"
 echo
 echo -e "${BGreen}SSH is configured on port $SSH_PORT${NC}"
 

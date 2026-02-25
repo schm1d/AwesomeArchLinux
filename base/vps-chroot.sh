@@ -30,6 +30,7 @@ DISK="${_INSTALL_DISK}"
 USERNAME="${_INSTALL_USER}"
 HOSTNAME="${_INSTALL_HOST}"
 SSH_PORT="${_INSTALL_SSH_PORT:-22}"
+SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
 TIMEZONE="Europe/Zurich"
 LOCALE="en_US.UTF-8"
 
@@ -837,6 +838,12 @@ EOF
   ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true
 
   touch "/home/$USERNAME/.ssh/authorized_keys"
+  if [[ -n "$SSH_PUBKEY" ]]; then
+      echo "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
+      echo -e "${BGreen}SSH public key installed for $USERNAME.${NC}"
+  else
+      echo -e "${BYellow}No SSH public key provided — add one manually before disconnecting.${NC}"
+  fi
   chmod 700 "/home/$USERNAME/.ssh"
   chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
   chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"

@@ -981,10 +981,19 @@ prompt_user_config() {
         done
     fi
 
+    # Prompt for SSH public key
+    echo -e "\n${C_WARN}Password authentication will be disabled after hardening.${C_NC}"
+    echo -e "${C_WARN}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${C_NC}"
+    read -r SSH_PUBKEY
+    if [[ -z "$SSH_PUBKEY" ]]; then
+        warn "No SSH public key provided — add one manually before disconnecting."
+    fi
+
     echo
     info "Username:  $USERNAME"
     info "Hostname:  $NEW_HOSTNAME"
     info "SSH port:  $SSH_PORT"
+    info "SSH key:   ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}"
     echo
 }
 
@@ -1003,6 +1012,7 @@ export INSTALL_HOST="$NEW_HOSTNAME"
 export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps-harden"
 export INSTALL_SSH_PORT="$SSH_PORT"
+export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 EOF
     chmod 600 /root/.install-env
     msg "Created /root/.install-env (INSTALL_TYPE=vps-harden)"
@@ -1053,6 +1063,7 @@ run_software_hardening() {
     export _INSTALL_USER="$USERNAME"
     export _INSTALL_HOST="$NEW_HOSTNAME"
     export _INSTALL_SSH_PORT="$SSH_PORT"
+    export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
     export _INSTALL_TYPE="vps-harden"
 
     info "Executing vps-chroot.sh (this will take several minutes)..."
