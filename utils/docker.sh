@@ -152,7 +152,6 @@ if [[ "$MODE" == "docker" ]]; then
     mkdir -p /etc/docker
 
     # Build the JSON — conditionally include seccomp-profile if available
-    local daemon_json
     daemon_json='{
     "icc": false,
     "no-new-privileges": true,
