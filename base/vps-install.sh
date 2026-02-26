@@ -319,7 +319,8 @@ echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
 cat >> /mnt/etc/fstab <<EOF
 
 # Security-hardened mount options
-tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
+# /tmp: noexec omitted — npm, Node.js, and build tools execute from /tmp
+tmpfs /tmp tmpfs rw,nosuid,nodev,relatime,size=2G 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
 proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0
 EOF
