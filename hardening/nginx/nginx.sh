@@ -230,9 +230,11 @@ server {
     server_name ${DOMAINS[*]};
 
     # ACME challenge
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
         root $WEBROOT;
         allow all;
+        default_type "text/plain";
+        try_files \$uri =404;
     }
 
     # Redirect everything else to HTTPS
@@ -453,9 +455,11 @@ server {
     server_name ${DOMAINS[*]};
 
     # ACME challenge (certbot renewal)
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
         root $WEBROOT;
         allow all;
+        default_type "text/plain";
+        try_files \$uri =404;
     }
 
     location / {
