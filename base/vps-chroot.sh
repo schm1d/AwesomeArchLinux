@@ -233,6 +233,9 @@ EOF
 
 # Ensure proper service ordering
 echo -e "${BBlue}Configuring service dependencies...${NC}"
+# Make resolved wait for stubby, but avoid ordering cycles by NOT placing
+# resolved before network-online.target (stubby needs network to reach
+# upstream TLS resolvers).
 mkdir -p /etc/systemd/system/systemd-resolved.service.d/
 cat <<EOF > /etc/systemd/system/systemd-resolved.service.d/stubby.conf
 [Unit]
@@ -244,45 +247,35 @@ Restart=on-failure
 RestartSec=5
 EOF
 
+# Break the stubby→network-online→resolved cycle: stubby only needs basic
+# network connectivity, not full network-online.target.
+mkdir -p /etc/systemd/system/stubby.service.d/
+cat > /etc/systemd/system/stubby.service.d/dependencies.conf <<'EOF'
+[Unit]
+After=network.target
+Wants=network.target
+# Remove any upstream dependency on network-online.target to avoid cycle
+# with systemd-resolved
+EOF
+
 echo -e "${BBlue}Setting up resolv.conf...${NC}"
 if [ -e /etc/resolv.conf ]; then
     mv -f /etc/resolv.conf /etc/resolv.conf.old 2>/dev/null || true
 fi
 
-# Temporary resolv.conf for chroot
+# Use a static resolv.conf that sends queries to stubby (127.0.0.1:53 via
+# resolved stub) with fallback public DNS if resolved hasn't started yet.
+# This avoids the fragile fix-resolv-conf oneshot service and the symlink
+# to stub-resolv.conf that breaks when resolved fails to start.
 cat > /etc/resolv.conf <<EOF
-nameserver 9.9.9.9
+# Primary: systemd-resolved stub (forwards to stubby on 127.0.0.1:8053)
+nameserver 127.0.0.53
+# Fallback: direct public DNS if resolved/stubby aren't running
 nameserver 1.1.1.1
+nameserver 9.9.9.9
 EOF
-
-# Create post-boot fix script
-cat > /usr/local/bin/fix-resolv-conf.sh <<'RESOLV_SCRIPT'
-#!/bin/bash
-if [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
-    rm -f /etc/resolv.conf
-fi
-if [ ! -e /etc/resolv.conf ]; then
-    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-fi
-RESOLV_SCRIPT
-chmod +x /usr/local/bin/fix-resolv-conf.sh
-
-cat > /etc/systemd/system/fix-resolv-conf.service <<EOF
-[Unit]
-Description=Fix resolv.conf symlink
-After=systemd-resolved.service
-Before=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fix-resolv-conf.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable fix-resolv-conf.service
+# Prevent NetworkManager / dhcpcd from overwriting resolv.conf
+chattr +i /etc/resolv.conf
 
 echo -e "${BBlue}Enabling DNS services...${NC}"
 systemctl daemon-reload
