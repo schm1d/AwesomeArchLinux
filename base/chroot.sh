@@ -334,8 +334,8 @@ table inet filter {
         # Drop invalid connections
         ct state invalid drop
 
-        # Allow SSH with rate limiting
-        tcp dport ${SSH_PORT} ct state new limit rate 2/minute accept
+        # Allow SSH with rate limiting (burst allows legitimate reconnects)
+        tcp dport ${SSH_PORT} ct state new limit rate 4/minute burst 8 packets accept
 
         # Drop everything else
         counter drop
@@ -817,8 +817,7 @@ set tabstospaces
 include "/usr/share/nano-syntax-highlighting/*.nanorc"
 NANO_EOF
 
-echo -e "${BBlue}Configuring and hardening SSH or port $SSH_PORT...${NC}"
-/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+echo -e "${BBlue}Staging SSH access for $USERNAME (authorized_keys first)...${NC}"
 
 # --- SSH Configuration ---
 configure_ssh() {
@@ -874,14 +873,16 @@ chmod 700 "/home/$USERNAME/.ssh"
 chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
 
-if [ -f "/ssh.sh" ]; then
-    shred -u /ssh.sh  # Only shred if /ssh.sh exists
-fi
-
 } # End of configure_ssh() function
 
 
 configure_ssh # Call the SSH configuration function
+
+# Now harden sshd — authorized_keys is already in place, so disabling
+# password auth won't cause a lockout.
+echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
+/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+shred -u /ssh.sh 2>/dev/null || true
 
 sleep 2
 
@@ -1445,7 +1446,9 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is required for PAM/auditd communication during session setup.
+# Without it, sshd drops connections immediately after authentication.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 IPAddressAllow=any
 IPAddressDeny=
 PrivateDevices=no

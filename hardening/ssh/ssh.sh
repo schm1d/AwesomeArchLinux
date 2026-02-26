@@ -62,6 +62,19 @@ if [ -z "$ALLOWED_USERS" ] || [ "$ALLOWED_USERS" = "root" ]; then
 fi
 echo -e "${BGreen}SSH access will be granted to: ${ALLOWED_USERS}${NC}"
 
+# SAFETY: refuse to disable password auth unless the allowed user already has
+# a usable authorized_keys file — prevents instant lockout.
+ALLOWED_HOME="$(getent passwd "$ALLOWED_USERS" | cut -d: -f6)"
+if [[ -z "${ALLOWED_HOME:-}" || ! -d "$ALLOWED_HOME" ]]; then
+    echo -e "${BRed}ERROR: Could not resolve home directory for ${ALLOWED_USERS}.${NC}" >&2
+    exit 1
+fi
+if [[ ! -s "${ALLOWED_HOME}/.ssh/authorized_keys" ]]; then
+    echo -e "${BRed}ERROR: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
+    echo -e "${BYellow}Refusing to apply PasswordAuthentication=no / AllowUsers / restart sshd (lockout prevention).${NC}" >&2
+    exit 1
+fi
+
 echo -e "${BBlue}Cleaning old keys...${NC}"
 if [ ! -d /etc/ssh ]; then
     echo -e "${BRed}ERROR: /etc/ssh does not exist. Is openssh installed?${NC}" >&2
@@ -95,7 +108,7 @@ cat > /etc/ssh/sshd_config << SSHD_EOF
 
 # --- Network ---
 Port ${SSH_PORT}
-AddressFamily inet
+AddressFamily any
 StrictModes yes
 
 # --- Host Keys ---
@@ -251,9 +264,14 @@ chmod 644 /etc/issue.net
 echo -e "${BBlue}Validating sshd configuration...${NC}"
 if sshd -t; then
     echo -e "${BGreen}Configuration valid.${NC}"
-    echo -e "${BBlue}Enabling and restarting SSHD...${NC}"
+    echo -e "${BBlue}Enabling and reloading SSHD...${NC}"
     systemctl enable sshd.service
-    systemctl restart sshd.service
+    if systemctl is-active --quiet sshd.service; then
+        # Reload preserves existing sessions; restart kills them via cgroup teardown
+        systemctl reload sshd.service || systemctl reload-or-restart sshd.service
+    else
+        systemctl start sshd.service
+    fi
     systemctl status sshd.service --no-pager
 else
     echo -e "${BRed}ERROR: sshd_config validation failed! NOT restarting.${NC}" >&2

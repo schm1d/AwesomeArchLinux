@@ -323,8 +323,8 @@ table inet filter {
         # Drop invalid connections
         ct state invalid drop
 
-        # Allow SSH with rate limiting
-        tcp dport $SSH_PORT ct state new limit rate 2/minute accept
+        # Allow SSH with rate limiting (burst allows legitimate reconnects)
+        tcp dport $SSH_PORT ct state new limit rate 4/minute burst 8 packets accept
 
         # Drop everything else
         counter drop
@@ -369,9 +369,9 @@ elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
     # Drop invalid connections
     iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
-    # Allow SSH with rate limiting (matches nftables: 2/min for new connections)
+    # Allow SSH with rate limiting (matches nftables: 4/min burst 8)
     iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-        -m limit --limit 2/min --limit-burst 2 -j ACCEPT
+        -m limit --limit 4/min --limit-burst 8 -j ACCEPT
     iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
 
     # Persist rules
@@ -808,8 +808,7 @@ echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/"$USERNAME"/.nanorc
 # SSH CONFIGURATION
 ###############################################################################
 
-echo -e "${BBlue}Configuring and hardening SSH on port $SSH_PORT...${NC}"
-/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+echo -e "${BBlue}Staging SSH access for $USERNAME (authorized_keys first)...${NC}"
 
 configure_ssh() {
   mkdir -p "/home/$USERNAME/.ssh"
@@ -855,13 +854,15 @@ EOF
   chmod 700 "/home/$USERNAME/.ssh"
   chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
   chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
-
-  if [ -f "/ssh.sh" ]; then
-      shred -u /ssh.sh
-  fi
 }
 
 configure_ssh
+
+# Now harden sshd — authorized_keys is already in place, so disabling
+# password auth won't cause a lockout.
+echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
+/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+shred -u /ssh.sh 2>/dev/null || true
 
 sleep 2
 
@@ -1167,7 +1168,9 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is required for PAM/auditd communication during session setup.
+# Without it, sshd drops connections immediately after authentication.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 IPAddressAllow=any
 IPAddressDeny=
 PrivateDevices=no
