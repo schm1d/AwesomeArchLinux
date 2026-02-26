@@ -1177,7 +1177,9 @@ PrivateTmp=yes
 # RestrictNamespaces blocks containers/unshare in SSH sessions.
 NoNewPrivileges=no
 ProtectSystem=strict
-ProtectHome=read-only
+# ProtectHome=read-only would make user home dirs read-only for all SSH
+# sessions (shells spawn as sshd children). Must be 'no' for usable logins.
+ProtectHome=no
 ReadWritePaths=/var/log /run
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
