@@ -146,7 +146,11 @@ fi
 
 msg "Preparing web directories..."
 mkdir -p "$WEBROOT/.well-known/acme-challenge"
+# /var/www must be traversable (755) so the http user and certbot can reach
+# the webroot. chown only the webroot itself, not the parent.
+chmod 755 /var/www
 chown -R http:http "$WEBROOT"
+chmod -R o+rX "$WEBROOT"
 
 mkdir -p /var/log/nginx
 mkdir -p /var/cache/nginx/client_temp
