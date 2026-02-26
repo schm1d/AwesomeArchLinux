@@ -404,11 +404,11 @@ add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; prelo
 # --- [2] Content-Security-Policy ---
 # Practical baseline that works with Google Fonts, analytics, and common CDNs.
 # Review and tighten for your specific application.
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://www.google-analytics.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://*.google-analytics.com https://*.googletagmanager.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://www.google-analytics.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://*.google-analytics.com https://*.googletagmanager.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests" always;
 
 # --- [3] Permissions-Policy ---
 # Deny all powerful browser APIs by default. Enable only what your app needs.
-add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), cross-origin-isolated=(), display-capture=(), encrypted-media=(), fullscreen=(self), geolocation=(), gyroscope=(), keyboard-map=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), sync-xhr=(self), usb=(), xr-spatial-tracking=()" always;
+add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(self), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), usb=(), xr-spatial-tracking=()" always;
 
 # --- [4] Referrer-Policy ---
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -421,9 +421,10 @@ add_header X-Content-Type-Options "nosniff" always;
 add_header X-Frame-Options "DENY" always;
 
 # --- [7] Cross-Origin-Embedder-Policy (COEP) ---
-# Requires all cross-origin resources to opt in via CORS or CORP.
-# Set to "unsafe-none" if your site loads third-party resources without CORS.
-add_header Cross-Origin-Embedder-Policy "require-corp" always;
+# Set to "unsafe-none" because we load cross-origin resources (Google Fonts,
+# Analytics) that don't set CORP/CORS headers. Use "require-corp" only for
+# sites that serve all resources from same-origin or CORS-enabled CDNs.
+add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
 
 # --- [8] Cross-Origin-Opener-Policy (COOP) ---
 # Isolates the browsing context to prevent XS-Leak attacks.
