@@ -248,6 +248,32 @@ systemctl enable nginx
 systemctl restart nginx
 
 # =============================================================================
+# 4b. OPEN FIREWALL PORTS (80/443)
+# =============================================================================
+
+msg "Opening firewall ports 80 (HTTP) and 443 (HTTPS)..."
+if command -v nft &>/dev/null && nft list table inet filter &>/dev/null 2>&1; then
+    # Insert before the final drop rule so they take effect
+    nft add rule inet filter input tcp dport 80 accept 2>/dev/null || true
+    nft add rule inet filter input tcp dport 443 accept 2>/dev/null || true
+    # Persist to nftables.conf if it exists
+    if [[ -f /etc/nftables.conf ]]; then
+        nft list ruleset > /etc/nftables.conf
+    fi
+    msg "nftables: ports 80/443 opened."
+elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null 2>&1; then
+    iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    if command -v iptables-save &>/dev/null; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/iptables.rules
+    fi
+    msg "iptables: ports 80/443 opened."
+else
+    warn "No firewall detected — ensure ports 80/443 are reachable."
+fi
+
+# =============================================================================
 # 5. OBTAIN CERTIFICATES
 # =============================================================================
 
