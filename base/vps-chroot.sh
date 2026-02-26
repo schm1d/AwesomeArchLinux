@@ -623,6 +623,17 @@ fi
 echo -e "${BBlue}Enabling serial console (for VPS provider console)...${NC}"
 systemctl enable serial-getty@ttyS0.service
 
+# Disable services that block the boot chain on manually provisioned VPS:
+# - cloud-init hangs when no metadata endpoint exists, blocking multi-user.target
+# - systemd-time-wait-sync blocks boot until NTP sync completes (chrony handles this)
+echo -e "${BBlue}Disabling cloud-init and time-wait-sync (VPS boot blockers)...${NC}"
+systemctl disable systemd-time-wait-sync.service 2>/dev/null || true
+for svc in cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service; do
+    systemctl disable "$svc" 2>/dev/null || true
+    systemctl mask "$svc" 2>/dev/null || true
+done
+systemctl disable cloud-init.target 2>/dev/null || true
+
 ###############################################################################
 # FAIL2BAN
 ###############################################################################
