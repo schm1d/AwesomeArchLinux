@@ -253,9 +253,9 @@ systemctl restart nginx
 
 msg "Opening firewall ports 80 (HTTP) and 443 (HTTPS)..."
 if command -v nft &>/dev/null && nft list table inet filter &>/dev/null 2>&1; then
-    # Insert before the final drop rule so they take effect
-    nft add rule inet filter input tcp dport 80 accept 2>/dev/null || true
-    nft add rule inet filter input tcp dport 443 accept 2>/dev/null || true
+    # Insert (not add) so rules land before the final drop rule
+    nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true
+    nft insert rule inet filter input tcp dport 443 accept 2>/dev/null || true
     # Persist to nftables.conf if it exists
     if [[ -f /etc/nftables.conf ]]; then
         nft list ruleset > /etc/nftables.conf
