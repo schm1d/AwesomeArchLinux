@@ -626,13 +626,14 @@ systemctl enable serial-getty@ttyS0.service
 # Disable services that block the boot chain on manually provisioned VPS:
 # - cloud-init hangs when no metadata endpoint exists, blocking multi-user.target
 # - systemd-time-wait-sync blocks boot until NTP sync completes (chrony handles this)
-echo -e "${BBlue}Disabling cloud-init and time-wait-sync (VPS boot blockers)...${NC}"
-systemctl disable systemd-time-wait-sync.service 2>/dev/null || true
-for svc in cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service; do
-    systemctl disable "$svc" 2>/dev/null || true
-    systemctl mask "$svc" 2>/dev/null || true
+# NOTE: systemctl disable/mask may not work inside chroot, so we create the
+# mask symlinks directly and remove the cloud-init package entirely.
+echo -e "${BBlue}Removing cloud-init and disabling time-wait-sync (VPS boot blockers)...${NC}"
+pacman -Rns --noconfirm cloud-init 2>/dev/null || true
+for svc in cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service cloud-init.target; do
+    ln -sf /dev/null "/etc/systemd/system/${svc}" 2>/dev/null || true
 done
-systemctl disable cloud-init.target 2>/dev/null || true
+ln -sf /dev/null /etc/systemd/system/systemd-time-wait-sync.service 2>/dev/null || true
 
 ###############################################################################
 # FAIL2BAN
