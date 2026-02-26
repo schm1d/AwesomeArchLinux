@@ -1439,11 +1439,10 @@ PrivateTmp=yes
 # RemoveIPC destroys shared memory on last session close;
 # RestrictNamespaces blocks containers/unshare in SSH sessions.
 NoNewPrivileges=no
-ProtectSystem=strict
-# ProtectHome=read-only would make user home dirs read-only for all SSH
-# sessions (shells spawn as sshd children). Must be 'no' for usable logins.
+# sshd spawns interactive user sessions — ProtectSystem/ProtectHome must be
+# 'no' or users can't install packages, write to /var, /etc, or /home.
+ProtectSystem=no
 ProtectHome=no
-ReadWritePaths=/var/log /run
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
