@@ -623,15 +623,18 @@ fi
 echo -e "${BBlue}Enabling serial console (for VPS provider console)...${NC}"
 systemctl enable serial-getty@ttyS0.service
 
-# Disable services that block the boot chain on manually provisioned VPS:
-# - cloud-init hangs when no metadata endpoint exists, blocking multi-user.target
-# - systemd-time-wait-sync blocks boot until NTP sync completes (chrony handles this)
-# NOTE: systemctl disable/mask may not work inside chroot, so we create the
-# mask symlinks directly and remove the cloud-init package entirely.
-echo -e "${BBlue}Removing cloud-init and disabling time-wait-sync (VPS boot blockers)...${NC}"
-pacman -Rns --noconfirm cloud-init 2>/dev/null || true
-for svc in cloud-init.service cloud-config.service cloud-final.service cloud-init-local.service cloud-init.target; do
-    ln -sf /dev/null "/etc/systemd/system/${svc}" 2>/dev/null || true
+# Prevent boot-blocking services from hanging indefinitely:
+# - cloud-init is required for provider networking but can hang if the metadata
+#   endpoint is slow or unreachable — cap it with TimeoutStartSec
+# - systemd-time-wait-sync blocks until NTP sync completes (chrony handles this)
+# NOTE: Use direct file writes — systemctl doesn't work inside chroot.
+echo -e "${BBlue}Adding boot timeouts for cloud-init and disabling time-wait-sync...${NC}"
+for svc in cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service; do
+    mkdir -p "/etc/systemd/system/${svc}.d"
+    cat > "/etc/systemd/system/${svc}.d/timeout.conf" <<'CEOF'
+[Service]
+TimeoutStartSec=30s
+CEOF
 done
 ln -sf /dev/null /etc/systemd/system/systemd-time-wait-sync.service 2>/dev/null || true
 
