@@ -3,6 +3,10 @@
 
 set -euo pipefail
 
+# Configurable names (override via environment variables)
+VG_NAME="${VG_NAME:-lvm_arch}"
+LUKS_NAME="${LUKS_NAME:-crypt_lvm}"
+
 # Colors
 BBlue='\033[1;34m'
 BRed='\033[1;31m'
@@ -39,15 +43,15 @@ unmount_all() {
     umount /mnt 2>/dev/null || true
     
     # Deactivate swap
-    swapoff /dev/mapper/lvm_arch-swap 2>/dev/null || true
-    
+    swapoff /dev/mapper/${VG_NAME}-swap 2>/dev/null || true
+
     # Deactivate LVM
     echo -e "${BBlue}Deactivating LVM...${NC}"
-    vgchange -an lvm_arch 2>/dev/null || true
-    
+    vgchange -an "$VG_NAME" 2>/dev/null || true
+
     # Close LUKS
     echo -e "${BBlue}Closing LUKS container...${NC}"
-    cryptsetup close crypt_lvm 2>/dev/null || true
+    cryptsetup close "$LUKS_NAME" 2>/dev/null || true
     
     echo -e "${BGreen}Everything unmounted successfully${NC}"
 }
@@ -68,42 +72,54 @@ remount_all() {
         PART_SUFFIX=""
     fi
     
-    PARTITION2="${DISK}${PART_SUFFIX}2"  # EFI
-    PARTITION3="${DISK}${PART_SUFFIX}3"  # LUKS
-    
+    # Detect partition count to handle both 3-partition (desktop/LUKS)
+    # and 2-partition (VPS) layouts
+    local part_count
+    part_count=$(lsblk -ln -o TYPE "$DISK" | grep -c '^part$' || echo 0)
+
+    if [[ "$part_count" -ge 3 ]]; then
+        # 3-partition layout: EFI(1) + boot(2) + LUKS(3)
+        EFI_PART="${DISK}${PART_SUFFIX}2"
+        LUKS_PART="${DISK}${PART_SUFFIX}3"
+    else
+        # 2-partition layout: EFI(1) + LUKS(2) or VPS layout
+        EFI_PART="${DISK}${PART_SUFFIX}1"
+        LUKS_PART="${DISK}${PART_SUFFIX}2"
+    fi
+
     # Open LUKS
     echo -e "${BBlue}Opening LUKS container...${NC}"
     if [ -f /root/boot.key ]; then
-        cryptsetup luksOpen "$PARTITION3" crypt_lvm --key-file /root/boot.key
+        cryptsetup luksOpen "$LUKS_PART" "$LUKS_NAME" --key-file /root/boot.key
     elif [ -f ./boot.key ]; then
-        cryptsetup luksOpen "$PARTITION3" crypt_lvm --key-file ./boot.key
+        cryptsetup luksOpen "$LUKS_PART" "$LUKS_NAME" --key-file ./boot.key
     else
         echo "No keyfile found, using password:"
-        cryptsetup luksOpen "$PARTITION3" crypt_lvm
+        cryptsetup luksOpen "$LUKS_PART" "$LUKS_NAME"
     fi
-    
+
     # Activate LVM
     echo -e "${BBlue}Activating LVM...${NC}"
     vgscan
-    vgchange -ay lvm_arch
-    
+    vgchange -ay "$VG_NAME"
+
     # Mount filesystems
     echo -e "${BBlue}Mounting filesystems...${NC}"
-    mount /dev/mapper/lvm_arch-root /mnt
-    mount /dev/mapper/lvm_arch-home /mnt/home
-    
+    mount /dev/mapper/${VG_NAME}-root /mnt
+    mount /dev/mapper/${VG_NAME}-home /mnt/home
+
     # Check if var exists
-    if [ -b /dev/mapper/lvm_arch-var ]; then
+    if [ -b /dev/mapper/${VG_NAME}-var ]; then
         mkdir -p /mnt/var
-        mount /dev/mapper/lvm_arch-var /mnt/var
+        mount /dev/mapper/${VG_NAME}-var /mnt/var
     fi
-    
+
     # Mount EFI
     mkdir -p /mnt/efi
-    mount "$PARTITION2" /mnt/efi
-    
+    mount "$EFI_PART" /mnt/efi
+
     # Activate swap
-    swapon /dev/mapper/lvm_arch-swap 2>/dev/null || true
+    swapon /dev/mapper/${VG_NAME}-swap 2>/dev/null || true
     
     echo -e "${BGreen}Everything mounted successfully${NC}"
 }

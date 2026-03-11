@@ -6,6 +6,25 @@
 
 set -euo pipefail
 
+# --- Cleanup on failure ---
+CLEANUP_ENABLED=0
+
+cleanup() {
+    if [[ "$CLEANUP_ENABLED" -eq 0 ]]; then
+        return
+    fi
+    echo "Cleanup triggered, undoing partial disk setup..." >&2
+    swapoff "/dev/mapper/${LVM_NAME:-lvm_arch}-swap" 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+    vgchange -an "${LVM_NAME:-lvm_arch}" 2>/dev/null || true
+    cryptsetup close "${CRYPT_NAME:-crypt_lvm}" 2>/dev/null || true
+    shred -zu ./boot.key 2>/dev/null || true
+    shred -zu ./recovery.key 2>/dev/null || true
+    shred -zu ./luks-header-backup.img 2>/dev/null || true
+}
+
+trap cleanup EXIT
+
 # --- Color variables (all used in echo -e strings) ---
 # shellcheck disable=SC2034
 BBlue='\033[1;34m'
@@ -392,6 +411,32 @@ if [[ -z "$SSH_PUBKEY" ]]; then
     echo -e "${BRed}You will need console access to add one after installation.${NC}"
 fi
 
+# Validate SSH public key to prevent shell injection when embedded in sourced files
+validate_ssh_pubkey() {
+    local key="$1"
+    if [[ -z "$key" ]]; then
+        return 0
+    fi
+    # Reject keys containing shell metacharacters that could enable injection
+    if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>] ]] || [[ "$key" == *$'\n'* ]]; then
+        echo -e "${BRed}Error: SSH public key contains invalid characters.${NC}" >&2
+        return 1
+    fi
+    # Verify key starts with a known SSH key type prefix
+    if ! [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2|sk-) ]]; then
+        echo -e "${BRed}Error: SSH public key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2, or sk-.${NC}" >&2
+        return 1
+    fi
+    return 0
+}
+
+if [[ -n "$SSH_PUBKEY" ]]; then
+    if ! validate_ssh_pubkey "$SSH_PUBKEY"; then
+        echo -e "${BRed}Invalid SSH public key. Aborting.${NC}"
+        exit 1
+    fi
+fi
+
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
@@ -454,12 +499,15 @@ sleep 2
 
 check_entropy
 
+CLEANUP_ENABLED=1
+
 echo -e "${BBlue}\nCreating LUKS container...${NC}"
 log_action "Creating LUKS container"
 
 # Create LUKS container
 cryptsetup -v \
-    --type luks1 \
+    --type luks2 \
+    --pbkdf pbkdf2 \
     --cipher aes-xts-plain64 \
     --key-size 512 \
     --hash sha512 \
@@ -467,6 +515,8 @@ cryptsetup -v \
     --use-random \
     --verify-passphrase \
     luksFormat "$PARTITION3"
+# Note: LUKS2 with --pbkdf pbkdf2 is required for GRUB compatibility.
+# GRUB 2.06+ supports LUKS2 but only with PBKDF2, not Argon2id.
 
 # Test password
 ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
@@ -474,8 +524,10 @@ ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
 # Create keys
 echo -e "${BBlue}Creating encryption keys...${NC}"
 check_entropy
+umask 077
 dd if=/dev/random of=./boot.key bs=512 count=8 iflag=fullblock
 dd if=/dev/random of=./recovery.key bs=512 count=8 iflag=fullblock
+umask 022
 
 # Add keys to LUKS
 echo -e "${BBlue}Adding keyfiles to LUKS container...${NC}"
@@ -810,6 +862,9 @@ fi
 # -----------------------
 # 13. CLEANUP
 # -----------------------
+
+# Disable cleanup trap; we are handling cleanup manually from here
+CLEANUP_ENABLED=0
 
 echo -e "${BBlue}Performing secure cleanup...${NC}"
 log_action "Performing cleanup"

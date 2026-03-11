@@ -90,7 +90,7 @@ echo_log "Generating keys and certificates (size=$KEY_SIZE, validity=$VALID_DAYS
   for var in PK KEK db dbx; do
     if efivar --list | grep -qi "^${var}-"; then
       efivars_dir=/sys/firmware/efi/efivars
-      cp "$efivars_dir/${var}-*.efi" "${name}_old_${var}.esl" || true
+      cp "$efivars_dir/${var}-*.efi" "${var}_old_${var}.esl" || true
     fi
   done
 
@@ -131,6 +131,6 @@ fi
 
 # Verify enrollment
 echo_log "Verifying Secure Boot variables"
-efibootmgr -v || echo_warn "Failed to list EFI boot entries"
+efibootmgr -v || echo_log "Failed to list EFI boot entries"
 
 echo_log "Secure Boot setup complete. Please reboot to activate."

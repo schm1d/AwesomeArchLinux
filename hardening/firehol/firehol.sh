@@ -77,11 +77,24 @@ install_yay() {
     echo_msg "Installing yay AUR helper"
     local tmpdir
     tmpdir=$(mktemp -d)
-    git clone https://aur.archlinux.org/yay.git "$tmpdir" \
-      && pushd "$tmpdir" \
-      && makepkg -si --noconfirm \
-      && popd \
-      && rm -rf "$tmpdir"
+    git clone https://aur.archlinux.org/yay.git "$tmpdir"
+
+    # makepkg refuses to run as root — use a temporary build user
+    if [[ ${EUID} -eq 0 ]]; then
+      local build_user="_makepkg"
+      useradd -r -M -d "$tmpdir" -s /usr/bin/nologin "$build_user" 2>/dev/null || true
+      chown -R "$build_user":"$build_user" "$tmpdir"
+      pushd "$tmpdir"
+      sudo -u "$build_user" makepkg -si --noconfirm
+      popd
+      userdel "$build_user" 2>/dev/null || true
+    else
+      pushd "$tmpdir"
+      makepkg -si --noconfirm
+      popd
+    fi
+
+    rm -rf "$tmpdir"
   fi
 }
 

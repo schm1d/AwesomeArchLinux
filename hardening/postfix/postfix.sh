@@ -344,7 +344,7 @@ ReadWritePaths=/var/spool/postfix /var/lib/postfix /var/log/mail
 
 # Privilege restrictions
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH CAP_KILL
 EOF
 
 systemctl daemon-reload

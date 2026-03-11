@@ -200,6 +200,12 @@ read -r SSH_PUBKEY
 if [[ -z "$SSH_PUBKEY" ]]; then
     echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
     echo -e "${BRed}You will need VPS console access to add one after installation.${NC}"
+elif [[ ! "$SSH_PUBKEY" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2|sk-ssh-|sk-ecdsa-) ]]; then
+    echo -e "${BRed}ERROR: SSH key must start with a valid key type prefix.${NC}" >&2
+    exit 1
+elif [[ "$SSH_PUBKEY" =~ [\$\`\(\)\{\}\;\|\&\<\>] ]] || [[ "$SSH_PUBKEY" == *$'\n'* ]]; then
+    echo -e "${BRed}ERROR: SSH key contains invalid shell metacharacters.${NC}" >&2
+    exit 1
 fi
 
 echo -e "\nUsername: $USERNAME"

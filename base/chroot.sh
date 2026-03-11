@@ -373,9 +373,9 @@ EOF
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
 systemctl enable rngd
-# NOTE: haveged is NOT installed — rng-tools is sufficient and haveged is
-# considered insecure in VM environments. Modern kernels (5.6+) have adequate
-# entropy from the jitterentropy module.
+# NOTE: haveged is also installed via pacstrap but is not enabled here —
+# rng-tools is preferred and haveged is considered insecure in VM environments.
+# Modern kernels (5.6+) have adequate entropy from the jitterentropy module.
 
 echo -e "${BBlue}Installing file security utility pax-utils & arch-audit...${NC}"
 pacman -S --noconfirm arch-audit pax-utils
@@ -578,8 +578,8 @@ echo -e "${BBlue}Configuring PAM to Log Failed Attempts...${NC}"
 
 # More umasking
 echo -e "${BBlue}Setting additional UMASK 027s...${NC}"
-echo "umask 027" >> /etc/profile
-echo "umask 027" >> /etc/bash.bashrc
+grep -qxF 'umask 027' /etc/profile    || echo "umask 027" >> /etc/profile
+grep -qxF 'umask 027' /etc/bash.bashrc || echo "umask 027" >> /etc/bash.bashrc
 
 # Disable unwanted protocols (truncate to avoid duplicates on re-run)
 echo -e "${BBlue}Disabling unwanted protocols...${NC}"
@@ -893,12 +893,28 @@ cat > /usr/local/bin/rotate-ssh-keys.sh <<'ROTATE_EOF'
 set -euo pipefail
 KEY_TYPE="ed25519"
 KEY_FILE="/home/REPLACE_USER/.ssh/id_${KEY_TYPE}"
+AUTH_KEYS="/home/REPLACE_USER/.ssh/authorized_keys"
 USERNAME="REPLACE_USER"
 HOSTNAME="REPLACE_HOST"
+# Save the old public key before overwriting
+OLD_PUBKEY=""
+if [[ -f "$KEY_FILE.pub" ]]; then
+    OLD_PUBKEY=$(cat "$KEY_FILE.pub")
+fi
 ssh-keygen -t "$KEY_TYPE" -f "$KEY_FILE" -q -N "" -C "${USERNAME}@${HOSTNAME}-$(date +%Y%m%d)"
 chown "$USERNAME:$USERNAME" "$KEY_FILE" "$KEY_FILE.pub"
 chmod 600 "$KEY_FILE"
 chmod 644 "$KEY_FILE.pub"
+# Update authorized_keys: remove old pubkey, add new one
+if [[ -f "$AUTH_KEYS" ]]; then
+    if [[ -n "$OLD_PUBKEY" ]]; then
+        grep -vF "$OLD_PUBKEY" "$AUTH_KEYS" > "$AUTH_KEYS.tmp" || true
+        mv "$AUTH_KEYS.tmp" "$AUTH_KEYS"
+    fi
+    cat "$KEY_FILE.pub" >> "$AUTH_KEYS"
+    chown "$USERNAME:$USERNAME" "$AUTH_KEYS"
+    chmod 600 "$AUTH_KEYS"
+fi
 ROTATE_EOF
 # Substitute placeholders with actual values (sed is safe here — controlled values)
 sed -i "s/REPLACE_USER/${USERNAME}/g; s/REPLACE_HOST/${HOSTNAME}/g" /usr/local/bin/rotate-ssh-keys.sh
@@ -1184,9 +1200,11 @@ set +e  # Temporarily disable 'exit on error'
 
 while true; do
   echo -e "${BBlue}Setting GRUB password...${NC}"
-  grub-mkpasswd-pbkdf2 | tee /tmp/grubpass
-  GRUB_PASS=$(grep 'grub.pbkdf2' /tmp/grubpass | awk '{print $NF}')
-  rm /tmp/grubpass
+  GRUB_TMPFILE=$(mktemp /tmp/grubpass.XXXXXX)
+  chmod 600 "$GRUB_TMPFILE"
+  grub-mkpasswd-pbkdf2 | tee "$GRUB_TMPFILE"
+  GRUB_PASS=$(grep 'grub.pbkdf2' "$GRUB_TMPFILE" | awk '{print $NF}')
+  rm -f "$GRUB_TMPFILE"
   if [[ -n "$GRUB_PASS" ]]; then
      break # Exit loop if the password was correctly created
   else

@@ -484,6 +484,10 @@ profile clamd /usr/bin/clamd flags=(enforce) {
 
   # Scan targets — needs read access to files submitted for scanning
   /tmp/**                          r,
+  /home/**                         r,
+  /var/**                          r,
+  /srv/**                          r,
+  /opt/**                          r,
 
   # Shared libraries
   /usr/lib/**                      mr,

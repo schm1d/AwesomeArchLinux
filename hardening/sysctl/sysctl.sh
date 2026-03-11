@@ -1,6 +1,7 @@
-#!/bin/bash 
-                               
-#Description    : Script to harden sysctl.conf settings 
+#!/bin/bash
+set -euo pipefail
+
+#Description    : Script to harden sysctl.conf settings
 #Author         : @brulliant                                                
 #Linkedin       : https://www.linkedin.com/in/schmidbruno/
 
@@ -38,12 +39,14 @@ echo "vm.mmap_min_addr = 65536" >> /etc/sysctl.d/99-sysctl.conf
 echo "vm.swappiness = 10" >> /etc/sysctl.d/99-sysctl.conf
 echo "vm.dirty_ratio = 10" >> /etc/sysctl.d/99-sysctl.conf
 echo "vm.dirty_background_ratio = 5" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.overcommit_memory = 2" >> /etc/sysctl.d/99-sysctl.conf 
-echo "vm.overcommit_ratio = 50" >> /etc/sysctl.d/99-sysctl.conf 
+# Use default heuristic overcommit (=0); strict no-overcommit (=2) breaks Redis, Java, and Node.js workloads
+echo "vm.overcommit_memory = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "vm.unprivileged_userfaultfd=0" >> /etc/sysctl.d/99-sysctl.conf # Restrict this syscall to the CAP_SYS_PTRACE capability to prevent use-after-free flaws.
-echo "kernel.unprivileged_userns_clone=0" >> /etc/sysctl.d/99-sysctl.conf
+# Allow unprivileged user namespaces — needed for Chromium, Electron, Firefox sandboxing, Podman rootless, and bubblewrap
+echo "kernel.unprivileged_userns_clone=1" >> /etc/sysctl.d/99-sysctl.conf
 
-echo "kernel.sysrq = 0" >> /etc/sysctl.d/99-sysctl.conf # Controls the System Request debugging functionality of the kernel
+# 176 = sync + unmount + reboot only, allowing emergency recovery without exposing dangerous SysRq functions
+echo "kernel.sysrq = 176" >> /etc/sysctl.d/99-sysctl.conf
 echo "kernel.core_uses_pid = 1" >> /etc/sysctl.d/99-sysctl.conf # Controls whether core dumps will append the PID to the core filename.Useful for debugging multi-threaded applications.
 echo "kernel.pid_max = 65535" >> /etc/sysctl.d/99-sysctl.conf # Allow for more PIDs
 
@@ -84,8 +87,6 @@ echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.neigh.default.gc_thresh1 = 32" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.neigh.default.gc_thresh2 = 1024" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.neigh.default.gc_thresh3 = 2048" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
 
 # Controls IP packet forwarding
 echo "net.ipv4.ip_forward = 0" >> /etc/sysctl.d/99-sysctl.conf
@@ -108,8 +109,9 @@ echo "net.ipv4.tcp_rfc1337 = 1" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.all.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 echo "net.ipv4.conf.default.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
 
-# Ignore all ICMP requests to avoid Smurf attacks, make the device more difficult to enumerate on the network, and prevent clock fingerprinting through ICMP timestamps.
-echo "net.ipv4.icmp_echo_ignore_all = 1" >> /etc/sysctl.d/99-sysctl.conf
+# Allow ICMP echo (ping) — disabling breaks network diagnostics and monitoring.
+# ICMP rate limiting (already set elsewhere) is sufficient protection.
+echo "net.ipv4.icmp_echo_ignore_all = 0" >> /etc/sysctl.d/99-sysctl.conf
 
 # Enable ignoring broadcasts request
 echo "net.ipv4.icmp_echo_ignore_broadcasts = 1" >> /etc/sysctl.d/99-sysctl.conf

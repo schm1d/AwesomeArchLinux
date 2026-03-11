@@ -1034,11 +1034,22 @@ run_software_hardening() {
         info "Using local vps-chroot.sh from $SCRIPT_DIR"
     else
         # Download from repository
+        # Note: curl -f (--fail) ensures a non-zero exit on HTTP errors (4xx/5xx)
         info "Downloading vps-chroot.sh from repository..."
         chroot_script="/tmp/vps-chroot.sh"
         curl -fsSL \
             "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-chroot.sh" \
             -o "$chroot_script" || err "Failed to download vps-chroot.sh"
+
+        # Basic integrity checks on the downloaded script
+        warn "vps-chroot.sh was downloaded from a remote source — review before trusting"
+        if ! head -1 "$chroot_script" | grep -qE '^#!.*bash'; then
+            err "Downloaded vps-chroot.sh does not start with a valid bash shebang"
+        fi
+        if ! grep -q '_INSTALL_USER' "$chroot_script"; then
+            err "Downloaded vps-chroot.sh is missing expected markers (_INSTALL_USER) — file may be corrupt"
+        fi
+        info "Integrity checks passed (shebang and expected markers present)"
     fi
 
     chmod +x "$chroot_script"

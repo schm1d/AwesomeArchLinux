@@ -417,8 +417,8 @@ add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 add_header X-Content-Type-Options "nosniff" always;
 
 # --- [6] X-Frame-Options ---
-# Prevents clickjacking. Use DENY unless you need to embed in same-origin iframes.
-add_header X-Frame-Options "DENY" always;
+# Prevents clickjacking. SAMEORIGIN allows same-origin iframes (OAuth popups, payment gateways).
+add_header X-Frame-Options "SAMEORIGIN" always;
 
 # --- [7] Cross-Origin-Embedder-Policy (COEP) ---
 # Set to "unsafe-none" because we load cross-origin resources (Google Fonts,
@@ -691,7 +691,7 @@ echo "  - Content-Security-Policy (strict baseline)"
 echo "  - Permissions-Policy (all APIs denied by default)"
 echo "  - Referrer-Policy (strict-origin-when-cross-origin)"
 echo "  - X-Content-Type-Options (nosniff)"
-echo "  - X-Frame-Options (DENY)"
+echo "  - X-Frame-Options (SAMEORIGIN)"
 echo "  - Cross-Origin-Embedder-Policy (require-corp)"
 echo "  - Cross-Origin-Opener-Policy (same-origin)"
 echo "  - Cross-Origin-Resource-Policy (same-origin)"
