@@ -118,6 +118,33 @@ ask_for_hostname() {
     done
 }
 
+ask_for_sysctl_profile() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select sysctl profile:${NC}" >&2
+        echo "1) security" >&2
+        echo "2) security+performance" >&2
+        echo "3) full-performance" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "security"; return 0 ;;
+            2) echo "security-performance"; return 0 ;;
+            3) echo "full-performance"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1, 2, or 3.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+describe_sysctl_profile() {
+    case "$1" in
+        security) echo "security" ;;
+        security-performance) echo "security+performance" ;;
+        full-performance) echo "full-performance" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 validate_network() {
     echo -e "${BBlue}Checking network connection...${NC}"
     if ! ping -c 1 archlinux.org &>/dev/null; then
@@ -208,12 +235,17 @@ elif [[ "$SSH_PUBKEY" =~ [\$\`\(\)\{\}\;\|\&\<\>] ]] || [[ "$SSH_PUBKEY" == *$'\
     exit 1
 fi
 
+echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
+SYSCTL_PROFILE=$(ask_for_sysctl_profile)
+SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
+
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
 echo -e "SSH Port: $SSH_PORT"
+echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, SSH Port: $SSH_PORT"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, SSH Port: $SSH_PORT, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 
 # -----------------------
 # 4. DISK PREPARATION
@@ -347,6 +379,7 @@ export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps"
 export INSTALL_SSH_PORT="$SSH_PORT"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 EOF
 chmod 600 /mnt/root/.install-env
 
@@ -356,6 +389,7 @@ export _INSTALL_USER="$USERNAME"
 export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_SSH_PORT="$SSH_PORT"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export _INSTALL_TYPE="vps"
 EOF
 
@@ -364,10 +398,39 @@ cp ./vps-chroot.sh /mnt/
 chmod +x /mnt/vps-chroot.sh
 
 # Copy hardening scripts
-if [ -f ../hardening/sysctl/sysctl.sh ]; then
-    cp ../hardening/sysctl/sysctl.sh /mnt/
-    chmod +x /mnt/sysctl.sh
-fi
+case "$SYSCTL_PROFILE" in
+    security)
+        if [ -f ../hardening/sysctl/sysctl.sh ]; then
+            cp ../hardening/sysctl/sysctl.sh /mnt/
+            chmod +x /mnt/sysctl.sh
+        else
+            echo -e "${BRed}Missing security sysctl baseline: ../hardening/sysctl/sysctl.sh${NC}" >&2
+            exit 1
+        fi
+        ;;
+    security-performance)
+        if [ -f ../hardening/sysctl/99-workstation-net.conf ]; then
+            cp ../hardening/sysctl/99-workstation-net.conf /mnt/sysctl-profile.conf
+            chmod 644 /mnt/sysctl-profile.conf
+        else
+            echo -e "${BRed}Missing security+performance sysctl profile: ../hardening/sysctl/99-workstation-net.conf${NC}" >&2
+            exit 1
+        fi
+        ;;
+    full-performance)
+        if [ -f ../hardening/sysctl/99-full-performance.conf ]; then
+            cp ../hardening/sysctl/99-full-performance.conf /mnt/sysctl-profile.conf
+            chmod 644 /mnt/sysctl-profile.conf
+        else
+            echo -e "${BRed}Missing full-performance sysctl profile: ../hardening/sysctl/99-full-performance.conf${NC}" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo -e "${BRed}Unknown sysctl profile: $SYSCTL_PROFILE${NC}" >&2
+        exit 1
+        ;;
+esac
 
 if [ -f ../hardening/ssh/ssh.sh ]; then
     cp ../hardening/ssh/ssh.sh /mnt/
@@ -419,6 +482,7 @@ Username: $USERNAME
 Disk: $DISK
 SSH Port: $SSH_PORT
 Boot Mode: $BOOT_MODE
+Sysctl Profile: $SYSCTL_PROFILE_LABEL
 
 CRITICAL POST-INSTALLATION STEPS:
 =================================
@@ -471,7 +535,7 @@ echo -e "${BBlue}Performing cleanup...${NC}"
 log_action "Performing cleanup"
 
 # Clean up scripts copied into chroot
-for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/ssh.sh; do
+for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/sysctl-profile.conf /mnt/ssh.sh; do
     [[ -f "$f" ]] && shred -vzu "$f" 2>/dev/null || true
 done
 

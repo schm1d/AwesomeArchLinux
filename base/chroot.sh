@@ -33,6 +33,7 @@ SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
 CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
 LVM_NAME="lvm_arch"
 INSTALL_TPM="${INSTALL_TPM:-false}"
+SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-security}}"
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -1656,19 +1657,25 @@ sleep 2
 # --- System Hardening (sysctl) ---
 harden_sysctl() {
 
-  echo -e "${BBlue}Applying sysctl hardening settings...${NC}"
+  echo -e "${BBlue}Applying sysctl profile: ${SYSCTL_PROFILE}...${NC}"
 
-  if [ ! -x "/sysctl.sh" ]; then #Check if the file exists and is executable
-    echo "Error: /sysctl.sh not found or not executable" >&2
-    exit 1
+  if [ -f "/sysctl-profile.conf" ]; then
+    install -m 0644 /sysctl-profile.conf /etc/sysctl.d/99-sysctl.conf
+    sysctl --load=/etc/sysctl.d/99-sysctl.conf
+    rm -f /sysctl-profile.conf
+    sleep 2
+    return
   fi
 
-  # Execute sysctl.sh and write output to sysctl config file.
-  /sysctl.sh
+  if [ -x "/sysctl.sh" ]; then
+    /sysctl.sh
+    sleep 2
+    shred -u /sysctl.sh
+    return
+  fi
 
-  sleep 2
-  
-  shred -u /sysctl.sh
+  echo "Error: no sysctl profile or sysctl.sh found" >&2
+  exit 1
 }
 
 harden_sysctl

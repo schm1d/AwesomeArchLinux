@@ -62,8 +62,9 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    - Username and hostname
    - LUKS encryption passphrase
    - TPM2 binding (if hardware is detected)
+   - Sysctl profile (`security`, `security+performance`, or `full-performance`)
 
-5. After partitioning and pacstrap, the script copies `chroot.sh` and `sysctl.sh` into the new system and enters chroot automatically.
+5. After partitioning and pacstrap, the script copies `chroot.sh` plus the selected sysctl helper/profile into the new system and enters chroot automatically.
 
 6. Inside chroot you will be prompted for:
    - User password
@@ -82,7 +83,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 - Generates a LUKS keyfile for unattended boot unlocking
 - Runs pacstrap with base, linux, linux-hardened, linux-firmware
 - Detects CPU vendor and installs microcode (intel-ucode / amd-ucode)
-- Copies chroot.sh and sysctl.sh, then enters arch-chroot
+- Copies chroot.sh plus the selected sysctl helper/profile, then enters arch-chroot
 
 ### What chroot.sh Does
 
@@ -113,7 +114,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 - Core dump disabled
 - Chrony NTP with network time synchronization
 - 15+ systemd service hardening overrides
-- 100+ sysctl kernel parameters (via sysctl.sh)
+- Applies the selected sysctl profile (`security`, `security+performance`, or `full-performance`)
 - Secure cleanup of install artifacts on exit
 
 ---
@@ -136,7 +137,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    sudo ./vps-install.sh
    ```
 
-3. The script auto-detects BIOS vs UEFI and adjusts accordingly.
+3. The script auto-detects BIOS vs UEFI and adjusts accordingly, then prompts for the sysctl profile to apply during chroot.
 
 ### Differences from Bare-Metal
 

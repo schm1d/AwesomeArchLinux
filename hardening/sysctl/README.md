@@ -1,15 +1,18 @@
 # Sysctl Hardening
 
-This module now ships with an example workstation profile and a companion guide:
+This module now ships with two alternative `.conf` profiles plus a companion guide:
 
-- [`99-workstation-net.conf`](./99-workstation-net.conf) - secure workstation + high-throughput network sysctl profile
+- [`99-workstation-net.conf`](./99-workstation-net.conf) - `security+performance` profile for hardened workstations and high-throughput hosts
+- [`99-full-performance.conf`](./99-full-performance.conf) - `full-performance` profile for trusted systems where throughput comes first
 - [`WORKSTATION.md`](./WORKSTATION.md) - non-sysctl checklist for memory pressure handling, THP, CPU policy, irqbalance, firewalling, and desktop tradeoffs
 
 ## Choosing the right profile
 
-- [`sysctl.sh`](./sysctl.sh) is the repo's broader hardening baseline and stays aimed at users who want the full opinionated sysctl set.
-- [`99-workstation-net.conf`](./99-workstation-net.conf) is a separate example for desktop and workstation installs. It intentionally avoids some of the stricter or older tuning-guide values that can be awkward on large developer machines.
-- To use the workstation profile, copy it to `/etc/sysctl.d/99-workstation-net.conf` and apply it with `sudo sysctl --system`.
+- [`sysctl.sh`](./sysctl.sh) is the `security` baseline used by the installers when you want the full opinionated hardening set.
+- [`99-workstation-net.conf`](./99-workstation-net.conf) is the install-time `security+performance` option. It keeps meaningful hardening while removing some of the harsher desktop-unfriendly tuning.
+- [`99-full-performance.conf`](./99-full-performance.conf) is the install-time `full-performance` option. It is intentionally lighter on hardening and focused on throughput and responsiveness.
+- The installers now let you choose `security`, `security+performance`, or `full-performance` during setup.
+- To use either `.conf` profile manually, copy it to `/etc/sysctl.d/99-sysctl.conf` and apply it with `sudo sysctl --system`.
 
 Below is a comprehensive list of the security hardening and performance configurations applied by `sysctl.sh`.
 

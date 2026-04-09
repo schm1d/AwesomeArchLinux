@@ -143,6 +143,33 @@ ask_for_hostname() {
     done
 }
 
+ask_for_sysctl_profile() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select sysctl profile:${NC}" >&2
+        echo "1) security" >&2
+        echo "2) security+performance" >&2
+        echo "3) full-performance" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "security"; return 0 ;;
+            2) echo "security-performance"; return 0 ;;
+            3) echo "full-performance"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1, 2, or 3.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+describe_sysctl_profile() {
+    case "$1" in
+        security) echo "security" ;;
+        security-performance) echo "security+performance" ;;
+        full-performance) echo "full-performance" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # Loop until cryptsetup open succeeds
 ask_luks_password_until_success() {
     local partition="$1"
@@ -437,11 +464,16 @@ if [[ -n "$SSH_PUBKEY" ]]; then
     fi
 fi
 
+echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
+SYSCTL_PROFILE=$(ask_for_sysctl_profile)
+SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
+
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
+echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -718,6 +750,7 @@ export INSTALL_LVM="$LVM_NAME"
 export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export INSTALL_DATE="$(date)"
 EOF
 chmod 600 /mnt/root/.install-env
@@ -730,6 +763,7 @@ export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
@@ -737,10 +771,39 @@ cp ./chroot.sh /mnt/
 chmod +x /mnt/chroot.sh
 
 # Copy hardening scripts
-if [ -f ../hardening/sysctl/sysctl.sh ]; then
-    cp ../hardening/sysctl/sysctl.sh /mnt/
-    chmod +x /mnt/sysctl.sh
-fi
+case "$SYSCTL_PROFILE" in
+    security)
+        if [ -f ../hardening/sysctl/sysctl.sh ]; then
+            cp ../hardening/sysctl/sysctl.sh /mnt/
+            chmod +x /mnt/sysctl.sh
+        else
+            echo -e "${BRed}Missing security sysctl baseline: ../hardening/sysctl/sysctl.sh${NC}" >&2
+            exit 1
+        fi
+        ;;
+    security-performance)
+        if [ -f ../hardening/sysctl/99-workstation-net.conf ]; then
+            cp ../hardening/sysctl/99-workstation-net.conf /mnt/sysctl-profile.conf
+            chmod 644 /mnt/sysctl-profile.conf
+        else
+            echo -e "${BRed}Missing security+performance sysctl profile: ../hardening/sysctl/99-workstation-net.conf${NC}" >&2
+            exit 1
+        fi
+        ;;
+    full-performance)
+        if [ -f ../hardening/sysctl/99-full-performance.conf ]; then
+            cp ../hardening/sysctl/99-full-performance.conf /mnt/sysctl-profile.conf
+            chmod 644 /mnt/sysctl-profile.conf
+        else
+            echo -e "${BRed}Missing full-performance sysctl profile: ../hardening/sysctl/99-full-performance.conf${NC}" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo -e "${BRed}Unknown sysctl profile: $SYSCTL_PROFILE${NC}" >&2
+        exit 1
+        ;;
+esac
 
 if [ -f ../hardening/ssh/ssh.sh ]; then
     cp ../hardening/ssh/ssh.sh /mnt/
@@ -791,6 +854,7 @@ Hostname: $HOSTNAME
 Username: $USERNAME
 Disk: $DISK (Type: $DEVICE_TYPE)
 TPM2 Enabled: $USE_TPM_LUKS
+Sysctl Profile: $SYSCTL_PROFILE_LABEL
 
 CRITICAL POST-INSTALLATION STEPS:
 =================================
@@ -883,6 +947,7 @@ shred -vzu ./tpm_luks.conf 2>/dev/null || true
 shred -vzu /mnt/chroot.sh 2>/dev/null || true
 shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl.sh 2>/dev/null || true
+shred -vzu /mnt/sysctl-profile.conf 2>/dev/null || true
 shred -vzu /mnt/ssh.sh 2>/dev/null || true
 
 # Clear pacman cache

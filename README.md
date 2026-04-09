@@ -81,8 +81,9 @@ AwesomeArchLinux/
 |   |   +-- ssh_client.sh    # SSH client configuration & key generation
 |   |   +-- README.md
 |   +-- sysctl/
-|   |   +-- sysctl.sh        # Kernel parameter hardening (100+ sysctl settings)
-|   |   +-- 99-workstation-net.conf  # Example secure workstation + high-throughput sysctl profile
+|   |   +-- sysctl.sh        # Security sysctl baseline (installer profile: security)
+|   |   +-- 99-workstation-net.conf  # Installer profile: security+performance
+|   |   +-- 99-full-performance.conf # Installer profile: full-performance
 |   |   +-- WORKSTATION.md   # Companion checklist for non-sysctl workstation tuning
 |   +-- totp/
 |   |   +-- totp.sh          # TOTP two-factor authentication for SSH
@@ -266,12 +267,18 @@ AwesomeArchLinux/
 
 #### Kernel Hardening (sysctl)
 
-Over 100 kernel parameters configured via `/etc/sysctl.d/99-sysctl.conf`:
+The installers now offer three sysctl profiles:
 
-- **Memory** &mdash; ASLR maximized (`vm.mmap_rnd_bits=32`), protected symlinks/hardlinks/FIFOs, restricted core dumps, `mmap_min_addr=65536`, strict overcommit.
-- **Network** &mdash; SYN flood protection (syncookies), source validation (reverse path filtering), disabled IP forwarding, disabled ICMP redirects, martian packet logging, TCP Fast Open, BBR congestion control, `challenge_ack_limit` CVE mitigation, keepalive tuning, large buffer sizes for performance.
+- **`security`** &mdash; the full hardening baseline applied by [`hardening/sysctl/sysctl.sh`](hardening/sysctl/sysctl.sh)
+- **`security+performance`** &mdash; the hardened high-throughput profile in [`hardening/sysctl/99-workstation-net.conf`](hardening/sysctl/99-workstation-net.conf)
+- **`full-performance`** &mdash; the throughput-first profile in [`hardening/sysctl/99-full-performance.conf`](hardening/sysctl/99-full-performance.conf)
+
+The default `security` profile configures over 100 kernel parameters via `/etc/sysctl.d/99-sysctl.conf`:
+
+- **Memory** &mdash; ASLR maximized (`vm.mmap_rnd_bits=32`), protected symlinks/hardlinks/FIFOs, restricted core dumps, `mmap_min_addr=65536`, and heuristic overcommit.
+- **Network** &mdash; SYN flood protection (syncookies), source validation (reverse path filtering), disabled IP forwarding, disabled ICMP redirects, martian packet logging, TCP Fast Open, BBR congestion control, `challenge_ack_limit` CVE mitigation, keepalive tuning, and large buffer sizes for performance.
 - **IPv6** &mdash; Disabled by default with all RA/redirect/source-route acceptance blocked.
-- **Kernel** &mdash; Restricted `dmesg`, `kptr`, `ptrace` (scope 2), BPF JIT hardened, `perf_event_paranoid=3`, panic on oops, kexec disabled, SysRq disabled.
+- **Kernel** &mdash; Restricted `dmesg`, `kptr`, `ptrace` (scope 2), BPF JIT hardened, `perf_event_paranoid=3`, panic on oops, kexec disabled, and limited SysRq.
 
 #### Kernel Boot Parameters
 
