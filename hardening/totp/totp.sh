@@ -90,7 +90,8 @@ fi
 # Verify the user exists
 id "$USERNAME" &>/dev/null || err "User '$USERNAME' does not exist"
 
-USER_HOME=$(eval echo "~$USERNAME")
+USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
+[[ -n "$USER_HOME" ]] || err "Could not resolve home directory for user '$USERNAME'"
 [[ -d "$USER_HOME" ]] || err "Home directory '$USER_HOME' does not exist for user '$USERNAME'"
 
 TOTP_SECRET="$USER_HOME/.google_authenticator"

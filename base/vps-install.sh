@@ -431,7 +431,7 @@ CRITICAL POST-INSTALLATION STEPS:
 2. SECURITY SERVICES:
    systemctl enable --now apparmor
    systemctl enable --now auditd
-   systemctl enable --now rkhunter.timer
+   systemctl enable --now rkhunter-check.timer
    systemctl enable --now arch-audit.timer
 
 3. FIREWALL:

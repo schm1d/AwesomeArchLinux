@@ -213,13 +213,13 @@ mkdir -p /var/cache/stubby
 chown stubby:stubby /var/cache/stubby
 chmod 750 /var/cache/stubby
 
-# Configure systemd-resolved to use Stubby
+# Configure systemd-resolved to use the local Stubby listener
+# In systemd-resolved, ':' selects the port; '#' is reserved for DNS server names.
 echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
 mkdir -p /etc/systemd/resolved.conf.d/
 cat <<EOF > /etc/systemd/resolved.conf.d/dns_over_tls.conf
 [Resolve]
-DNS=127.0.0.1#5353
-FallbackDNS=::1#5353
+DNS=127.0.0.1:5353 [::1]:5353
 Domains=~.
 DNSSEC=allow-downgrade
 DNSOverTLS=no
@@ -667,6 +667,7 @@ systemctl restart systemd-journald
 ###############################################################################
 
 echo -e "${BBlue}Hardening sudo...${NC}"
+groupadd -r proc 2>/dev/null || true
 groupadd sudo 2>/dev/null || true
 
 # Write sudoers atomically via temp file + visudo validation
@@ -1108,11 +1109,11 @@ fi
 # AUTOMATIC SECURITY UPDATES
 ###############################################################################
 
-echo -e "${BBlue}Setting up automatic security updates...${NC}"
+echo -e "${BBlue}Setting up daily package update checks...${NC}"
 pacman -S --noconfirm pacman-contrib
 cat <<EOF > /etc/systemd/system/pacman-autoupdate.timer
 [Unit]
-Description=Run pacman autoupdate daily
+Description=Run package update check daily
 
 [Timer]
 OnCalendar=daily
@@ -1121,13 +1122,14 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-cat <<EOF > /etc/systemd/system/pacman-autoupdate.service
+cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.service
 [Unit]
-Description=Check for available package updates
+Description=Check for available package updates (notification only)
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '/usr/bin/pacman -Sy && /usr/bin/pacman -Qu'
+# Sync databases and log available updates without automatically installing them.
+ExecStart=/bin/sh -c '/usr/bin/pacman -Sy && /usr/bin/pacman -Qu > /var/log/pacman-updates.log 2>&1 || true'
 EOF
 systemctl enable pacman-autoupdate.timer
 

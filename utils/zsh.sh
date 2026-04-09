@@ -50,10 +50,16 @@ fi
 # Install Oh My Zsh if not already installed
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
     echo -e "${BBlue}Installing Oh My Zsh...${NC}"
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)" "" --unattended
+    git clone https://github.com/ohmyzsh/ohmyzsh.git "$HOME/.oh-my-zsh"
 fi
 
 ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+ZSHRC="$HOME/.zshrc"
+
+# Seed .zshrc from the official template if needed.
+if [ ! -f "$ZSHRC" ] && [ -f "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" ]; then
+    cp "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$ZSHRC"
+fi
 
 # Install zsh-syntax-highlighting plugin
 if [ ! -d "$ZSH_CUSTOM/plugins/zsh-syntax-highlighting" ]; then
@@ -70,7 +76,6 @@ if [ ! -d "$ZSH_CUSTOM/plugins/zsh-autosuggestions" ]; then
 fi
 
 # Enable plugins in .zshrc
-ZSHRC="$HOME/.zshrc"
 if [ -f "$ZSHRC" ]; then
     if ! grep -q "zsh-syntax-highlighting" "$ZSHRC"; then
         echo -e "${BBlue}Enabling plugins in .zshrc...${NC}"

@@ -566,7 +566,7 @@ After rebooting:
    ```bash
    systemctl enable --now apparmor
    systemctl enable --now auditd
-   systemctl enable --now rkhunter.timer
+   systemctl enable --now rkhunter-check.timer
    systemctl enable --now arch-audit.timer
    ```
 

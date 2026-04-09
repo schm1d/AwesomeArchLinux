@@ -404,10 +404,24 @@ if findmnt -n /var &>/dev/null && [[ -d /var.old ]]; then
         systemctl stop "$svc" 2>/dev/null || true
     done
 
-    umount /var 2>/dev/null || warn "Failed to unmount /var"
-    rmdir /var 2>/dev/null || rm -rf /var
-    mv /var.old /var
-    msg "/var restored from /var.old"
+    if findmnt -n /var &>/dev/null; then
+        if ! umount /var 2>/dev/null; then
+            warn "Failed to unmount /var — refusing to remove the live /var directory"
+            warn "Manual recovery required: inspect /var and /var.old before restoring"
+        elif ! rmdir /var 2>/dev/null; then
+            warn "/var is not empty after unmount — refusing automatic deletion"
+            warn "Manual recovery required: inspect /var and /var.old before restoring"
+        else
+            mv /var.old /var
+            msg "/var restored from /var.old"
+        fi
+    elif rmdir /var 2>/dev/null; then
+        mv /var.old /var
+        msg "/var restored from /var.old"
+    else
+        warn "/var is not an empty rollback mountpoint — refusing automatic deletion"
+        warn "Manual recovery required: inspect /var and /var.old before restoring"
+    fi
 
     # Detach any loop devices for var.img
     if [[ -f /root/var.img ]]; then
@@ -844,13 +858,26 @@ migrate_var_data() {
 
     _rollback_var() {
         warn "Rolling back /var migration..."
-        umount /var 2>/dev/null || true
-        # Remove the empty mountpoint created during migration
-        local var_dir="/var"
-        [[ -d "$var_dir" ]] && rm -rf "$var_dir"
+
+        if findmnt -n /var &>/dev/null; then
+            if ! umount /var 2>/dev/null; then
+                warn "Failed to unmount /var — leaving the live /var directory untouched"
+                cp "$FSTAB_BACKUP" /etc/fstab
+                return 1
+            fi
+        fi
+
+        # Remove only the empty rollback mountpoint created during migration.
+        if ! rmdir /var 2>/dev/null; then
+            warn "/var is not an empty rollback mountpoint — refusing automatic deletion"
+            cp "$FSTAB_BACKUP" /etc/fstab
+            return 1
+        fi
+
         mv /var.old /var
         cp "$FSTAB_BACKUP" /etc/fstab
         warn "/var restored from /var.old and fstab reverted."
+        return 0
     }
 
     mv /var /var.old
@@ -859,14 +886,14 @@ migrate_var_data() {
     # Step 6: Mount new /var
     if [[ "$VAR_STRATEGY" == "loop" ]]; then
         if ! mount -o loop,defaults,nosuid,nodev /root/var.img /var; then
-            _rollback_var
+            _rollback_var || true
             err "Failed to mount loop device on /var"
         fi
         sed -i '\|^[^#].*[[:space:]]/var[[:space:]]|d' /etc/fstab
         echo "/root/var.img /var ext4 loop,defaults,nosuid,nodev 0 2" >> /etc/fstab
     else
         if ! mount -o defaults,nosuid,nodev "$VAR_DEVICE" /var; then
-            _rollback_var
+            _rollback_var || true
             err "Failed to mount $VAR_DEVICE on /var"
         fi
         # Add fstab entry using UUID (fall back to device path if blkid fails)
@@ -888,8 +915,11 @@ migrate_var_data() {
         msg "fstab validation passed"
     else
         warn "fstab validation FAILED: $fstab_err"
-        _rollback_var
-        err "/var migration aborted — system restored to previous state."
+        if _rollback_var; then
+            err "/var migration aborted — system restored to previous state."
+        else
+            err "/var migration aborted — automatic rollback could not safely restore /var. Manual recovery required."
+        fi
     fi
 
     # Step 7: Restart stopped services

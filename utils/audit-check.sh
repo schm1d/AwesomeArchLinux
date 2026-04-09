@@ -575,26 +575,35 @@ check_service_security() {
         result_fail "ClamAV freshclam is not enabled" "$(systemctl is-enabled clamav-freshclam 2>/dev/null || echo 'not found')"
     fi
 
-    # Automatic updates timer (various common names)
+    # Package update or security-audit timers (various common names)
     local auto_update=false
-    for timer in pacman-auto-update.timer arch-audit.timer unattended-upgrades.timer auto-update.timer; do
+    for timer in pacman-autoupdate.timer pacman-auto-update.timer arch-audit.timer unattended-upgrades.timer auto-update.timer; do
         if systemctl is-active --quiet "$timer" 2>/dev/null; then
             auto_update=true
-            result_pass "Automatic updates timer is active ($timer)"
+            result_pass "Package update/security audit timer is active ($timer)"
             break
         fi
     done
     if [[ "$auto_update" == false ]]; then
-        result_fail "No automatic updates timer found" "checked: pacman-auto-update, arch-audit, unattended-upgrades, auto-update"
+        result_fail "No package update/security audit timer found" "checked: pacman-autoupdate, pacman-auto-update, arch-audit, unattended-upgrades, auto-update"
     fi
 
     # rkhunter timer
-    if systemctl is-active --quiet rkhunter.timer 2>/dev/null; then
-        result_pass "rkhunter timer is active"
-    elif systemctl is-enabled --quiet rkhunter.timer 2>/dev/null; then
-        result_warn "rkhunter timer is enabled but not active" "enabled"
-    else
-        result_fail "rkhunter timer is not active" "$(systemctl is-enabled rkhunter.timer 2>/dev/null || echo 'not found')"
+    local rkhunter_timer=""
+    for timer in rkhunter-check.timer rkhunter.timer; do
+        if systemctl is-active --quiet "$timer" 2>/dev/null; then
+            rkhunter_timer="$timer"
+            result_pass "rkhunter timer is active ($timer)"
+            break
+        fi
+        if [[ -z "$rkhunter_timer" ]] && systemctl is-enabled --quiet "$timer" 2>/dev/null; then
+            rkhunter_timer="$timer"
+        fi
+    done
+    if [[ -n "$rkhunter_timer" ]] && ! systemctl is-active --quiet "$rkhunter_timer" 2>/dev/null; then
+        result_warn "rkhunter timer is enabled but not active" "$rkhunter_timer"
+    elif [[ -z "$rkhunter_timer" ]]; then
+        result_fail "rkhunter timer is not active" "checked: rkhunter-check.timer, rkhunter.timer"
     fi
 }
 

@@ -681,6 +681,10 @@ proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0
 EOF
 
 # Configure encrypted swap
+# genfstab captured the temporary raw swap LV we enabled during installation.
+# Replace it with the encrypted mapper device that will exist on boot.
+sed -i '/[[:space:]]none[[:space:]]swap[[:space:]]/d' /mnt/etc/fstab
+echo "/dev/mapper/swap none swap defaults 0 0" >> /mnt/etc/fstab
 echo "swap /dev/mapper/${LVM_NAME}-swap /dev/urandom swap,cipher=aes-xts-plain64,size=512" >> /mnt/etc/crypttab
 
 # Setup systemd for hidepid
@@ -798,7 +802,7 @@ CRITICAL POST-INSTALLATION STEPS:
 2. SECURITY SERVICES:
    systemctl enable --now apparmor
    systemctl enable --now auditd
-   systemctl enable --now rkhunter.timer
+   systemctl enable --now rkhunter-check.timer
    systemctl enable --now arch-audit.timer
 
 3. TPM2 ENROLLMENT (if TPM enabled):

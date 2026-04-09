@@ -219,14 +219,14 @@ mkdir -p /var/cache/stubby
 chown stubby:stubby /var/cache/stubby
 chmod 750 /var/cache/stubby
 
-# Configure systemd-resolved to use Stubby
+# Configure systemd-resolved to use the local Stubby listener
+# In systemd-resolved, ':' selects the port; '#' is reserved for DNS server names.
 echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
 mkdir -p /etc/systemd/resolved.conf.d/
 cat <<EOF > /etc/systemd/resolved.conf.d/dns_over_tls.conf
 [Resolve]
-# Use Stubby as the only DNS resolver
-DNS=127.0.0.1#5353
-FallbackDNS=::1#5353
+# Use the local Stubby listeners on port 5353 as the only upstream resolvers.
+DNS=127.0.0.1:5353 [::1]:5353
 Domains=~.
 DNSSEC=allow-downgrade
 DNSOverTLS=no
@@ -668,8 +668,9 @@ EOF
 # journald restart not possible in chroot — config applies on first boot
 
 # Configure sudo
+# Create local groups required by the hidepid /proc policy and sudo access.
 echo -e "${BBlue}Hardening sudo...${NC}"
-# Create a group for sudo
+groupadd -r proc 2>/dev/null || true
 groupadd sudo 2>/dev/null || true
 
 # Write sudoers atomically via temp file + visudo validation
@@ -1354,11 +1355,11 @@ if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
     sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
 fi
 
-echo -e "${BBlue}Setting up automatic security updates...${NC}"
+echo -e "${BBlue}Setting up daily package update checks...${NC}"
 pacman -S --noconfirm pacman-contrib
 cat <<EOF > /etc/systemd/system/pacman-autoupdate.timer
 [Unit]
-Description=Run pacman autoupdate daily
+Description=Run package update check daily
 
 [Timer]
 OnCalendar=daily
