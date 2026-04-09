@@ -82,6 +82,8 @@ AwesomeArchLinux/
 |   |   +-- README.md
 |   +-- sysctl/
 |   |   +-- sysctl.sh        # Kernel parameter hardening (100+ sysctl settings)
+|   |   +-- 99-workstation-net.conf  # Example secure workstation + high-throughput sysctl profile
+|   |   +-- WORKSTATION.md   # Companion checklist for non-sysctl workstation tuning
 |   +-- totp/
 |   |   +-- totp.sh          # TOTP two-factor authentication for SSH
 |   |   +-- README.md
@@ -137,6 +139,7 @@ AwesomeArchLinux/
 - **nftables** &mdash; Default deny policy, SSH rate limiting (2/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
 - **FireHOL** &mdash; Optional advanced firewall with IP blocklist integration from FireHOL's blocklist-ipsets repository. Configurable blocklist levels, automated daily updates via cron.
 - **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
+- **Workstation sysctl profile** &mdash; Example `fq + bbr` desktop/workstation profile plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
 
 #### Mandatory Access Control (AppArmor)
 
