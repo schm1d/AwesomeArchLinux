@@ -102,7 +102,7 @@ AwesomeArchLinux/
 |   +-- docker.sh            # Docker/Podman hardening (rootless, seccomp, AppArmor)
 |   +-- monitoring.sh        # Prometheus node_exporter + optional Grafana
 |   +-- gnome.sh             # Minimal GNOME desktop (no bloat)
-|   +-- openbox.sh           # Openbox + Tint2 panel setup
+|   +-- openbox.sh           # Archcraft-inspired Openbox desktop (Tint2 top panel, Picom, Terminator)
 |   +-- neovim.sh            # NeoVim + Treesitter configuration
 |   +-- vim.sh               # Vim plugins & hardening
 |   +-- nano.sh              # Nano configuration & hardening
@@ -484,7 +484,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
 | `utils/gnome.sh` | Minimal GNOME desktop installation (no games/bloat) with security settings |
-| `utils/openbox.sh` | Openbox window manager + Tint2 panel |
+| `utils/openbox.sh` | Archcraft-inspired Openbox desktop with top Tint2 panel, Picom transparency, Terminator, Rofi, Dunst, and Neofetch/Fastfetch |
 | `utils/neovim.sh` | NeoVim with Treesitter syntax highlighting |
 | `utils/vim.sh` | Vim with plugins and hardening |
 | `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
@@ -649,6 +649,7 @@ sudo ./utils/backup.sh --backup --prune        # Run backup with retention
 sudo ./utils/aide-config.sh --init             # Initialize AIDE file integrity DB
 sudo ./utils/monitoring.sh --with-prometheus --with-grafana  # Full monitoring stack
 sudo ./utils/docker.sh --podman -u myuser      # Rootless Podman containers
+sudo ./utils/openbox.sh                        # Lightweight Openbox desktop rice
 sudo ./utils/audit-check.sh                    # Check hardening compliance
 sudo ./utils/audit-check.sh --json             # Machine-readable compliance report
 ```
