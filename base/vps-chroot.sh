@@ -115,7 +115,10 @@ Name=eth*
 [Network]
 DHCP=yes
 DNSSEC=yes
-DNSOverTLS=no  # We use Stubby for this
+# DNS-over-TLS is enforced by systemd-resolved via the drop-in at
+# /etc/systemd/resolved.conf.d/dns-over-tls.conf — leave networkd unset
+# so resolved remains the single source of truth for DoT.
+DNSOverTLS=no
 IPv6PrivacyExtensions=yes
 
 [DHCPv4]
@@ -147,142 +150,61 @@ EOF
 fi
 
 ###############################################################################
-# DNS-OVER-TLS (STUBBY)
+# DNS-OVER-TLS (systemd-resolved native)
 ###############################################################################
 
-echo -e "${BBlue}Installing Stubby for DNS-over-TLS...${NC}"
-pacman -S --noconfirm dnssec-anchors stubby
-
-echo -e "${BBlue}Configuring Stubby for secure DNS...${NC}"
-cat <<EOF > /etc/stubby/stubby.yml
-# Stubby configuration for DNS-over-TLS with privacy focus
-resolution_type: GETDNS_RESOLUTION_STUB
-dns_transport_list:
-  - GETDNS_TRANSPORT_TLS
-tls_authentication: GETDNS_AUTHENTICATION_REQUIRED
-tls_query_padding_blocksize: 128
-edns_client_subnet_private: 1
-dnssec_return_status: GETDNS_EXTENSION_TRUE
-appdata_dir: "/var/cache/stubby"
-round_robin_upstreams: 1
-idle_timeout: 10000
-tls_connection_retries: 5
-tls_backoff_time: 900
-timeout: 2000
-
-# Local listening addresses
-listen_addresses:
-  - 127.0.0.1@5353
-  - ::1@5353
-
-# DNS servers (privacy-focused order)
-upstream_recursive_servers:
-  # Quad9 - Blocks malicious domains, no logging
-  - address_data: 9.9.9.9
-    tls_auth_name: "dns.quad9.net"
-    tls_port: 853
-  - address_data: 149.112.112.112
-    tls_auth_name: "dns.quad9.net"
-    tls_port: 853
-  - address_data: 2620:fe::fe
-    tls_auth_name: "dns.quad9.net"
-    tls_port: 853
-
-  # Cloudflare - Fast, decent privacy policy
-  - address_data: 1.1.1.1
-    tls_auth_name: "cloudflare-dns.com"
-    tls_port: 853
-  - address_data: 1.0.0.1
-    tls_auth_name: "cloudflare-dns.com"
-    tls_port: 853
-  - address_data: 2606:4700:4700::1111
-    tls_auth_name: "cloudflare-dns.com"
-    tls_port: 853
-
-  # Google - As fallback only
-  - address_data: 8.8.8.8
-    tls_auth_name: "dns.google"
-    tls_port: 853
-  - address_data: 8.8.4.4
-    tls_auth_name: "dns.google"
-    tls_port: 853
-EOF
-
-echo -e "${BBlue}Setting up Stubby cache directory...${NC}"
-useradd -r -s /usr/bin/nologin stubby 2>/dev/null || true
-mkdir -p /var/cache/stubby
-chown stubby:stubby /var/cache/stubby
-chmod 750 /var/cache/stubby
-
-# Configure systemd-resolved to use the local Stubby listener
-# In systemd-resolved, ':' selects the port; '#' is reserved for DNS server names.
-echo -e "${BBlue}Configuring systemd-resolved to use Stubby...${NC}"
+echo -e "${BBlue}Configuring systemd-resolved with native DNS-over-TLS...${NC}"
+# Use systemd-resolved's native DoT. Keeping the DNS stack to a single
+# daemon avoids the iwd -> dhcpcd -> NetworkManager -> resolved -> Stubby
+# handoff drift that was breaking desktop DNS. Stubby can still be
+# installed manually as an opt-in for users who specifically want a
+# separate DoT forwarder.
 mkdir -p /etc/systemd/resolved.conf.d/
-cat <<EOF > /etc/systemd/resolved.conf.d/dns_over_tls.conf
+# Remove the legacy underscore filename from prior runs so the directory
+# stays clean (merged result is identical either way).
+rm -f /etc/systemd/resolved.conf.d/dns_over_tls.conf
+cat > /etc/systemd/resolved.conf.d/dns-over-tls.conf <<'EOF'
 [Resolve]
-DNS=127.0.0.1:5353 [::1]:5353
-Domains=~.
+DNS=1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com
+FallbackDNS=9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net
+DNSOverTLS=yes
 DNSSEC=allow-downgrade
-DNSOverTLS=no
+Cache=yes
+Domains=~.
 MulticastDNS=no
 LLMNR=no
-Cache=yes
-DNSStubListener=yes
-ReadEtcHosts=yes
 EOF
 
-# Ensure proper service ordering
-echo -e "${BBlue}Configuring service dependencies...${NC}"
-# Make resolved wait for stubby, but avoid ordering cycles by NOT placing
-# resolved before network-online.target (stubby needs network to reach
-# upstream TLS resolvers).
-mkdir -p /etc/systemd/system/systemd-resolved.service.d/
-cat <<EOF > /etc/systemd/system/systemd-resolved.service.d/stubby.conf
-[Unit]
-After=stubby.service
-Wants=stubby.service
-
-[Service]
-Restart=on-failure
-RestartSec=5
+# Hand DNS off to systemd-resolved when NetworkManager is present so NM
+# does not fight resolved over /etc/resolv.conf.
+if [ -d /etc/NetworkManager/conf.d ]; then
+    cat > /etc/NetworkManager/conf.d/dns.conf <<'EOF'
+[main]
+dns=systemd-resolved
 EOF
-
-# Break the stubby→network-online→resolved cycle: stubby only needs basic
-# network connectivity, not full network-online.target.
-mkdir -p /etc/systemd/system/stubby.service.d/
-cat > /etc/systemd/system/stubby.service.d/dependencies.conf <<'EOF'
-[Unit]
-After=network.target
-Wants=network.target
-# Remove any upstream dependency on network-online.target to avoid cycle
-# with systemd-resolved
-EOF
-
-echo -e "${BBlue}Setting up resolv.conf...${NC}"
-if [ -e /etc/resolv.conf ]; then
-    mv -f /etc/resolv.conf /etc/resolv.conf.old 2>/dev/null || true
 fi
 
-# Use a static resolv.conf that sends queries to stubby (127.0.0.1:53 via
-# resolved stub) with fallback public DNS if resolved hasn't started yet.
-# This avoids the fragile fix-resolv-conf oneshot service and the symlink
-# to stub-resolv.conf that breaks when resolved fails to start.
-cat > /etc/resolv.conf <<EOF
-# Primary: systemd-resolved stub (forwards to stubby on 127.0.0.1:8053)
-nameserver 127.0.0.53
-# Fallback: direct public DNS if resolved/stubby aren't running
-nameserver 1.1.1.1
-nameserver 9.9.9.9
-EOF
-# Prevent NetworkManager / dhcpcd from overwriting resolv.conf
-chattr +i /etc/resolv.conf
+echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
+# Drop any previous immutable flag from a prior run before overwriting.
+chattr -i /etc/resolv.conf 2>/dev/null || true
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
-echo -e "${BBlue}Enabling DNS services...${NC}"
+echo -e "${BBlue}Enabling systemd-resolved...${NC}"
 systemctl daemon-reload
-systemctl enable stubby
-systemctl enable systemd-resolved
-systemctl start stubby 2>/dev/null || true
-systemctl start systemd-resolved 2>/dev/null || true
+# vps-chroot.sh is invoked from two contexts:
+#   1. vps-install.sh via arch-chroot — no running systemd, only enable.
+#   2. vps-harden.sh on a live system — start/restart is expected.
+# _INSTALL_TYPE=vps-harden is exported by vps-harden.sh; use it to pick
+# the right activation verb.
+if [ "${_INSTALL_TYPE:-}" = "vps-harden" ]; then
+    systemctl enable --now systemd-resolved
+    # Ensure NetworkManager picks up the new dns= backend if it is running.
+    if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        systemctl restart NetworkManager
+    fi
+else
+    systemctl enable systemd-resolved
+fi
 
 # Prefer IPv4 over IPv6 — many VPS providers lack IPv6 routing, and
 # sshd is configured with AddressFamily inet (IPv4 only)
@@ -1308,39 +1230,9 @@ Restart=on-failure
 RestartSec=5s
 EOF
 
-# Stubby DNS hardening
-echo -e "${BBlue}Hardening Stubby DNS...${NC}"
-mkdir -p /etc/systemd/system/stubby.service.d/
-cat > /etc/systemd/system/stubby.service.d/hardening.conf <<'EOF'
-[Service]
-User=stubby
-Group=stubby
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/cache/stubby /run
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-DevicePolicy=closed
-SystemCallFilter=@system-service @network-io
-SystemCallErrorNumber=EPERM
-SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=yes
-RestrictRealtime=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictSUIDSGID=yes
-IPAddressAllow=any
-IPAddressDeny=
-Restart=always
-RestartSec=5s
-EOF
+# Stubby is no longer part of the default install — native systemd-resolved
+# DoT is used instead (see the DNS section above). Users who want Stubby
+# can install and harden it manually as a server-side opt-in.
 
 # systemd-resolved is already well-hardened by its upstream unit file.
 # A custom drop-in would replace (not extend) its tuned SystemCallFilter,
