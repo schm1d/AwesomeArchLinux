@@ -113,6 +113,8 @@ PACMAN_PACKAGES=(
     xorg-xsetroot
     xorg-xprop
     xorg-xwininfo
+    xorg-fonts-misc
+    ttf-dejavu
     openbox
     obconf-qt
     lightdm
