@@ -27,18 +27,22 @@ REVOKED_KEYS_FILE='/etc/ssh/revokedKeys'
 
 # --- Parse Arguments ---
 show_help() {
-    echo "Usage: sudo $0 [-u ALLOWED_USER] [-p PORT] [-h]"
+    echo "Usage: sudo $0 [-u ALLOWED_USER] [-p PORT] [-k] [-h]"
     echo "  -u USER   User to allow SSH access (required, must not be root)"
     echo "  -p PORT   SSH listening port (default: 22)"
+    echo "  -k        Skip the authorized_keys lockout check. Use ONLY on bare-metal"
+    echo "            installs where console access is guaranteed. Never use on VPS."
     echo "  -h        Show this help"
     exit 0
 }
 
 ALLOWED_USERS=""
-while getopts ":u:p:h" opt; do
+SKIP_KEY_CHECK=0
+while getopts ":u:p:kh" opt; do
     case "$opt" in
         u) ALLOWED_USERS="$OPTARG" ;;
         p) SSH_PORT="$OPTARG" ;;
+        k) SKIP_KEY_CHECK=1 ;;
         h) show_help ;;
         *) show_help ;;
     esac
@@ -70,9 +74,18 @@ if [[ -z "${ALLOWED_HOME:-}" || ! -d "$ALLOWED_HOME" ]]; then
     exit 1
 fi
 if [[ ! -s "${ALLOWED_HOME}/.ssh/authorized_keys" ]]; then
-    echo -e "${BRed}ERROR: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
-    echo -e "${BYellow}Refusing to apply PasswordAuthentication=no / AllowUsers / restart sshd (lockout prevention).${NC}" >&2
-    exit 1
+    if [[ "$SKIP_KEY_CHECK" -eq 1 ]]; then
+        echo -e "${BYellow}WARNING: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
+        echo -e "${BYellow}Proceeding anyway because -k was passed. Password auth will be disabled.${NC}" >&2
+        echo -e "${BYellow}You MUST add a key via console login before remote SSH will work.${NC}" >&2
+        install -d -m 700 -o "$ALLOWED_USERS" -g "$ALLOWED_USERS" "${ALLOWED_HOME}/.ssh"
+        install -m 600 -o "$ALLOWED_USERS" -g "$ALLOWED_USERS" /dev/null "${ALLOWED_HOME}/.ssh/authorized_keys"
+    else
+        echo -e "${BRed}ERROR: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
+        echo -e "${BYellow}Refusing to apply PasswordAuthentication=no / AllowUsers / restart sshd (lockout prevention).${NC}" >&2
+        echo -e "${BYellow}On a bare-metal install with console access, re-run with -k to bypass.${NC}" >&2
+        exit 1
+    fi
 fi
 
 echo -e "${BBlue}Cleaning old keys...${NC}"
