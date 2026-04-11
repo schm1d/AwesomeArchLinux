@@ -9,7 +9,7 @@
 #                - fail2ban-server
 #                - freshclam (ClamAV)
 #                - clamd (ClamAV)
-#                - stubby (DNS-over-TLS)
+#                - stubby (DNS-over-TLS) — only if /usr/bin/stubby exists
 #                - chronyd (NTP)
 #
 # Author:      Bruno Schmid @brulliant
@@ -499,6 +499,16 @@ profile clamd /usr/bin/clamd flags=(enforce) {
 PROFILE
 
 # --- 4.6 stubby (DNS-over-TLS) ---
+# Stubby is no longer installed by the default AwesomeArchLinux path
+# (systemd-resolved native DoT replaced it). Only write and load the
+# profile if the binary is actually present so this script stays safe
+# on systems without Stubby.
+STUBBY_INSTALLED=false
+if [[ -x /usr/bin/stubby ]]; then
+    STUBBY_INSTALLED=true
+fi
+
+if [[ "$STUBBY_INSTALLED" == true ]]; then
 info "Writing profile: usr.bin.stubby"
 cat > "$APPARMOR_DIR/usr.bin.stubby" <<'PROFILE'
 # AppArmor profile for stubby (DNS-over-TLS resolver)
@@ -550,6 +560,12 @@ profile stubby /usr/bin/stubby flags=(enforce) {
   owner /proc/*/fd/                r,
 }
 PROFILE
+else
+    info "Skipping stubby profile (binary not installed)"
+    # Reverse idempotency: drop any stale profile from an older run that
+    # did have stubby installed.
+    rm -f "$APPARMOR_DIR/usr.bin.stubby"
+fi
 
 # --- 4.7 chronyd ---
 info "Writing profile: usr.bin.chronyd"
@@ -609,7 +625,11 @@ profile chronyd /usr/bin/chronyd flags=(enforce) {
 }
 PROFILE
 
-msg "All 7 AppArmor profiles written to $APPARMOR_DIR"
+if [[ "$STUBBY_INSTALLED" == true ]]; then
+    msg "All 7 AppArmor profiles written to $APPARMOR_DIR"
+else
+    msg "6 AppArmor profiles written to $APPARMOR_DIR (stubby skipped)"
+fi
 
 # =============================================================================
 # 5. LOAD PROFILES IN ENFORCE MODE
@@ -624,9 +644,11 @@ if [[ "$DRY_RUN" == false ]]; then
         "$APPARMOR_DIR/usr.bin.fail2ban-server"
         "$APPARMOR_DIR/usr.bin.freshclam"
         "$APPARMOR_DIR/usr.bin.clamd"
-        "$APPARMOR_DIR/usr.bin.stubby"
         "$APPARMOR_DIR/usr.bin.chronyd"
     )
+    if [[ "$STUBBY_INSTALLED" == true ]]; then
+        PROFILES+=("$APPARMOR_DIR/usr.bin.stubby")
+    fi
 
     LOAD_ERRORS=0
     for profile in "${PROFILES[@]}"; do
@@ -671,7 +693,9 @@ echo "  - $APPARMOR_DIR/usr.bin.sshd            (OpenSSH daemon)"
 echo "  - $APPARMOR_DIR/usr.bin.fail2ban-server  (fail2ban intrusion prevention)"
 echo "  - $APPARMOR_DIR/usr.bin.freshclam        (ClamAV signature updater)"
 echo "  - $APPARMOR_DIR/usr.bin.clamd            (ClamAV scanning daemon)"
-echo "  - $APPARMOR_DIR/usr.bin.stubby           (DNS-over-TLS resolver)"
+if [[ "$STUBBY_INSTALLED" == true ]]; then
+    echo "  - $APPARMOR_DIR/usr.bin.stubby           (DNS-over-TLS resolver)"
+fi
 echo "  - $APPARMOR_DIR/usr.bin.chronyd          (NTP daemon)"
 echo
 echo -e "${C_BLUE}GRUB:${C_NC}              apparmor=1 security=apparmor"
