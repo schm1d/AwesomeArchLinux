@@ -113,8 +113,11 @@ PACMAN_PACKAGES=(
     xorg-xsetroot
     xorg-xprop
     xorg-xwininfo
+    xorg-xinput
     xorg-fonts-misc
     ttf-dejavu
+    xf86-input-libinput
+    libinput
     openbox
     obconf-qt
     lightdm
@@ -217,6 +220,27 @@ enable_services() {
     info "Enabling desktop services..."
     systemctl enable NetworkManager.service
 
+    info "Ensuring DNS-over-TLS works with NetworkManager..."
+    # On an already-running system (the usual case for this script) the
+    # NM -> resolved handoff only works if resolved is active,
+    # /etc/resolv.conf points at its stub, and NM is configured with the
+    # systemd-resolved dns backend. chroot.sh only writes that drop-in if
+    # /etc/NetworkManager/conf.d exists at install time; when NM is
+    # installed later by this script, we must write it ourselves.
+    systemctl enable --now systemd-resolved
+    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    install -d /etc/NetworkManager/conf.d
+    cat > /etc/NetworkManager/conf.d/dns.conf <<'EOF'
+[main]
+dns=systemd-resolved
+EOF
+    # try-restart is a no-op if NM isn't active yet (e.g. first boot after
+    # this script runs), which keeps set -euo pipefail happy without the
+    # blanket `|| true` mask.
+    if systemctl is-active --quiet NetworkManager; then
+        systemctl try-restart NetworkManager || true
+    fi
+
     if [[ "$ENABLE_LIGHTDM" -eq 1 ]]; then
         for dm in gdm sddm lxdm ly; do
             systemctl disable --now "$dm.service" >/dev/null 2>&1 || true
@@ -230,6 +254,113 @@ enable_services() {
     else
         warn "LightDM was installed but not enabled because --no-lightdm was passed."
     fi
+}
+
+write_xorg_input_config() {
+    info "Writing libinput Xorg catchalls to /etc/X11/xorg.conf.d/50-libinput.conf..."
+
+    install -d /etc/X11/xorg.conf.d
+    cat > /etc/X11/xorg.conf.d/50-libinput.conf <<'EOF'
+Section "InputClass"
+    Identifier "libinput pointer catchall"
+    MatchIsPointer "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+    Option "AccelProfile" "flat"
+EndSection
+
+Section "InputClass"
+    Identifier "libinput keyboard catchall"
+    MatchIsKeyboard "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+EndSection
+
+Section "InputClass"
+    Identifier "libinput touchpad catchall"
+    MatchIsTouchpad "on"
+    MatchDevicePath "/dev/input/event*"
+    Driver "libinput"
+    Option "Tapping" "on"
+    Option "NaturalScrolling" "true"
+EndSection
+EOF
+}
+
+# Detect a Corsair gaming keyboard via sysfs (no extra package dep needed).
+# Corsair K-series gaming keyboards enumerate under /sys/class/input/inputN
+# with id/vendor == "1b1c" and a name containing "Keyboard". We scan those
+# nodes and return 0 on first match, 1 otherwise.
+has_corsair_gaming_keyboard() {
+    local input vendor name
+    shopt -s nullglob
+    for input in /sys/class/input/input*; do
+        [[ -d "$input" ]] || continue
+
+        vendor=""
+        if [[ -r "$input/id/vendor" ]]; then
+            vendor="$(tr -d '[:space:]' < "$input/id/vendor" 2>/dev/null || true)"
+        fi
+
+        # Compare against Corsair USB vendor id 1b1c (case-insensitive).
+        if [[ "${vendor,,}" != "1b1c" ]]; then
+            continue
+        fi
+
+        name=""
+        if [[ -r "$input/name" ]]; then
+            name="$(tr -d '\n' < "$input/name" 2>/dev/null || true)"
+        fi
+
+        # Any Corsair input device whose kernel name contains "Keyboard" is
+        # good enough: gaming keyboards always advertise that string, while
+        # a standalone Corsair mouse does not.
+        if [[ "$name" == *[Kk]eyboard* ]]; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+install_corsair_keyboard_workaround() {
+    local rules_file="/etc/udev/rules.d/99-corsair-gaming-kbd-fake-mouse.rules"
+
+    if ! has_corsair_gaming_keyboard; then
+        info "No Corsair gaming keyboard detected, skipping fake-mouse udev workaround."
+        return
+    fi
+
+    warn "Corsair gaming keyboard detected. Installing fake-mouse udev workaround at $rules_file"
+    warn "If you later attach a real Corsair-branded mouse, delete this file: rm $rules_file"
+
+    install -d /etc/udev/rules.d
+    cat > "$rules_file" <<'EOF'
+# Disable Corsair gaming-keyboard fake mouse interface on device enumeration.
+#
+# Corsair K-series gaming keyboards (e.g. K95 RGB Platinum) expose two USB HID
+# interfaces: a real keyboard and a fake "mouse" used for macros and G-keys.
+# On minimal Xorg/libinput setups the fake mouse device confuses libinput and
+# the real USB mouse cursor ends up non-functional after startx / LightDM.
+#
+# This rule unsets ID_INPUT_MOUSE on any input device whose USB vendor id is
+# Corsair (1b1c) and which was flagged as a mouse by the kernel. That kills
+# the fake-mouse interface without touching the keyboard interface.
+#
+# Generated by utils/openbox.sh because a Corsair keyboard was detected at
+# install time. SIDE-EFFECT: if you later plug in a real Corsair-branded
+# mouse it will be ignored by libinput until you remove this file:
+#
+#   rm /etc/udev/rules.d/99-corsair-gaming-kbd-fake-mouse.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+SUBSYSTEM=="input", ATTRS{idVendor}=="1b1c", ENV{ID_INPUT_MOUSE}=="1", ENV{ID_INPUT}="0", ENV{ID_INPUT_MOUSE}="0"
+EOF
+
+    info "Reloading udev rules so the Corsair workaround takes effect..."
+    udevadm control --reload-rules
+    udevadm trigger
 }
 
 install_wallpaper() {
@@ -1156,6 +1287,8 @@ main() {
     install_packages
     install_neofetch_if_available
     install_bluetooth_if_present
+    write_xorg_input_config
+    install_corsair_keyboard_workaround
     install_wallpaper
     write_openbox_config
     write_helper_scripts
