@@ -29,7 +29,7 @@ sudo aa-status
 | `usr.bin.fail2ban-server` | `/usr/bin/fail2ban-server` | Intrusion prevention. Reads all logs to detect brute force, writes its own state/log. Executes `nft`/`iptables` for ban actions. Grants `net_admin`/`net_raw`/`dac_read_search`. |
 | `usr.bin.freshclam` | `/usr/bin/freshclam` | ClamAV signature updater. Network access (TCP) to download updates. Writes to `/var/lib/clamav/`. Grants `setuid`/`setgid` for privilege drop. |
 | `usr.bin.clamd` | `/usr/bin/clamd` | ClamAV scanning daemon. Reads signature database and files submitted via `/tmp/`. Communicates over Unix sockets only (no network). Grants `dac_override` for scanning files owned by other users. |
-| `usr.bin.stubby` | `/usr/bin/stubby` | DNS-over-TLS resolver. Network access for upstream DNS resolution over TLS. Reads its config and TLS trust store. Grants `net_bind_service` for port 53 listening. |
+| `usr.bin.stubby` | `/usr/bin/stubby` | DNS-over-TLS resolver. Network access for upstream DNS resolution over TLS. Reads its config and TLS trust store. Grants `net_bind_service` for port 53 listening. **Only deployed if `/usr/bin/stubby` exists** — the default AwesomeArchLinux path uses `systemd-resolved` native DoT instead of Stubby, so this profile is a no-op unless you installed Stubby manually as an opt-in. |
 | `usr.bin.chronyd` | `/usr/bin/chronyd` | NTP daemon. UDP network access for time synchronization. Grants `sys_time` to adjust the system clock. Reads hardware clock devices (`/dev/rtc*`, `/dev/pps*`). |
 
 ## Customization
