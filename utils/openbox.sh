@@ -312,7 +312,6 @@ configure_x11_keyboard() {
 }
 
 
-
 write_xorg_input_config() {
     info "Writing libinput Xorg catchalls to /etc/X11/xorg.conf.d/50-libinput.conf..."
 
