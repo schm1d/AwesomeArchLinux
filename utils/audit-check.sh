@@ -527,11 +527,23 @@ check_network_security() {
         result_fail "fail2ban is not active" "$(systemctl is-active fail2ban 2>/dev/null || echo 'not found')"
     fi
 
-    # DNS-over-TLS (stubby)
-    if systemctl is-active --quiet stubby 2>/dev/null; then
-        result_pass "DNS-over-TLS (stubby) is active"
+    # DNS-over-TLS — default path is systemd-resolved native DoT. Assert the
+    # drop-in config directly: resolvectl's "DNSOverTLS setting: <value>" only
+    # appears in per-link sections, and the global drop-in at
+    # /etc/systemd/resolved.conf.d/*.conf is what this repo actually stands
+    # up, so it's the right unit of compliance. Stubby remains a valid
+    # opt-in fallback.
+    local dot_setting
+    dot_setting=$(grep -hE '^[[:space:]]*DNSOverTLS[[:space:]]*=[[:space:]]*(yes|opportunistic)' \
+        /etc/systemd/resolved.conf.d/*.conf /etc/systemd/resolved.conf 2>/dev/null | tail -n1 || true)
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null && \
+       [[ -n "$dot_setting" ]]; then
+        result_pass "DNS-over-TLS via systemd-resolved is active"
+    elif systemctl is-active --quiet stubby 2>/dev/null; then
+        result_pass "DNS-over-TLS via stubby (opt-in) is active"
     else
-        result_fail "DNS-over-TLS (stubby) is not active" "$(systemctl is-active stubby 2>/dev/null || echo 'not found')"
+        result_fail "DNS-over-TLS is not active" \
+            "resolved=$(systemctl is-active systemd-resolved 2>/dev/null || echo 'not found'), stubby=$(systemctl is-active stubby 2>/dev/null || echo 'not found'), DoT=${dot_setting:-missing}"
     fi
 
     # Listening services on 0.0.0.0
