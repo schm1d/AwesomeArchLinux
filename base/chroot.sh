@@ -1006,6 +1006,20 @@ mkinitcpio -P
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
 
+# Force a low-res GRUB framebuffer. Without this, GRUB on some UEFI firmwares
+# falls back to a mode where the password prompt never renders (black screen
+# on boot). 1024x768 is the safest universally-supported fallback.
+if grep -q '^#\?GRUB_GFXMODE=' /etc/default/grub; then
+    sed -ri 's|^#?GRUB_GFXMODE=.*|GRUB_GFXMODE=1024x768,auto|' /etc/default/grub
+else
+    echo 'GRUB_GFXMODE=1024x768,auto' >> /etc/default/grub
+fi
+if grep -q '^#\?GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
+    sed -ri 's|^#?GRUB_GFXPAYLOAD_LINUX=.*|GRUB_GFXPAYLOAD_LINUX=keep|' /etc/default/grub
+else
+    echo 'GRUB_GFXPAYLOAD_LINUX=keep' >> /etc/default/grub
+fi
+
 sleep 1
 
 # --- CPU Microcode Installation ---
