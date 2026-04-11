@@ -59,7 +59,7 @@ pacman -S --noconfirm \
   baobab deja-dup sushi xdg-desktop-portal-gnome gnome-font-viewer gnome-nettool gnome-session \
   gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin \
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
-  xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit torbrowser-launcher \
+  xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
   networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine gtk-engines
 
 # 2) Optional packages prompt
@@ -86,6 +86,26 @@ fi
 # 4) Enable GDM service
 echo -e "${BBlue}Enabling GDM...${NC}"
 systemctl enable gdm.service
+
+echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
+# On an already-running system the NM -> resolved handoff only works if
+# resolved is active, /etc/resolv.conf points at its stub, and NM is
+# configured with the systemd-resolved dns backend. chroot.sh only
+# writes that drop-in if /etc/NetworkManager/conf.d exists at install
+# time; when NM is installed later by this script, we must write it
+# ourselves.
+systemctl enable --now systemd-resolved
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+install -d /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/dns.conf <<'EOF'
+[main]
+dns=systemd-resolved
+EOF
+# try-restart is a no-op if NM isn't active yet, which avoids a spurious
+# error on first boot after this script runs.
+if systemctl is-active --quiet NetworkManager; then
+    systemctl try-restart NetworkManager || true
+fi
 
 # 5) Enable PipeWire for the target user (runs as user service on login)
 echo -e "${BBlue}PipeWire will start automatically on user login via systemd user units.${NC}"
