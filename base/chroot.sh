@@ -880,10 +880,18 @@ chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
 
 configure_ssh # Call the SSH configuration function
 
-# Now harden sshd — authorized_keys is already in place, so disabling
-# password auth won't cause a lockout.
+# Now harden sshd. If the user pasted a pubkey at install time it is already
+# in authorized_keys; otherwise pass -k to bypass the lockout check (bare-metal
+# only — console access guarantees the user can add a key post-reboot).
 echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
-/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+if [[ -n "$SSH_PUBKEY" ]]; then
+    /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+else
+    echo -e "${BYellow}No SSH pubkey was provided — invoking ssh.sh with -k (console fallback).${NC}"
+    echo -e "${BYellow}After reboot, log in at the console and add your key to ~/.ssh/authorized_keys${NC}"
+    echo -e "${BYellow}before attempting any remote SSH login.${NC}"
+    /ssh.sh -u "$USERNAME" -p "$SSH_PORT" -k
+fi
 shred -u /ssh.sh 2>/dev/null || true
 
 sleep 2
