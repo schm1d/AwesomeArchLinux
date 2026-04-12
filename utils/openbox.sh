@@ -161,11 +161,38 @@ PACMAN_PACKAGES=(
     volumeicon
     cbatticon
     fastfetch
+    imagemagick
+)
+
+# obmenu-generator and its Perl deps live in AUR. We try to install them via
+# yay after pacman finishes; if yay is not present we fall back to a static
+# Applications menu.
+AUR_PACKAGES=(
+    obmenu-generator
+    perl-linux-desktopfiles
+    perl-data-dump
 )
 
 install_packages() {
     info "Installing lightweight Openbox desktop packages..."
     pacman -S --needed --noconfirm "${PACMAN_PACKAGES[@]}"
+}
+
+# Set by install_obmenu_generator(). Consumed by write_openbox_config() to
+# pick between a dynamic pipe menu and a static Applications submenu.
+HAS_OBMENU=0
+
+install_obmenu_generator() {
+    info "Installing obmenu-generator (AUR) for dynamic Openbox application menu..."
+    if command -v yay >/dev/null 2>&1; then
+        if sudo -u "$TARGET_USER" yay -S --needed --noconfirm "${AUR_PACKAGES[@]}"; then
+            HAS_OBMENU=1
+            return
+        fi
+        warn "yay failed to install obmenu-generator. Falling back to a static application menu."
+        return
+    fi
+    warn "yay not found; skipping obmenu-generator install. Run utils/yay.sh then re-run openbox.sh for dynamic menus."
 }
 
 install_neofetch_if_available() {
@@ -352,6 +379,25 @@ has_corsair_gaming_keyboard() {
     return 1
 }
 
+# NOTE: install_corsair_keyboard_workaround is intentionally NOT called by
+# main(). The udev rule it writes unsets ID_INPUT_MOUSE on every device with
+# USB vendor 1b1c, which is too aggressive for a default install: a real
+# Corsair-branded mouse attached to the same system stops working, and the
+# rule can also interfere with adjacent libinput state on non-gaming Corsair
+# hardware. Reported as a regression on a fresh install.
+#
+# When to use it manually: only if you have a Corsair K-series gaming
+# keyboard whose fake-mouse HID interface is confusing libinput (symptom:
+# cursor jumps or stops responding after startx / LightDM) AND you have
+# already confirmed the xf86-input-libinput driver is correctly installed.
+#
+# How to invoke it manually:
+#     source utils/openbox.sh && install_corsair_keyboard_workaround
+# (or copy the function body into a root shell).
+#
+# How to undo it:
+#     rm /etc/udev/rules.d/99-corsair-gaming-kbd-fake-mouse.rules
+#     udevadm control --reload-rules && udevadm trigger
 install_corsair_keyboard_workaround() {
     local rules_file="/etc/udev/rules.d/99-corsair-gaming-kbd-fake-mouse.rules"
 
@@ -389,6 +435,190 @@ EOF
     info "Reloading udev rules so the Corsair workaround takes effect..."
     udevadm control --reload-rules
     udevadm trigger
+}
+
+install_openbox_theme() {
+    info "Installing Fleon-ArchBlue Openbox theme to /usr/share/themes..."
+
+    local theme_dir="/usr/share/themes/Fleon-ArchBlue/openbox-3"
+    install -d -m 755 "$theme_dir"
+
+    # Recolored themerc from dotfiles-ng .themes/Fleon/openbox-3/themerc.
+    # Pink/magenta accents mapped to the Arch-blue palette per spec:
+    #   #fa74b2 -> #1793D1   (close button, menu title)
+    #   #f48ee8 -> #1595E3   (menu active item text)
+    #   #d8a6f4 -> #1595E3   (maximize button, toggle images)
+    # Grays, existing blues (#89ccf7, #63c5ea), and #f9f9f9 unchanged.
+    cat > "$theme_dir/themerc" <<'EOF'
+# Fleon-ArchBlue (derived from Fleon (C) 2020-2022 owl4ce)
+
+# Window Appearance
+padding.width: 9
+padding.height: 7
+
+## Titlebar
+window.active.title.bg: flat
+window.active.title.bg.color: #373e4d
+window.inactive.title.bg: flat
+window.inactive.title.bg.color: #373e4d
+
+## Titlebar Text
+window.label.text.justify: center
+window.active.label.bg: parentrelative
+window.active.label.text.color: #f9f9f9
+window.inactive.label.bg: parentrelative
+window.inactive.label.text.color: #8b93ad
+
+## Borders
+border.width: 0
+window.active.border.color: #373e4d
+window.inactive.border.color: #373e4d
+
+## Handle
+window.handle.width: 4
+window.active.handle.bg: flat
+window.active.handle.bg.color: #3c4454
+window.inactive.handle.bg: flat
+window.inactive.handle.bg.color: #3a4252
+
+## Client
+window.client.padding.width: 0
+window.client.padding.height: 0
+window.active.client.color:  #373e4d
+window.inactive.client.color:  #373e4d
+
+## Grip
+window.active.grip.bg: flat
+window.active.grip.bg.color: #3a4252
+window.inactive.grip.bg: flat
+window.inactive.grip.bg.color: #38404f
+
+# Window Buttons
+window.*.button.*.bg: parentrelative
+window.*.button.*.pressed.bg: flat
+
+## Active Universal
+window.active.button.*.hover.bg: flat
+window.active.button.*.hover.bg: parentrelative
+window.active.button.*.hover.image.color: #5c6780
+window.active.button.*.hover.bg.color: #3b4252
+window.active.button.*.pressed.image.color: #89ccf7
+window.active.button.*.pressed.bg.color: #373e4d
+window.active.button.toggled.hover.image.color: #5c6780
+window.active.button.toggled.image.color: #1595E3
+window.active.button.toggled.pressed.image.color: #1595E3
+window.active.button.disabled.image.color: #5c6780
+
+## Inactive Universal
+window.inactive.button.*.hover.bg: flat
+window.inactive.button.*.hover.bg: parentrelative
+window.inactive.button.*.hover.image.color: #5c6780
+window.inactive.button.*.hover.bg.color: #3b4252
+window.inactive.button.*.pressed.image.color: #89ccf7
+window.inactive.button.*.pressed.bg.color: #3b4252
+window.inactive.button.toggled.hover.image.color: #5c6780
+window.inactive.button.toggled.image.color: #5c6780
+window.inactive.button.toggled.pressed.image.color: #1595E3
+window.inactive.button.disabled.image.color: #5c6780
+
+## Close Button
+window.active.button.close.unpressed.image.color: #1793D1
+window.active.button.close.pressed.image.color: #1793D1
+window.active.button.close.pressed.bg.color: #373e4d
+window.inactive.button.close.unpressed.image.color: #5c6780
+window.inactive.button.close.pressed.image.color: #5c6780
+window.inactive.button.close.pressed.bg.color: #373e4d
+
+## Maximize Button
+window.active.button.max.unpressed.image.color: #1595E3
+window.active.button.max.pressed.image.color: #1595E3
+window.active.button.max.pressed.bg.color: #373e4d
+window.inactive.button.max.unpressed.image.color: #5c6780
+window.inactive.button.max.pressed.image.color: #5c6780
+window.inactive.button.max.pressed.bg.color: #373e4d
+
+## Iconify Button
+window.active.button.iconify.unpressed.image.color: #89ccf7
+window.active.button.iconify.pressed.image.color: #89ccf7
+window.active.button.iconify.pressed.bg.color: #373e4d
+window.inactive.button.iconify.unpressed.image.color: #5c6780
+window.inactive.button.iconify.pressed.image.color: #5c6780
+window.inactive.button.iconify.pressed.bg.color: #373e4d
+
+## Shade Button
+window.active.button.shade.unpressed.image.color: #f9f9f9
+window.active.button.shade.pressed.image.color: #f9f9f9
+window.active.button.shade.pressed.bg.color: #373e4d
+window.inactive.button.shade.unpressed.image.color: #5c6780
+window.inactive.button.shade.pressed.image.color: #5c6780
+window.inactive.button.shade.pressed.bg.color: #373e4d
+
+## Desk Button
+window.active.button.desk.unpressed.image.color: #f9f9f9
+window.active.button.desk.pressed.image.color: #f9f9f9
+window.active.button.desk.pressed.bg.color: #373e4d
+window.inactive.button.desk.unpressed.image.color: #5c6780
+window.inactive.button.desk.pressed.image.color: #5c6780
+window.inactive.button.desk.pressed.bg.color: #373e4d
+
+# Openbox Menu
+menu.overlap.x: -8
+menu.separator.padding.height: 2
+menu.separator.color: #3b4252
+menu.border.width: 5
+menu.border.color: #3b4252
+menu.title.bg: flat
+menu.title.bg.color: #404859
+menu.title.text.color: #1793D1
+menu.title.text.justify: center
+menu.items.bg: flat
+menu.items.bg.color: #3b4252
+menu.items.text.color: #f9f9f9
+menu.items.disabled.text.color: #5c6780
+menu.items.active.bg: flat
+menu.items.active.bg.color: #3b4252
+menu.items.active.text.color: #1595E3
+
+# OSD
+osd.bg: flat solid
+osd.bg.color: #3b4252
+osd.border.width: 5
+osd.border.color: #3b4252
+osd.label.bg: flat solid
+osd.label.bg.color: #3b4252
+osd.label.text.color: #f9f9f9
+osd.hilight.bg: flat solid
+osd.hilight.bg.color: #89ccf7
+osd.unhilight.bg: flat solid
+osd.unhilight.bg.color: #373e4d
+EOF
+
+    # Fleon's button glyphs are 14x14 1-bit XBM masks. Openbox recolors them
+    # from themerc's *.image.color properties, so no pixel-level recolor is
+    # needed -- we just ship the same shapes. Embedded verbatim from
+    # .themes/Fleon/openbox-3/*.xbm.
+    _fleon_xbm bullet '0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0xe0, 0x00, 0xc0, 0x01, 0x80, 0x03, 0x00, 0x07, 0x00, 0x07, 0x80, 0x03, 0xc0, 0x01, 0xe0, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00' > "$theme_dir/bullet.xbm"
+    local triangle_bits='0x00, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x7c, 0x00, 0xfc, 0x00, 0xfc, 0x01, 0xf8, 0x03, 0xf0, 0x07, 0xe0, 0x0f, 0xc0, 0x0f, 0x80, 0x0f, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00'
+    local triangle_mirror='0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x80, 0x0f, 0xc0, 0x0f, 0xe0, 0x0f, 0xf0, 0x07, 0xf8, 0x03, 0xfc, 0x01, 0xfc, 0x00, 0x7c, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00'
+    local name
+    for name in close desk desk_toggled iconify max max_disabled max_toggled shade; do
+        _fleon_xbm "$name" "$triangle_bits" > "$theme_dir/${name}.xbm"
+    done
+    _fleon_xbm shade_toggled "$triangle_mirror" > "$theme_dir/shade_toggled.xbm"
+
+    chmod 644 "$theme_dir"/*.xbm "$theme_dir/themerc"
+}
+
+# Emit a 14x14 XBM file body for a given glyph name and hex-byte sequence.
+# Used by install_openbox_theme() to materialize the Fleon button masks.
+_fleon_xbm() {
+    local name="$1" bits="$2"
+    cat <<EOF
+#define ${name}_width 14
+#define ${name}_height 14
+static unsigned char ${name}_bits[] = {
+   ${bits} };
+EOF
 }
 
 install_wallpaper() {
@@ -452,8 +682,27 @@ export QT_QPA_PLATFORMTHEME=gtk2
 export TERMINAL=terminator
 EOF
 
-    cat > "$TARGET_HOME/.config/openbox/menu.xml" <<'EOF'
+    # The Applications submenu uses obmenu-generator (AUR) as a dynamic pipe
+    # menu: on every open it reads /usr/share/applications/*.desktop and
+    # regenerates its XML. No manual menu.xml edits are needed when you
+    # install a new IDE, browser, Spotify, etc. -- just install the package
+    # and reopen the menu. If obmenu-generator is not installed the Apps
+    # submenu is replaced with a small static fallback.
+    local apps_entry
+    if [[ "$HAS_OBMENU" -eq 1 ]]; then
+        apps_entry='    <menu id="apps-menu" label="Applications" execute="obmenu-generator -p -i"/>'
+    else
+        apps_entry=$'    <menu id="apps-menu" label="Applications">\n      <item label="Terminal"><action name="Execute"><command>terminator</command></action></item>\n      <item label="Files"><action name="Execute"><command>thunar</command></action></item>\n      <item label="Web Browser"><action name="Execute"><command>xdg-open http:</command></action></item>\n      <item label="Text Editor"><action name="Execute"><command>xdg-open about:blank</command></action></item>\n    </menu>'
+    fi
+
+    cat > "$TARGET_HOME/.config/openbox/menu.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Applications submenu below is dynamic: it is produced by
+  obmenu-generator reading /usr/share/applications/*.desktop on every open.
+  Installing a new app (IDE, browser, Spotify, ...) will make it appear here
+  automatically -- do not hand-edit this file for app entries.
+-->
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
   <menu id="root-menu" label="Openbox">
     <item label="Launcher">
@@ -482,6 +731,8 @@ EOF
         <command>thunar</command>
       </action>
     </item>
+    <separator/>
+${apps_entry}
     <separator/>
     <menu id="client-list-menu"/>
     <separator/>
@@ -529,7 +780,7 @@ EOF
     <monitor>Primary</monitor>
   </placement>
   <theme>
-    <name>AwesomeArch-Openbox</name>
+    <name>Fleon-ArchBlue</name>
     <titleLayout>NLIMC</titleLayout>
     <keepBorder>yes</keepBorder>
     <animateIconify>yes</animateIconify>
@@ -571,9 +822,9 @@ EOF
     <popupPosition>Center</popupPosition>
   </resize>
   <margins>
-    <top>36</top>
+    <top>0</top>
     <bottom>0</bottom>
-    <left>0</left>
+    <left>48</left>
     <right>0</right>
   </margins>
   <keyboard>
@@ -605,19 +856,116 @@ EOF
     <keybind key="A-Tab">
       <action name="NextWindow"/>
     </keybind>
+    <!-- Window snapping: arrows = halves, Shift+arrows = thirds, numpad = 9-zone grid -->
     <keybind key="W-Left">
       <action name="UnmaximizeFull"/>
-      <action name="MoveResizeTo"><x>0</x><y>36</y><width>50%</width><height>100%</height></action>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>50%</width><height>100%</height></action>
     </keybind>
     <keybind key="W-Right">
       <action name="UnmaximizeFull"/>
-      <action name="MoveResizeTo"><x>-0</x><y>36</y><width>50%</width><height>100%</height></action>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>50%</width><height>100%</height></action>
     </keybind>
     <keybind key="W-Up">
-      <action name="MaximizeFull"/>
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>100%</width><height>50%</height></action>
     </keybind>
     <keybind key="W-Down">
       <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>-0</y><width>100%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-S-Left">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>33%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-S-Right">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>33%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-KP_Add">
+      <action name="MaximizeFull"/>
+    </keybind>
+    <keybind key="W-KP_Subtract">
+      <action name="UnmaximizeFull"/>
+    </keybind>
+    <!-- Laptop-friendly maximize toggle (no numpad required) -->
+    <keybind key="W-m">
+      <action name="ToggleMaximize"/>
+    </keybind>
+    <keybind key="W-n">
+      <action name="Iconify"/>
+    </keybind>
+    <keybind key="W-KP_1">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>-0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_End">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>-0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_2">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>-0</y><width>100%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_Down">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>-0</y><width>100%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_3">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>-0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_Next">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>-0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_4">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>50%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-KP_Left">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>50%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-KP_5">
+      <action name="ToggleMaximize"/>
+    </keybind>
+    <keybind key="W-KP_Begin">
+      <action name="ToggleMaximize"/>
+    </keybind>
+    <keybind key="W-KP_6">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>50%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-KP_Right">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>50%</width><height>100%</height></action>
+    </keybind>
+    <keybind key="W-KP_7">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_Home">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_8">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>100%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_Up">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>0</x><y>0</y><width>100%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_9">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="W-KP_Prior">
+      <action name="UnmaximizeFull"/>
+      <action name="MoveResizeTo"><x>-0</x><y>0</y><width>50%</width><height>50%</height></action>
+    </keybind>
+    <keybind key="C-A-Delete">
+      <action name="Execute"><command>awesome-arch-powermenu</command></action>
     </keybind>
     <keybind key="W-1"><action name="Desktop"><desktop>1</desktop></action></keybind>
     <keybind key="W-2"><action name="Desktop"><desktop>2</desktop></action></keybind>
@@ -657,12 +1005,62 @@ EOF
     <doubleClickTime>200</doubleClickTime>
     <screenEdgeWarpTime>400</screenEdgeWarpTime>
     <context name="Frame">
+      <mousebind button="A-Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
       <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="A-Right" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
       <mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind>
       <mousebind button="A-Middle" action="Press"><action name="Lower"/></mousebind>
     </context>
     <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/><action name="Unshade"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
       <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximizeFull"/></mousebind>
+      <mousebind button="Middle" action="Press"><action name="Lower"/><action name="FocusToBottom"/><action name="Unfocus"/></mousebind>
+      <mousebind button="Right" action="Press"><action name="Focus"/><action name="Raise"/><action name="ShowMenu"><menu>client-menu</menu></action></mousebind>
+      <mousebind button="Up" action="Click"><action name="Shade"/></mousebind>
+      <mousebind button="Down" action="Click"><action name="Unshade"/></mousebind>
+    </context>
+    <context name="Client">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Middle" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Right" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+    <context name="Top">
+      <mousebind button="Left" action="Drag"><action name="Resize"><edge>top</edge></action></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximizeVert"/></mousebind>
+    </context>
+    <context name="Left">
+      <mousebind button="Left" action="Drag"><action name="Resize"><edge>left</edge></action></mousebind>
+    </context>
+    <context name="Right">
+      <mousebind button="Left" action="Drag"><action name="Resize"><edge>right</edge></action></mousebind>
+    </context>
+    <context name="Bottom">
+      <mousebind button="Left" action="Drag"><action name="Resize"><edge>bottom</edge></action></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximizeVert"/></mousebind>
+    </context>
+    <context name="TLCorner">
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="TRCorner">
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="BLCorner">
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="BRCorner">
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="Maximize">
+      <mousebind button="Left" action="Click"><action name="ToggleMaximizeFull"/></mousebind>
+      <mousebind button="Middle" action="Click"><action name="ToggleMaximizeVert"/></mousebind>
+      <mousebind button="Right" action="Click"><action name="ToggleMaximizeHorz"/></mousebind>
+    </context>
+    <context name="Close">
+      <mousebind button="Left" action="Click"><action name="Close"/></mousebind>
+    </context>
+    <context name="Iconify">
+      <mousebind button="Left" action="Click"><action name="Iconify"/></mousebind>
     </context>
     <context name="Root">
       <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
@@ -749,17 +1147,27 @@ fi
 "$HOME/.local/bin/awesome-arch-fetch"
 EOF
 
+    # Power menu (obexit-style): Shutdown / Reboot / Suspend / Hibernate / Lock / Logout.
+    # Icons are plain UTF-8 glyphs that render with the default Noto/DejaVu stack.
     cat > "$TARGET_HOME/.local/bin/awesome-arch-powermenu" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-choice="$(printf 'Logout\nReboot\nShutdown\nCancel\n' | rofi -dmenu -p power -theme "$HOME/.config/rofi/awesome-arch.rasi")"
+options=$'\u23fb  Shutdown\n\u21bb  Reboot\n\u23f8  Suspend\n\u263e  Hibernate\n\U0001f512  Lock\n\u21aa  Logout'
 
-case "$choice" in
-    Logout) openbox --exit ;;
-    Reboot) systemctl reboot ;;
-    Shutdown) systemctl poweroff ;;
-    *) exit 0 ;;
+theme="$HOME/.config/rofi/obexit.rasi"
+[[ -r "$theme" ]] || theme="$HOME/.config/rofi/awesome-arch.rasi"
+
+choice="$(printf '%s\n' "$options" | rofi -dmenu -i -p "Power" -no-fixed-num-lines -theme "$theme" || true)"
+
+case "${choice##* }" in
+    Shutdown)  exec systemctl poweroff ;;
+    Reboot)    exec systemctl reboot ;;
+    Suspend)   exec systemctl suspend ;;
+    Hibernate) exec systemctl hibernate ;;
+    Lock)      exec loginctl lock-session ;;
+    Logout)    exec openbox --exit ;;
+    *)         exit 0 ;;
 esac
 EOF
 
@@ -792,105 +1200,219 @@ EOF
 }
 
 write_tint2_config() {
-    info "Writing top Tint2 panel configuration..."
+    info "Writing vertical EyeCandy Tint2 panel configuration (Arch blue)..."
 
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/tint2"
 
+    # Ported from dotfiles-ng's eyecandy-vertical.artistic.tint2rc, pink
+    # accents swapped for Arch blue (#1793D1 family). Executor/button rows
+    # that pointed at dotfiles-only scripts (music-controller, joyful-desktop
+    # helpers, ncmpcpp launchers, screenshot-*.sh) have been removed; we
+    # keep the launcher/taskbar/systray/clock core and wire button 1/2 to
+    # our own rofi launcher and power menu.
     cat > "$TARGET_HOME/.config/tint2/tint2rc" <<'EOF'
-# AwesomeArch Openbox top panel
-rounded = 8
-border_width = 1
-background_color = #10131c 82
-border_color = #6f8cff 35
-background_color_hover = #1c2233 92
-border_color_hover = #8aadf4 50
-background_color_pressed = #27314a 95
-border_color_pressed = #8aadf4 65
+# AwesomeArch Openbox vertical left dock (EyeCandy, Arch blue)
+#-------------------------------------
+# Gradients
+gradient = vertical
+start_color = #1793D1 100
+end_color = #1595E3 100
 
+gradient = vertical
+start_color = #1793D1 82
+end_color = #1595E3 82
+
+#-------------------------------------
+# Backgrounds
+# Background 1: Active task
 rounded = 8
 border_width = 0
-background_color = #242b3d 88
-border_color = #8aadf4 0
+background_color = #89ccf7 100
+border_color = #89ccf7 100
+background_color_hover = #89ccf7 78
+border_color_hover = #89ccf7 78
+background_color_pressed = #89ccf7 100
+border_color_pressed = #89ccf7 100
 
+# Background 2: Default task
 rounded = 8
-border_width = 1
-background_color = #6f8cff 92
-border_color = #cad3f5 45
+border_width = 0
+background_color = #1595E3 100
+border_color = #1595E3 100
+gradient_id = 0
+background_color_hover = #1595E3 82
+border_color_hover = #1595E3 82
+background_color_pressed = #1595E3 100
+border_color_pressed = #1595E3 100
 
-panel_items = LTSC
-panel_monitor = all
-panel_position = top center horizontal
-panel_size = 100% 34
+# Background 3: Urgent task
+rounded = 8
+border_width = 0
+background_color = #fa946e 100
+border_color = #fa946e 40
+gradient_id = 0
+background_color_hover = #fa946e 88
+border_color_hover = #fa946e 40
+background_color_pressed = #fa946e 100
+border_color_pressed = #fa946e 78
+
+# Background 4: Panel, taskbar, clock
+rounded = 0
+border_width = 0
+background_color = #f9f9f9 100
+border_color = #000000 0
+
+# Background 5: (button glow)
+rounded = 6
+border_width = 0
+background_color = #000000 0
+border_color = #a1a8b9 0
+gradient_id = 1
+background_color_hover = #63c5ea 0
+border_color_hover = #a1a8b9 0
+gradient_id_hover = 2
+background_color_pressed = #63c5ea 0
+border_color_pressed = #a1a8b9 0
+gradient_id_pressed = 1
+
+# Background 6: Button, Executor
+rounded = 6
+border_width = 0
+background_color = #f7f7f7 100
+border_color = #f7f7f7 100
+gradient_id = 0
+background_color_hover = #f4f4f4 100
+border_color_hover = #f4f4f4 100
+background_color_pressed = #f7f7f7 100
+border_color_pressed = #f7f7f7 100
+gradient_id_pressed = 0
+
+# Background 7: Tooltip
+rounded = 0
+border_width = 0
+background_color = #f9f9f9 100
+border_color = #000000 0
+
+# Background 8: Systray
+rounded = 14
+border_width = 0
+background_color = #f4f4f4 100
+border_color = #a1a8b9 0
+background_color_hover = #f4f4f4 100
+border_color_hover = #a1a8b9 0
+background_color_pressed = #f4f4f4 100
+border_color_pressed = #a1a8b9 0
+
+#-------------------------------------
+# Panel (vertical left dock)
+panel_items = PLTSC
+panel_size = 48 100%
 panel_margin = 0 0
-panel_padding = 8 4 8
-panel_background_id = 1
-panel_layer = top
+panel_padding = 6 10 8
+panel_background_id = 4
+wm_menu = 1
 panel_dock = 0
 panel_pivot_struts = 0
+panel_position = center left vertical
+panel_layer = top
+panel_monitor = primary
 panel_shrink = 0
-wm_menu = 1
+autohide = 0
+strut_policy = follow_size
+panel_window_name = eyecandy.vertical.archblue.tint2
+disable_transparency = 1
+mouse_effects = 1
+font_shadow = 0
+mouse_hover_icon_asb = 100 0 10
+mouse_pressed_icon_asb = 100 0 0
 
+#-------------------------------------
+# Taskbar
+taskbar_mode = single_desktop
+taskbar_hide_if_empty = 0
+taskbar_padding = 5 7 8
+taskbar_background_id = 4
+taskbar_active_background_id = 4
+taskbar_name = 0
+taskbar_hide_inactive_tasks = 0
+taskbar_hide_different_monitor = 0
+taskbar_hide_different_desktop = 0
+taskbar_always_show_all_desktop_tasks = 0
+taskbar_distribute_size = 1
+taskbar_sort_order = title
+task_align = center
+
+#-------------------------------------
+# Task
+task_text = 0
+task_icon = 1
+task_centered = 1
+urgent_nb_of_blink = 3
+task_maximum_size = 32 32
+task_padding = 4 4 4
+task_font = Noto Sans 9
+task_tooltip = 1
+task_thumbnail = 1
+task_thumbnail_size = 210
+task_font_color = #1595E3 100
+task_active_font_color = #89ccf7 100
+task_background_id = 2
+task_active_background_id = 1
+task_urgent_background_id = 3
+mouse_left = toggle_iconify
+mouse_middle = none
+mouse_right = close
+mouse_scroll_up = next_task
+mouse_scroll_down = prev_task
+
+#-------------------------------------
+# System tray
+systray_padding = 8 6 10
+systray_background_id = 8
+systray_sort = ascending
+systray_icon_size = 16
+systray_icon_asb = 100 0 10
+systray_monitor = 1
+
+#-------------------------------------
+# Launcher (pinned dock icons)
 launcher_padding = 6 4 6
 launcher_background_id = 0
 launcher_icon_background_id = 0
-launcher_icon_size = 22
+launcher_icon_size = 28
+launcher_icon_asb = 100 0 0
+launcher_icon_theme = Papirus-Dark
+launcher_icon_theme_override = 1
 launcher_item_app = terminator.desktop
 launcher_item_app = thunar.desktop
 launcher_item_app = rofi.desktop
+startup_notifications = 1
+launcher_tooltip = 1
 
-taskbar_mode = multi_desktop
-taskbar_padding = 2 2 4
-taskbar_background_id = 0
-taskbar_active_background_id = 0
-taskbar_name = 1
-taskbar_name_padding = 6 2
-taskbar_name_background_id = 0
-taskbar_name_active_background_id = 2
-taskbar_name_font = Noto Sans 9
-taskbar_name_font_color = #cad3f5 60
-taskbar_name_active_font_color = #ffffff 100
+#-------------------------------------
+# Clock
+time1_format = %H
+time2_format = %M
+time1_font = JetBrainsMono Nerd Font Bold 10
+time2_font = JetBrainsMono Nerd Font 9
+time1_timezone =
+time2_timezone =
+clock_font_color = #157FD0 100
+clock_padding = 0 3
+clock_background_id = 4
+clock_tooltip = %A - %B %d, %Y
+clock_tooltip_timezone =
+clock_lclick_command =
+clock_rclick_command =
 
-task_icon = 1
-task_text = 1
-task_centered = 1
-task_maximum_size = 180 28
-task_padding = 8 2 8
-task_font = Noto Sans 9
-task_tooltip = 1
-task_font_color = #cad3f5 88
-task_active_font_color = #ffffff 100
-task_background_id = 0
-task_active_background_id = 2
-task_urgent_background_id = 3
-task_iconified_font_color = #8087a2 70
-
-systray_padding = 6 4 6
-systray_background_id = 0
-systray_sort = ascending
-systray_icon_size = 18
-systray_icon_asb = 100 0 0
-
-clock = 1
-time1_format = %a %d %b  %H:%M
-time1_font = JetBrainsMono Nerd Font 10
-clock_font_color = #ffffff 100
-clock_padding = 10 4
-clock_background_id = 0
-clock_tooltip = %Y-%m-%d
-
-tooltip = 1
-tooltip_padding = 8 6
+#-------------------------------------
+# Tooltip
 tooltip_show_timeout = 0.5
-tooltip_hide_timeout = 0.1
-tooltip_background_id = 1
-tooltip_font = Noto Sans 9
-tooltip_font_color = #ffffff 95
-
-mouse_left = toggle_iconify
-mouse_middle = close
-mouse_right = toggle
-mouse_scroll_up = prev_task
-mouse_scroll_down = next_task
+tooltip_hide_timeout = 0.2
+tooltip_padding = 8 6
+tooltip_background_id = 7
+tooltip_font_color = #000000 100
+tooltip_font = Cantarell 9
 EOF
 
     chown -R "$TARGET_USER:$TARGET_GROUP" "$TARGET_HOME/.config/tint2"
@@ -938,57 +1460,108 @@ EOF
 }
 
 write_picom_config() {
-    info "Writing Picom compositor configuration..."
+    info "Writing Picom compositor configuration (dotfiles-ng base + local tweaks)..."
 
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/picom"
 
+    # Base is dotfiles-ng's .config/picom.conf (soft shadow, no blur, rounded
+    # corners, safe detection flags). We extend it with opacity rules for
+    # Terminator/Rofi/Dunst that dotfiles-ng didn't ship. No animations or
+    # experimental backend options -- the stock Arch picom may not support
+    # them.
     cat > "$TARGET_HOME/.config/picom/picom.conf" <<'EOF'
-backend = "glx";
-vsync = true;
-
+# Shadows
 shadow = true;
-shadow-radius = 18;
-shadow-offset-x = -10;
-shadow-offset-y = -10;
-shadow-opacity = 0.28;
+shadow-radius = 40;
+shadow-opacity = 0.1;
+shadow-offset-x = -27;
+shadow-offset-y = -27;
 shadow-exclude = [
-  "name = 'Notification'",
-  "class_g = 'Conky'",
-  "class_g = 'Tint2'",
-  "window_type = 'dock'",
-  "window_type = 'desktop'"
+    "class_g             = 'Conky'",
+    "class_g             = 'GLava'",
+    "class_g            ?= 'Notify-osd'",
+    "class_g             = 'Tint2'",
+    "window_type         = 'dock'",
+    "window_type         = 'desktop'",
+    "_NET_WM_STATE@:32a *= '_NET_WM_STATE_HIDDEN'",
+    "_GTK_FRAME_EXTENTS@:c"
+];
+xinerama-shadow-crop = true;
+
+# Fading
+fading = true;
+fade-in-step = 0.025;
+fade-out-step = 0.025;
+fade-delta = 4;
+no-fading-destroyed-argb = true;
+
+# Opacity
+inactive-opacity-override = false;
+frame-opacity = 0.92;
+opacity-rule = [
+    "92:class_g = 'Terminator' && focused",
+    "82:class_g = 'Terminator' && !focused",
+    "96:class_g = 'Rofi'",
+    "90:class_g = 'Dunst'"
 ];
 
-fading = true;
-fade-in-step = 0.035;
-fade-out-step = 0.035;
-fade-delta = 8;
-
-inactive-opacity = 0.96;
-active-opacity = 1.0;
-frame-opacity = 0.92;
-inactive-opacity-override = false;
-
+# Corners
 corner-radius = 8;
 rounded-corners-exclude = [
-  "window_type = 'dock'",
-  "window_type = 'desktop'"
+    "name               *= 'rofi'",
+    "name               *= 'screenkey'",
+    "name               *= 'tint2'",
+    "class_g             = 'Conky'",
+    "class_g             = 'GLava'",
+    "window_type         = 'dock'",
+    "window_type         = 'desktop'",
+    "_NET_WM_STATE@:32a *= '_NET_WM_STATE_HIDDEN'",
+    "_GTK_FRAME_EXTENTS@:c"
 ];
 
-opacity-rule = [
-  "92:class_g = 'Terminator' && focused",
-  "82:class_g = 'Terminator' && !focused",
-  "96:class_g = 'Rofi'",
-  "90:class_g = 'Dunst'"
+# Blur (disabled -- matches dotfiles default)
+blur-method = "none";
+blur-background-exclude = [
+    "! name             ~= ''",
+    "  name             *= 'jgmenu'",
+    "  name             *= 'tint2'",
+    "class_g             = 'Conky'",
+    "class_g             = 'GLava'",
+    "window_type         = 'dock'",
+    "window_type         = 'desktop'",
+    "_NET_WM_STATE@:32a *= '_NET_WM_STATE_HIDDEN'",
+    "_GTK_FRAME_EXTENTS@:c"
 ];
+
+# General
+backend = "glx";
+vsync = true;
+mark-wmwin-focused = true;
+mark-ovredir-focused = true;
+detect-rounded-corners = true;
+detect-client-opacity = true;
+use-ewmh-active-win = true;
+unredir-if-possible = false;
+detect-transient = true;
+detect-client-leader = true;
+glx-no-stencil = true;
+glx-no-rebind-pixmap = true;
+xrender-sync-fence = true;
+log-level = "warn";
+log-file = "/dev/null";
 
 wintypes:
 {
-  tooltip = { fade = true; shadow = true; opacity = 0.95; focus = true; full-shadow = false; };
-  dock = { shadow = false; };
-  dnd = { shadow = false; };
-  popup_menu = { opacity = 0.95; };
-  dropdown_menu = { opacity = 0.95; };
+    tooltip       = { fade = true; shadow = true;  opacity = 0.95; focus = true; full-shadow = false; };
+    menu          = { fade = true; shadow = true;  opacity = 1.00; };
+    popup_menu    = { fade = true; shadow = true;  opacity = 0.95; };
+    dropdown_menu = { fade = true; shadow = true;  opacity = 0.95; };
+    utility       = { fade = true; shadow = true;  opacity = 1.00; };
+    dialog        = { fade = true; shadow = true;  opacity = 1.00; };
+    notify        = { fade = true; shadow = true;  opacity = 1.00; };
+    dock          = { fade = true; shadow = false; clip-shadow-above = true; };
+    dnd           = { fade = true; shadow = false; };
+    unknown       = { fade = true; shadow = true;  opacity = 1.00; };
 };
 EOF
 
@@ -996,100 +1569,315 @@ EOF
 }
 
 write_rofi_config() {
-    info "Writing Rofi launcher theme..."
+    info "Writing Rofi theme stack (EyeCandy, Arch blue)..."
 
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/rofi"
+    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/rofi/themes"
+    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/rofi/themes/colorschemes"
 
+    # Ported verbatim from dotfiles-ng/.config/rofi/config.rasi, entry point
+    # switched to main.rasi (avoids loading the retired awesome-arch.rasi).
     cat > "$TARGET_HOME/.config/rofi/config.rasi" <<'EOF'
+// AwesomeArch Rofi configuration, based on dotfiles-ng EyeCandy.
 configuration {
-  modi: "drun,run,window";
-  show-icons: true;
-  terminal: "terminator";
-  drun-display-format: "{icon} {name}";
-  font: "Noto Sans 11";
+  filebrowser {
+    directories-first: true;
+  }
+  cycle:               true;
+  disable-history:     true;
+  hover-select:        true;
+  show-icons:          true;
+  steal-focus:         false;
+  window-thumbnail:    true;
+  monitor:             "-4";
+  dpi:                    0;
+  modi:                "drun,run,filebrowser,window";
+  display-drun:        "";
+  display-run:         "";
+  display-filebrowser: "";
+  display-window:      "";
+  me-select-entry:     "";
+  me-accept-entry:     "MousePrimary";
+  terminal:            "terminator";
 }
 
-@theme "~/.config/rofi/awesome-arch.rasi"
+window {
+  border: inherit;
+  border-radius: inherit;
+}
+mainbox { children: [ inputbar, listview, message ]; }
+inputbar { margin: 4px 4px 2px 4px; padding: inherit; spacing: 6px; }
+listview { scrollbar: false; margin: 0px 2px 2px 2px; padding: inherit; border: inherit; }
+element { margin: 2px; }
+element.alternate.normal { background-color: black/4%; }
+element-text, element-icon { background-color: transparent; }
+message { margin: 2px 4px 4px 4px; border: inherit; }
+mode-switcher { padding: 0px 1px; }
+button { margin: -1px; }
+
+@import "themes/colorschemes/eyecandy.rasi"
+@theme "~/.config/rofi/themes/main.rasi"
 EOF
 
-    cat > "$TARGET_HOME/.config/rofi/awesome-arch.rasi" <<'EOF'
+    # Colorscheme: pinks swapped for Arch blue, keep greens/orange intact.
+    cat > "$TARGET_HOME/.config/rofi/themes/colorschemes/eyecandy.rasi" <<'EOF'
 * {
-  bg: #10131cee;
-  bg-alt: #1b2233ee;
-  fg: #cad3f5;
-  muted: #8b93ad;
-  accent: #6f8cff;
-  urgent: #ed8796;
+  accent1:          #1793D1;
+  accent2:          #1595E3;
+  button-gradient:  linear-gradient(90, #1793D1, #1595E3);
+  background-alpha: #f9f9f9f7;
+  background:       #f9f9f9;
+  background-light: #f4f4f4;
+  background-focus: #efefef;
+  foreground:       #373e4d;
+  foreground-list:  #373e4d;
+  on:               #2be491;
+  off:              #1585CC;
+  urgent:           #fa946e;
+}
+EOF
+
+    cat > "$TARGET_HOME/.config/rofi/themes/shared.rasi" <<'EOF'
+* {
+  text-font:                        "Comfortaa Bold 12";
+  icon-font:                        "Material 14";
+  center-align:                     0.5;
+  window-padding:                   15.4% 8%;
+  button-padding:                   14px;
+  entry-padding:                    @button-padding;
+  indicator-padding:                @entry-padding;
+  message-padding:                  @indicator-padding;
+  element-padding:                  @message-padding;
+  element-border:                   0px 4px;
+  element-icon-margin:              0px 6px 0px 0px;
+  border-radius:                    8px;
+
+  exts-textbox-font:                "Comfortaa Bold 48";
+  exts-window-padding:              6.5% 4% 4% 4%;
+  exts-window-width:                26%;
+  exts-window-height:               100%;
+  exts-window-location:             east;
+  exts-window-x-offset:             0px;
+  exts-window-y-offset:             0px;
+  exts-window-border-radius:        0px 0px 0px 0px;
+  exts-button-custom-margin:        4px;
+  exts-button-custom-padding:       7px 9px;
+  exts-button-custom-border-radius: 16px;
+  exts-message-margin:              4px 4px 2px 4px;
+  exts-message-padding:             4.4% 14px 3% 14px;
+  exts-message-border-radius:       8px 8px 8px 8px;
+  exts-inputbar-margin:             2px 4px 2px 4px;
+}
+
+window {
+  width: 100%;
+  height: 100%;
+}
+EOF
+
+    cat > "$TARGET_HOME/.config/rofi/themes/main.rasi" <<'EOF'
+@import "shared.rasi"
+@import "colorschemes/eyecandy.rasi"
+
+* {
+  font: @text-font;
+  text-color: @foreground-list;
+  vertical-align: @center-align;
+}
+window {
+  background-color: @background-alpha;
+  padding: @window-padding;
+}
+inputbar { children: [ mode-switcher, entry, indicator ]; }
+mode-switcher, button,
+entry,
+indicator, num-filtered-rows, textbox-sep, num-rows {
+  background-color: @background-light;
+  text-color: @accent1;
+  horizontal-align: @center-align;
+}
+button { font: @icon-font; padding: @button-padding; }
+button.selected {
+  background-image: @button-gradient;
+  text-color: @background-light;
+}
+entry {
+  padding: @entry-padding;
+  placeholder: "FILTER";
+  placeholder-color: @background-focus;
+}
+indicator {
+  children: [ num-filtered-rows, textbox-sep, num-rows ];
+  expand: false;
+  orientation: horizontal;
+  padding: @indicator-padding;
+}
+num-filtered-rows, textbox-sep, num-rows { str: "/"; }
+listview { columns: 3; }
+element { padding: @element-padding; border: @element-border; }
+element.normal.normal,
+element.alternate.normal {
+  background-color: @background-light;
+  text-color: inherit;
+  border-color: @background-light;
+}
+element.normal.active,
+element.normal.urgent,
+element.alternate.active,
+element.alternate.urgent,
+element.selected.normal,
+element.selected.active,
+element.selected.urgent {
+  background-color: @background-focus;
+  text-color: inherit;
+}
+element.selected.normal,
+element.selected.active,
+element.selected.urgent { border-color: @accent2; }
+element.normal.active,
+element.alternate.active { border-color: @on; }
+element.normal.urgent,
+element.alternate.urgent { border-color: @urgent; }
+element-icon { margin: @element-icon-margin; }
+message {
+  background-color: @background-light;
+  padding: @message-padding;
+}
+textbox { background-color: inherit; }
+EOF
+
+    cat > "$TARGET_HOME/.config/rofi/themes/exts.rasi" <<'EOF'
+@import "shared.rasi"
+@import "colorschemes/eyecandy.rasi"
+
+* {
+  font: @text-font;
+  text-color: @foreground-list;
+  vertical-align: @center-align;
+}
+window {
+  background-color: @background-alpha;
+  padding: @exts-window-padding;
+  width: @exts-window-width;
+  height: @exts-window-height;
+  location: @exts-window-location;
+  x-offset: @exts-window-x-offset;
+  y-offset: @exts-window-y-offset;
+  border-radius: @exts-window-border-radius;
+}
+mainbox { children: [ message, inputbar, listview, button-custom ]; }
+message {
+  background-color: @background-light;
+  margin: @exts-message-margin;
+  padding: @exts-message-padding;
+  border-radius: @exts-message-border-radius;
+}
+textbox { background-color: inherit; font: @exts-textbox-font; horizontal-align: @center-align; }
+inputbar { children: [ mode-switcher ]; margin: @exts-inputbar-margin; orientation: vertical; }
+mode-switcher, button, button-custom {
+  background-color: @background-light;
+  font: @icon-font;
+  text-color: @accent1;
+}
+button { padding: @button-padding; horizontal-align: @center-align; }
+button.selected { background-image: @button-gradient; text-color: @background-light; }
+listview { columns: 1; }
+element { padding: @element-padding; border: @element-border; }
+element.normal.normal,
+element.alternate.normal {
+  background-color: @background-light;
+  text-color: inherit;
+  border-color: @background-light;
+}
+element.normal.active,
+element.normal.urgent,
+element.alternate.active,
+element.alternate.urgent,
+element.selected.normal,
+element.selected.active,
+element.selected.urgent {
+  background-color: @background-focus;
+  text-color: inherit;
+}
+element.selected.normal,
+element.selected.active,
+element.selected.urgent { border-color: @accent2; }
+element.normal.active,
+element.alternate.active { border-color: @on; }
+element.normal.urgent,
+element.alternate.urgent { border-color: @urgent; }
+button-custom {
+  expand: false;
+  margin: @exts-button-custom-margin;
+  padding: @exts-button-custom-padding;
+  border-radius: @exts-button-custom-border-radius;
+  content: "";
+  action: "kb-custom-19";
+}
+EOF
+
+    # Back-compat shim: helper scripts pass -theme awesome-arch.rasi directly.
+    # Make that file a thin alias that re-imports the new main theme stack
+    # so we don't have to touch the helper scripts.
+    cat > "$TARGET_HOME/.config/rofi/awesome-arch.rasi" <<'EOF'
+@import "themes/colorschemes/eyecandy.rasi"
+@import "themes/main.rasi"
+EOF
+
+    # Power menu theme, recolored to the Arch-blue EyeCandy palette so it
+    # does not clash with the rest of the Rofi stack.
+    cat > "$TARGET_HOME/.config/rofi/obexit.rasi" <<'EOF'
+* {
+  bg:      #f9f9f9f7;
+  bg-alt:  #f4f4f4;
+  fg:      #373e4d;
+  muted:   #8b93ad;
+  accent:  #1793D1;
+  background-color: transparent;
+  text-color: @fg;
+  font: "Comfortaa Bold 13";
 }
 
 window {
   transparency: "real";
-  location: north;
-  anchor: north;
-  y-offset: 44px;
-  width: 42%;
+  location: center;
+  anchor: center;
+  width: 260px;
+  padding: 16px;
   border: 1px;
-  border-radius: 8px;
+  border-radius: 10px;
   border-color: @accent;
   background-color: @bg;
 }
 
 mainbox {
-  padding: 14px;
-  spacing: 10px;
-  background-color: transparent;
-}
-
-inputbar {
-  padding: 10px 12px;
-  border-radius: 8px;
-  background-color: @bg-alt;
-  text-color: @fg;
-  children: [ prompt, entry ];
-}
-
-prompt {
-  padding: 0 10px 0 0;
-  text-color: @accent;
-}
-
-entry {
-  placeholder: "Search";
-  placeholder-color: @muted;
-  text-color: @fg;
+  children: [ listview ];
+  spacing: 6px;
 }
 
 listview {
-  lines: 8;
-  columns: 1;
-  fixed-height: false;
-  spacing: 6px;
+  lines: 6;
+  fixed-height: true;
+  spacing: 4px;
+  scrollbar: false;
   background-color: transparent;
 }
 
 element {
-  padding: 8px 10px;
+  padding: 9px 12px;
   border-radius: 8px;
-  text-color: @fg;
   background-color: transparent;
+  text-color: @fg;
 }
 
 element selected {
-  text-color: #ffffff;
   background-color: @accent;
-}
-
-element urgent {
-  text-color: @urgent;
-}
-
-element-icon {
-  size: 24px;
-  margin: 0 10px 0 0;
+  text-color: #ffffff;
 }
 
 element-text {
   text-color: inherit;
+  vertical-align: 0.5;
 }
 EOF
 
@@ -1101,66 +1889,73 @@ write_dunst_config() {
 
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/dunst"
 
+    # Ported from dotfiles-ng .config/dunst/eyecandy.artistic.dunstrc
+    # (the pair for the vertical artistic tint2). Urgency highlight colors
+    # stay on the green/orange/blue scale -- they are not accent1 tokens.
     cat > "$TARGET_HOME/.config/dunst/dunstrc" <<'EOF'
 [global]
-    monitor = 0
-    follow = keyboard
-    width = 360
-    height = 120
+    follow = mouse
+    width = (111, 444)
+    height = 222
     origin = top-right
-    offset = 16x48
-    scale = 0
-    notification_limit = 5
-    progress_bar = true
-    progress_bar_height = 8
+    offset = 25x50
+
+    progress_bar_height = 5
+    progress_bar_min_width = 0
+    progress_bar_max_width = 444
     progress_bar_frame_width = 0
-    indicate_hidden = yes
-    transparency = 10
-    separator_height = 2
-    padding = 12
-    horizontal_padding = 12
-    text_icon_padding = 10
-    frame_width = 1
-    frame_color = "#6f8cff"
-    separator_color = frame
-    sort = yes
+
+    transparency = 3
+    horizontal_padding = 11
+    frame_width = 6
+    frame_color = "#f9f9f9"
+    gap_size = 8
+    separator_color = "#f5f5f5"
     idle_threshold = 120
-    font = Noto Sans 10
-    line_height = 0
-    markup = full
-    format = "<b>%s</b>\n%b"
-    alignment = left
-    vertical_alignment = center
+
+    font = "JetBrainsMono Nerd Font 10"
+
+    format = "<span size='x-large' font_desc='Cantarell,JetBrainsMono Nerd Font 9' weight='bold' foreground='#63c5ea'>%s</span>\n%b"
+
     show_age_threshold = 60
-    ellipsize = middle
-    ignore_newline = no
-    stack_duplicates = true
-    hide_duplicate_count = false
-    show_indicators = yes
     icon_position = left
-    min_icon_size = 32
-    max_icon_size = 48
-    sticky_history = yes
-    history_length = 20
+    min_icon_size = 48
+    max_icon_size = 80
+
+    enable_recursive_icon_lookup = true
+    icon_theme = "Papirus-Dark"
+
+    sticky_history = false
+    dmenu = "rofi -no-show-icons -no-lazy-grab -no-plugins -dmenu -mesg 'Context Menu'"
     browser = xdg-open
+
+    mouse_left_click = close_current
+    mouse_middle_click = context_all
+    mouse_right_click = close_all
+
+    alignment = center
+    markup = full
     always_run_script = true
     corner_radius = 8
 
 [urgency_low]
-    background = "#10131c"
-    foreground = "#cad3f5"
-    timeout = 4
+    timeout = 3
+    background = "#f9f9f9"
+    foreground = "#373e4d"
+    highlight = "#1793D1"
 
 [urgency_normal]
-    background = "#10131c"
-    foreground = "#cad3f5"
-    timeout = 7
+    timeout = 6
+    background = "#f9f9f9"
+    foreground = "#373e4d"
+    highlight = "#1793D1"
 
 [urgency_critical]
-    background = "#2b1720"
-    foreground = "#ffffff"
-    frame_color = "#ed8796"
     timeout = 0
+    background = "#f9f9f9"
+    foreground = "#373e4d"
+    frame_color = "#fa946e"
+    highlight = "#fa946e"
 EOF
 
     chown -R "$TARGET_USER:$TARGET_GROUP" "$TARGET_HOME/.config/dunst"
@@ -1172,7 +1967,6 @@ write_theme_config() {
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/gtk-3.0"
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/xsettingsd"
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.config/neofetch"
-    install -d -m 700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$TARGET_HOME/.themes/AwesomeArch-Openbox/openbox-3"
 
     cat > "$TARGET_HOME/.config/gtk-3.0/settings.ini" <<'EOF'
 [Settings]
@@ -1202,46 +1996,6 @@ Gtk/CursorThemeName "Adwaita"
 Net/EnableEventSounds 0
 Gtk/ButtonImages 0
 Gtk/MenuImages 0
-EOF
-
-    cat > "$TARGET_HOME/.themes/AwesomeArch-Openbox/openbox-3/themerc" <<'EOF'
-border.width: 1
-padding.width: 8
-window.client.padding.width: 0
-window.handle.width: 3
-window.active.border.color: #6f8cff
-window.inactive.border.color: #1b1d2b
-window.active.title.bg: flat solid
-window.active.title.bg.color: #10131c
-window.inactive.title.bg: flat solid
-window.inactive.title.bg.color: #0b0e14
-window.active.label.text.color: #ffffff
-window.inactive.label.text.color: #8087a2
-window.active.button.unpressed.bg: flat solid
-window.active.button.unpressed.bg.color: #10131c
-window.active.button.unpressed.image.color: #cad3f5
-window.active.button.hover.bg: flat solid
-window.active.button.hover.bg.color: #27314a
-window.active.button.hover.image.color: #ffffff
-window.inactive.button.unpressed.bg: flat solid
-window.inactive.button.unpressed.bg.color: #0b0e14
-window.inactive.button.unpressed.image.color: #6e738d
-menu.border.width: 1
-menu.border.color: #6f8cff
-menu.items.bg: flat solid
-menu.items.bg.color: #10131c
-menu.items.text.color: #cad3f5
-menu.items.active.bg: flat solid
-menu.items.active.bg.color: #6f8cff
-menu.items.active.text.color: #ffffff
-menu.title.bg: flat solid
-menu.title.bg.color: #10131c
-menu.title.text.color: #ffffff
-osd.border.width: 1
-osd.border.color: #6f8cff
-osd.bg: flat solid
-osd.bg.color: #10131c
-osd.label.text.color: #ffffff
 EOF
 
     cat > "$TARGET_HOME/.config/neofetch/config.conf" <<'EOF'
@@ -1275,7 +2029,6 @@ EOF
         "$TARGET_HOME/.config/gtk-3.0" \
         "$TARGET_HOME/.config/xsettingsd" \
         "$TARGET_HOME/.config/neofetch" \
-        "$TARGET_HOME/.themes/AwesomeArch-Openbox" \
         "$TARGET_HOME/.gtkrc-2.0"
 }
 
@@ -1313,11 +2066,12 @@ update_user_dirs() {
 
 main() {
     install_packages
+    install_obmenu_generator
     install_neofetch_if_available
     install_bluetooth_if_present
     configure_x11_keyboard
     write_xorg_input_config
-    install_corsair_keyboard_workaround
+    install_openbox_theme
     install_wallpaper
     write_openbox_config
     write_helper_scripts
