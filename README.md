@@ -144,7 +144,7 @@ AwesomeArchLinux/
 
 #### Mandatory Access Control (AppArmor)
 
-- **AppArmor profiles** for 7 services in enforce mode: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), Stubby DNS, and chronyd.
+- **AppArmor profiles** for up to 7 services in enforce mode: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), chronyd, and — only if the Stubby binary is installed manually as an opt-in — Stubby DNS.
 - Each profile uses `abi <abi/3.0>`, precise path rules, minimal network access, and least-privilege capabilities.
 - GRUB kernel parameters (`apparmor=1 security=apparmor`) configured automatically.
 - See [`hardening/apparmor/README.md`](hardening/apparmor/README.md) for profile details and customization.
@@ -286,9 +286,10 @@ Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_o
 
 #### DNS Security
 
-- **DNS-over-TLS** via Stubby with privacy-focused upstream resolvers (Quad9 primary, Cloudflare secondary, Google fallback).
-- **systemd-resolved** configured to use Stubby as upstream, with DNSSEC, no multicast DNS, no LLMNR.
+- **DNS-over-TLS** via `systemd-resolved`'s native DoT support (Cloudflare `1.1.1.1`/`1.0.0.1` primary, Quad9 `9.9.9.9`/`149.112.112.112` fallback). A single-daemon stack avoids the NetworkManager/resolved handoff drift that a separate forwarder introduces.
+- **systemd-resolved** configured with `DNSOverTLS=yes`, `DNSSEC=allow-downgrade`, `Cache=yes`, `Domains=~.`, and no multicast DNS / LLMNR. `/etc/resolv.conf` is symlinked to the resolved stub and NetworkManager uses `dns=systemd-resolved`.
 - **DHCP DNS rejected** &mdash; Network configuration ignores DNS from DHCP to prevent DNS hijacking.
+- **Stubby** is no longer part of the default install path. Users who specifically want a separate DoT forwarder on a server/VPS can install and configure it manually (`pacman -S stubby`) — the previous Stubby wiring was removed because the NetworkManager -> resolved -> Stubby handoff drifted out of sync on desktops and broke DNS.
 
 #### Authentication Hardening
 
@@ -394,7 +395,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | **auditd** | `ProtectSystem=full`, `ReadWritePaths=/var/log/audit /run`, `AF_UNIX AF_NETLINK` | Manages kernel audit subsystem. Needs netlink for audit interface. Cannot use `strict` or `ProtectKernelTunables`. |
 | **ClamAV** | `ProtectSystem=strict`, `ProtectHome=read-only`, `TasksMax=16` | Needs to read home dirs for scanning. No `MemoryDenyWriteExecute` (bytecode JIT). |
 | **fail2ban** | `ProtectSystem=strict`, `NoNewPrivileges=no`, `CAP_NET_ADMIN CAP_NET_RAW` | Python app — no `MemoryDenyWriteExecute`. Ban actions may need privilege escalation. |
-| **Stubby** | `User=stubby`, `ProtectSystem=strict`, `PrivateDevices=yes`, `AF_UNIX AF_INET AF_INET6` | Dedicated user, network I/O only. Safe for full isolation. |
+| **Stubby** (opt-in only) | `User=stubby`, `ProtectSystem=strict`, `PrivateDevices=yes`, `AF_UNIX AF_INET AF_INET6` | Dedicated user, network I/O only. Safe for full isolation. Applies only if the user installs Stubby manually; the default install uses `systemd-resolved` native DoT. |
 | **Chrony** | `ProtectKernelTunables=no`, `ProtectClock=no`, `CAP_SYS_TIME`, `@clock` syscalls | Needs kernel tunable reads and clock adjustment. |
 | **Bluetooth** | `ProtectSystem=strict`, `ReadWritePaths=/var/lib/bluetooth /run`, `AF_UNIX AF_BLUETOOTH` | Needs to save pairing data. No `MemoryDenyWriteExecute` (GLib). Bare-metal only. |
 | **systemd-resolved** | No custom drop-in — upstream is already hardened | Custom drop-ins replace (not extend) upstream's tuned syscall filter, breaking resolved. |
@@ -514,8 +515,10 @@ The installer will prompt you for:
 - Target disk
 - Swap, root, and optional `/var` partition sizes
 - Username and hostname
+- Timezone, locale, and console keymap (with common presets and live preview via `loadkeys`)
 - LUKS encryption passphrase
 - Optional TPM2 binding
+- Sysctl profile
 - GRUB password
 - User and root passwords
 
@@ -535,6 +538,8 @@ The VPS installer will prompt you for:
 - Target disk (typically `vda` or `sda`)
 - Swap size
 - Username, hostname, and SSH port
+- Timezone, locale, and console keymap (with common presets)
+- Sysctl profile
 - GRUB password
 - User and root passwords
 
@@ -658,10 +663,10 @@ sudo ./utils/audit-check.sh --json             # Machine-readable compliance rep
 
 ### Customization
 
-- **Variables** &mdash; Modify `TIMEZONE`, `LOCALE`, `SSH_PORT`, and keymap in `chroot.sh` / `vps-chroot.sh`.
+- **Regional settings** &mdash; Timezone, locale, and console keymap are selected interactively during installation. The X11 keyboard layout is derived automatically from the console keymap via `kbd-model-map`. To change after installation, use `localectl set-keymap <keymap>` (updates both console and X11) or edit `/etc/vconsole.conf` and `/etc/X11/xorg.conf.d/00-keyboard.conf` directly.
 - **Package selection** &mdash; Adjust the `pacstrap` package list in the installer scripts.
 - **Firewall rules** &mdash; Edit `/etc/nftables.conf` to add application-specific ports.
-- **DNS providers** &mdash; Edit `/etc/stubby/stubby.yml` to change upstream DNS resolvers.
+- **DNS providers** &mdash; Edit `/etc/systemd/resolved.conf.d/dns-over-tls.conf` to change upstream DoT resolvers (the default is Cloudflare primary, Quad9 fallback). If you have installed Stubby manually as an opt-in, edit `/etc/stubby/stubby.yml` instead.
 - **CSP headers** &mdash; Customize `Content-Security-Policy` in nginx configs for your application needs.
 - **Backup paths** &mdash; Edit `backup.sh` include/exclude lists for your environment.
 - **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/prometheus/node-exporter/`.
