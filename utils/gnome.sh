@@ -83,11 +83,28 @@ else
     echo -e "${BBlue}No Bluetooth hardware detected. Skipping.${NC}"
 fi
 
-# 4) Enable GDM service
+# 4) Configure X11 keyboard from vconsole keymap
+echo -e "${BBlue}Configuring X11 keyboard layout...${NC}"
+if [[ ! -f /etc/X11/xorg.conf.d/00-keyboard.conf ]]; then
+    VCONSOLE_KEYMAP=""
+    if [[ -f /etc/vconsole.conf ]]; then
+        VCONSOLE_KEYMAP=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf)
+    fi
+    if [[ -n "$VCONSOLE_KEYMAP" ]]; then
+        # localectl handles translation and writes 00-keyboard.conf
+        localectl set-keymap "$VCONSOLE_KEYMAP" 2>/dev/null || true
+        echo -e "${BGreen}X11 keyboard layout set from vconsole keymap '$VCONSOLE_KEYMAP'.${NC}"
+    fi
+else
+    echo -e "${BBlue}X11 keyboard config already exists (from chroot), skipping.${NC}"
+fi
+
+# 5) Enable GDM service
 echo -e "${BBlue}Enabling GDM...${NC}"
 systemctl enable gdm.service
 
 echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
+
 # On an already-running system the NM -> resolved handoff only works if
 # resolved is active, /etc/resolv.conf points at its stub, and NM is
 # configured with the systemd-resolved dns backend. chroot.sh only
@@ -107,19 +124,19 @@ if systemctl is-active --quiet NetworkManager; then
     systemctl try-restart NetworkManager || true
 fi
 
-# 5) Enable PipeWire for the target user (runs as user service on login)
+# 6) Enable PipeWire for the target user (runs as user service on login)
 echo -e "${BBlue}PipeWire will start automatically on user login via systemd user units.${NC}"
 
-# 6) Apply GNOME settings for the target user
+# 7) Apply GNOME settings for the target user
 echo -e "${BBlue}Applying GNOME settings for user $TARGET_USER...${NC}"
 sudo -u "$TARGET_USER" dbus-launch gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
 
-# 7) Harden GNOME configuration
+# 8) Harden GNOME configuration
 echo -e "${BBlue}Hardening GNOME configuration...${NC}"
 systemctl disable --now geoclue.service 2>/dev/null || true
 chmod 700 "$HOME_DIR/.config" 2>/dev/null || true
 
-# 8) Clean up package cache
+# 9) Clean up package cache
 echo -e "${BBlue}Cleaning up package cache...${NC}"
 pacman -Sc --noconfirm
 
