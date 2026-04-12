@@ -24,8 +24,12 @@ fi
 DISK="${_INSTALL_DISK}"       # Example: /dev/sda or /dev/nvme0n1
 USERNAME="${_INSTALL_USER}" # Example: myuser
 HOSTNAME="${_INSTALL_HOST}" # Example: myhostname
-TIMEZONE="Europe/Zurich"
-LOCALE="en_US.UTF-8"
+# shellcheck disable=SC2034  # Cross-script env vars from installer
+TIMEZONE="${_INSTALL_TIMEZONE:-UTC}"
+# shellcheck disable=SC2034
+LOCALE="${_INSTALL_LOCALE:-en_US.UTF-8}"
+# shellcheck disable=SC2034
+KEYMAP="${_INSTALL_KEYMAP:-us}"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
 SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
@@ -73,9 +77,72 @@ locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 export LANG="$LOCALE"
 
-echo 'KEYMAP=de_CH-latin1' > /etc/vconsole.conf
-echo 'FONT=lat9w-16' >> /etc/vconsole.conf
-echo 'FONT_MAP=8859-1_to_uni' >> /etc/vconsole.conf
+cat > /etc/vconsole.conf <<VCEOF
+KEYMAP=$KEYMAP
+FONT=lat9w-16
+FONT_MAP=8859-1_to_uni
+VCEOF
+
+# --- X11 keyboard configuration ---
+# Translate vconsole keymap to X11 layout using systemd's kbd-model-map.
+vconsole_to_x11() {
+    local keymap="$1"
+    local layout="" variant="" line
+    local map_file="/usr/share/systemd/kbd-model-map"
+
+    if [[ -f "$map_file" ]]; then
+        # Match the first column (console keymap) exactly
+        line=$(awk -v km="$keymap" '$1 == km { print; exit }' "$map_file")
+        if [[ -n "$line" ]]; then
+            layout=$(echo "$line" | awk '{print $3}')
+            variant=$(echo "$line" | awk '{print $4}')
+            # kbd-model-map uses "" for empty variant
+            if [[ "$variant" == '""' || "$variant" == "-" ]]; then
+                variant=""
+            fi
+        fi
+    fi
+
+    # Fallback heuristics if map lookup failed
+    if [[ -z "$layout" ]]; then
+        case "$keymap" in
+            *_*-*)
+                # e.g. de_CH-latin1 -> layout=ch, variant=de
+                layout="${keymap#*_}"
+                layout="${layout%%-*}"
+                layout="${layout,,}"
+                variant="${keymap%%_*}"
+                ;;
+            *-*)
+                # e.g. de-latin1 -> layout=de
+                layout="${keymap%%-*}"
+                variant=""
+                ;;
+            *)
+                layout="$keymap"
+                variant=""
+                ;;
+        esac
+    fi
+
+    echo "$layout" "$variant"
+}
+
+echo -e "${BBlue}Writing X11 keyboard configuration...${NC}"
+read -r X11_LAYOUT X11_VARIANT <<< "$(vconsole_to_x11 "$KEYMAP")"
+install -d /etc/X11/xorg.conf.d
+{
+    echo 'Section "InputClass"'
+    echo '    Identifier "system-keyboard"'
+    echo '    MatchIsKeyboard "on"'
+    echo "    Option \"XkbLayout\" \"$X11_LAYOUT\""
+    echo '    Option "XkbModel" "pc105"'
+    if [[ -n "$X11_VARIANT" ]]; then
+        echo "    Option \"XkbVariant\" \"$X11_VARIANT\""
+    fi
+    echo '    Option "XkbOptions" ""'
+    echo 'EndSection'
+} > /etc/X11/xorg.conf.d/00-keyboard.conf
 
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
