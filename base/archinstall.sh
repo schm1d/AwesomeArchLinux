@@ -789,7 +789,7 @@ log_action "Installing base system"
 
 pacstrap /mnt base base-devel archlinux-keyring \
     linux linux-headers linux-hardened linux-hardened-headers \
-    linux-firmware intel-ucode amd-ucode \
+    linux-firmware wireless-regdb intel-ucode amd-ucode \
     lvm2 cryptsetup device-mapper \
     grub efibootmgr os-prober \
     networkmanager iwd dhcpcd openssh \
@@ -831,12 +831,16 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
 proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0
 EOF
 
-# Configure encrypted swap
-# genfstab captured the temporary raw swap LV we enabled during installation.
-# Replace it with the encrypted mapper device that will exist on boot.
+# Configure swap
+# The swap LV already lives inside the LUKS1-encrypted LVM container, so it
+# is encrypted end-to-end at rest. An additional plain dm-crypt wrapper with
+# a random key only adds erase-on-reboot semantics (useful for hibernation
+# attack resistance, which we don't use) at the cost of a fragile systemd
+# unit dependency chain — systemd-cryptsetup-generator races against LVM
+# activation and frequently fails with "dev-mapper-swap.device dependency
+# failed" on first boot. Point fstab at the LVM mapper directly.
 sed -i '/[[:space:]]none[[:space:]]swap[[:space:]]/d' /mnt/etc/fstab
-echo "/dev/mapper/swap none swap defaults 0 0" >> /mnt/etc/fstab
-echo "swap /dev/mapper/${LVM_NAME}-swap /dev/urandom swap,cipher=aes-xts-plain64,size=512" >> /mnt/etc/crypttab
+echo "/dev/mapper/${LVM_NAME}-swap none swap defaults 0 0" >> /mnt/etc/fstab
 
 # Setup systemd for hidepid
 mkdir -p /mnt/etc/systemd/system/systemd-logind.service.d
