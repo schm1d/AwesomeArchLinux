@@ -262,7 +262,8 @@ echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
 # nameservers baked into a regular file. Drop any stale immutable flag
 # first — older Stubby-era runs may have set chattr +i out of band.
 chattr -i /etc/resolv.conf 2>/dev/null || true
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+rm -f /etc/resolv.conf
+ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 echo -e "${BBlue}Enabling systemd-resolved...${NC}"
 # chroot cannot start services — only enable. The unit will come up on
