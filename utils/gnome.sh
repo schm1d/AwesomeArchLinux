@@ -104,6 +104,7 @@ echo -e "${BBlue}Enabling GDM...${NC}"
 systemctl enable gdm.service
 
 echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
+
 # On an already-running system the NM -> resolved handoff only works if
 # resolved is active, /etc/resolv.conf points at its stub, and NM is
 # configured with the systemd-resolved DNS backend. chroot.sh only
