@@ -107,12 +107,13 @@ echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
 
 # On an already-running system the NM -> resolved handoff only works if
 # resolved is active, /etc/resolv.conf points at its stub, and NM is
-# configured with the systemd-resolved dns backend. chroot.sh only
+# configured with the systemd-resolved DNS backend. chroot.sh only
 # writes that drop-in if /etc/NetworkManager/conf.d exists at install
 # time; when NM is installed later by this script, we must write it
 # ourselves.
 systemctl enable --now systemd-resolved
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+rm -f /etc/resolv.conf
+ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 install -d /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/dns.conf <<'EOF'
 [main]
@@ -124,7 +125,7 @@ if systemctl is-active --quiet NetworkManager; then
     systemctl try-restart NetworkManager || true
 fi
 
-# 6) Enable PipeWire for the target user (runs as user service on login)
+# 6) Enable PipeWire for the target user (runs as a user service on login)
 echo -e "${BBlue}PipeWire will start automatically on user login via systemd user units.${NC}"
 
 # 7) Apply GNOME settings for the target user
