@@ -110,6 +110,7 @@ PACMAN_PACKAGES=(
     xorg-server
     xorg-xinit
     xorg-xrandr
+    autorandr
     xorg-xsetroot
     xorg-xprop
     xorg-xwininfo
@@ -653,6 +654,14 @@ run_bg() {
 
 command -v xsetroot >/dev/null 2>&1 && xsetroot -cursor_name left_ptr
 command -v xset >/dev/null 2>&1 && xset s off -dpms
+
+# Auto-detect monitor resolution: xrandr --auto applies the preferred
+# (native) mode on every connected output. autorandr then overrides
+# that with a saved profile if one matches the current EDID set —
+# create profiles with "autorandr --save <name>" once configured.
+command -v xrandr >/dev/null 2>&1 && xrandr --auto
+command -v autorandr >/dev/null 2>&1 && autorandr --change --default default 2>/dev/null || true
+
 run_bg numlockx on
 
 if [[ -x /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 ]]; then
