@@ -1475,8 +1475,18 @@ echo -e "${BBlue}Hardening NetworkManager...${NC}"
 mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
+# RuntimeDirectory= / StateDirectory= make systemd create /run/NetworkManager
+# and /var/lib/NetworkManager (with correct ownership) before ExecStart runs.
+# Listing them in ReadWritePaths= instead would fail on first boot because
+# ProtectSystem=strict bind-mounts every ReadWritePaths= entry, and those
+# directories do not yet exist. The remaining ReadWritePaths= entries are
+# prefixed with "-" so a missing path is treated as optional rather than a
+# namespacing failure (relevant when /etc/resolv.conf is a symlink managed
+# by systemd-resolved).
+RuntimeDirectory=NetworkManager
+StateDirectory=NetworkManager
 ProtectSystem=strict
-ReadWritePaths=/var/lib/NetworkManager /run/NetworkManager /etc/NetworkManager /etc/resolv.conf
+ReadWritePaths=-/etc/NetworkManager -/etc/resolv.conf
 ProtectHome=yes
 ProtectKernelTunables=no
 ProtectKernelModules=no
