@@ -60,6 +60,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    - Target disk (e.g., `sda`, `nvme0n1`)
    - Partition sizes (swap, root, var — remainder goes to home)
    - Username and hostname
+   - Timezone, locale, and console keymap (common presets with live preview via `loadkeys`)
    - LUKS encryption passphrase
    - TPM2 binding (if hardware is detected)
    - Sysctl profile (`security`, `security+performance`, or `full-performance`)
@@ -88,7 +89,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 ### What chroot.sh Does
 
 - Timezone, locale, hostname, /etc/hosts
-- DNS-over-TLS via Stubby with systemd-resolved
+- DNS-over-TLS via systemd-resolved native DoT (Stubby is optional, not default)
 - nftables firewall (default deny, SSH rate limiting)
 - rng-tools for entropy
 - ClamAV antivirus with scheduled definition updates
