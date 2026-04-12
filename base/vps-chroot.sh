@@ -252,7 +252,8 @@ fi
 echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
 # Drop any previous immutable flag from a prior run before overwriting.
 chattr -i /etc/resolv.conf 2>/dev/null || true
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+rm -f /etc/resolv.conf
+ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 echo -e "${BBlue}Enabling systemd-resolved...${NC}"
 systemctl daemon-reload
