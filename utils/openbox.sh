@@ -256,6 +256,31 @@ EOF
     fi
 }
 
+configure_x11_keyboard() {
+    # If the chroot already wrote 00-keyboard.conf, skip — it's configured.
+    if [[ -f /etc/X11/xorg.conf.d/00-keyboard.conf ]]; then
+        info "X11 keyboard config already exists (from chroot), skipping."
+        return
+    fi
+
+    # Read the current keymap from vconsole.conf
+    local vconsole_keymap=""
+    if [[ -f /etc/vconsole.conf ]]; then
+        vconsole_keymap=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf)
+    fi
+
+    if [[ -z "$vconsole_keymap" ]]; then
+        info "No KEYMAP found in vconsole.conf, skipping X11 keyboard setup."
+        return
+    fi
+
+    # localectl set-keymap translates the vconsole keymap to X11 via
+    # /usr/share/systemd/kbd-model-map and writes 00-keyboard.conf for us.
+    info "Setting X11 keyboard layout from vconsole keymap '$vconsole_keymap'..."
+    localectl set-keymap "$vconsole_keymap" 2>/dev/null || true
+    info "X11 keyboard layout applied from vconsole keymap '$vconsole_keymap'."
+}
+
 write_xorg_input_config() {
     info "Writing libinput Xorg catchalls to /etc/X11/xorg.conf.d/50-libinput.conf..."
 
@@ -1287,6 +1312,7 @@ main() {
     install_packages
     install_neofetch_if_available
     install_bluetooth_if_present
+    configure_x11_keyboard
     write_xorg_input_config
     install_corsair_keyboard_workaround
     install_wallpaper
