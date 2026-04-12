@@ -228,7 +228,8 @@ enable_services() {
     # /etc/NetworkManager/conf.d exists at install time; when NM is
     # installed later by this script, we must write it ourselves.
     systemctl enable --now systemd-resolved
-    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    rm -f /etc/resolv.conf
+    ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     install -d /etc/NetworkManager/conf.d
     cat > /etc/NetworkManager/conf.d/dns.conf <<'EOF'
 [main]
@@ -280,6 +281,8 @@ configure_x11_keyboard() {
     localectl set-keymap "$vconsole_keymap" 2>/dev/null || true
     info "X11 keyboard layout applied from vconsole keymap '$vconsole_keymap'."
 }
+
+
 
 write_xorg_input_config() {
     info "Writing libinput Xorg catchalls to /etc/X11/xorg.conf.d/50-libinput.conf..."
