@@ -170,6 +170,116 @@ describe_sysctl_profile() {
     esac
 }
 
+# Prompt user for timezone
+ask_for_timezone() {
+    local tz
+    while true; do
+        echo -e "${BBlue}Select timezone:${NC}" >&2
+        echo "Common: UTC, US/Eastern, US/Pacific, Europe/London, Europe/Berlin," >&2
+        echo "        Europe/Zurich, Asia/Tokyo, Asia/Shanghai, Australia/Sydney" >&2
+        read -p "Timezone [UTC]: " tz
+        tz="${tz:-UTC}"
+        if [ -f "/usr/share/zoneinfo/$tz" ]; then
+            echo "$tz"
+            return 0
+        else
+            echo -e "${BRed}Invalid timezone: '$tz'. Must be a valid path under /usr/share/zoneinfo.\n${NC}" >&2
+        fi
+    done
+}
+
+# Prompt user for locale
+ask_for_locale() {
+    local loc choice
+    local -a locales=(
+        "en_US.UTF-8"
+        "en_GB.UTF-8"
+        "de_DE.UTF-8"
+        "de_CH.UTF-8"
+        "fr_FR.UTF-8"
+        "es_ES.UTF-8"
+        "it_IT.UTF-8"
+        "pt_BR.UTF-8"
+        "ja_JP.UTF-8"
+        "zh_CN.UTF-8"
+    )
+    while true; do
+        echo -e "${BBlue}Select locale:${NC}" >&2
+        local i=1
+        for loc in "${locales[@]}"; do
+            printf "  %2d) %s\n" "$i" "$loc" >&2
+            ((i++))
+        done
+        echo "   0) Other -- type a locale name" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        if [[ "$choice" == "0" ]]; then
+            read -p "Enter locale (e.g. nl_NL.UTF-8): " loc
+            if grep -q "^#\?${loc} " /etc/locale.gen 2>/dev/null; then
+                echo "$loc"
+                return 0
+            else
+                echo -e "${BRed}Locale '$loc' not found in /etc/locale.gen.\n${NC}" >&2
+            fi
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#locales[@]} )); then
+            echo "${locales[$((choice-1))]}"
+            return 0
+        else
+            echo -e "${BRed}Invalid choice.\n${NC}" >&2
+        fi
+    done
+}
+
+# Prompt user for console keymap
+ask_for_keymap() {
+    local km choice
+    local -a keymaps=(
+        "us"
+        "uk"
+        "de-latin1"
+        "de_CH-latin1"
+        "fr"
+        "es"
+        "it"
+        "pt-latin1"
+        "fr-latin1"
+        "se-lat6"
+        "br-abnt2"
+        "pl"
+        "ru"
+        "jp106"
+        "kr"
+    )
+    while true; do
+        echo -e "${BBlue}Select console keymap:${NC}" >&2
+        local i=1
+        for km in "${keymaps[@]}"; do
+            printf "  %2d) %s\n" "$i" "$km" >&2
+            ((i++))
+        done
+        echo "   0) Other -- type a keymap name" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        if [[ "$choice" == "0" ]]; then
+            read -p "Enter keymap name: " km
+            if localectl list-keymaps 2>/dev/null | grep -qx "$km"; then
+                loadkeys "$km" 2>/dev/null || true
+                echo "$km"
+                return 0
+            else
+                echo -e "${BRed}Keymap '$km' not found. Run 'localectl list-keymaps' for options.\n${NC}" >&2
+            fi
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keymaps[@]} )); then
+            km="${keymaps[$((choice-1))]}"
+            loadkeys "$km" 2>/dev/null || true
+            echo "$km"
+            return 0
+        else
+            echo -e "${BRed}Invalid choice.\n${NC}" >&2
+        fi
+    done
+}
+
 # Loop until cryptsetup open succeeds
 ask_luks_password_until_success() {
     local partition="$1"
@@ -429,6 +539,12 @@ echo -e "${BBlue}\nUser configuration:\n${NC}"
 USERNAME=$(ask_for_username)
 HOSTNAME=$(ask_for_hostname)
 
+# Regional settings
+echo -e "\n${BBlue}Regional settings:\n${NC}"
+TIMEZONE=$(ask_for_timezone)
+LOCALE=$(ask_for_locale)
+KEYMAP=$(ask_for_keymap)
+
 # Ask for SSH public key (critical: password auth will be disabled)
 echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
 echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
@@ -470,10 +586,13 @@ SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
 
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
+echo -e "Timezone: $TIMEZONE"
+echo -e "Locale: $LOCALE"
+echo -e "Keymap: $KEYMAP"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -751,6 +870,9 @@ export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export INSTALL_TIMEZONE="$TIMEZONE"
+export INSTALL_LOCALE="$LOCALE"
+export INSTALL_KEYMAP="$KEYMAP"
 export INSTALL_DATE="$(date)"
 EOF
 chmod 600 /mnt/root/.install-env
@@ -764,6 +886,9 @@ export _INSTALL_LVM="$LVM_NAME"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export _INSTALL_TIMEZONE="$TIMEZONE"
+export _INSTALL_LOCALE="$LOCALE"
+export _INSTALL_KEYMAP="$KEYMAP"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
