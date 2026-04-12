@@ -142,6 +142,7 @@ PACMAN_PACKAGES=(
     pipewire
     pipewire-pulse
     wireplumber
+    rtkit
     pavucontrol
     pamixer
     playerctl
