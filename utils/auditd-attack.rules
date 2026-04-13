@@ -36,7 +36,7 @@
 -w /etc/audit/ -p wa -k auditconfig
 -w /etc/libaudit.conf -p wa -k auditconfig
 -w /etc/audisp/ -p wa -k audispconfig
--w /etc/audit/rules.d/ -p wa -k auditconfig  # Added to monitor rules changes
+-w /etc/audit/rules.d/ -p wa -k auditconfig
 
 ## Monitor audit management tools
 -w /sbin/auditctl -p x -k audittools
@@ -85,8 +85,8 @@
 -a always,exit -F arch=b64 -S finit_module -S init_module -S delete_module -F auid!=-1 -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F arch=b32 -S finit_module -S init_module -S delete_module -F auid!=-1 -k T1215_Kernel_Modules_and_Extensions
 -w /etc/modprobe.conf -p wa -k T1215_Kernel_Modules_and_Extensions
--w /etc/modules-load.d/ -p wa -k T1215_Kernel_Modules_and_Extensions  # Added
--w /etc/modprobe.d/ -p wa -k T1215_Kernel_Modules_and_Extensions  # Added
+-w /etc/modules-load.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
+-w /etc/modprobe.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
 
 ## Time Related Events
 -a exit,always -F arch=b32 -S adjtimex -S settimeofday -S clock_settime -k T1099_Timestomp
@@ -94,8 +94,8 @@
 -a always,exit -F arch=b32 -S clock_settime -k T1099_Timestomp
 -a always,exit -F arch=b64 -S clock_settime -k T1099_Timestomp
 -w /etc/localtime -p wa -k T1099_Timestomp
--w /etc/ntp.conf -p wa -k T1099_Timestomp  # Added
--w /etc/chrony.conf -p wa -k T1099_Timestomp  # Added
+-w /etc/ntp.conf -p wa -k T1099_Timestomp
+-w /etc/chrony.conf -p wa -k T1099_Timestomp
 
 ## Stunnel
 -w /usr/sbin/stunnel -p x -k T1079_Multilayer_Encryption
@@ -109,7 +109,9 @@
 -w /etc/cron.monthly/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/cron.weekly/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/crontab -p wa -k T1168_Local_Job_Scheduling
--w /var/spool/cron/crontabs/ -k T1168_Local_Job_Scheduling
+# /var/spool/cron/crontabs/ is a Debian/Ubuntu path; Arch uses
+# /var/spool/cron/ directly.
+-w /var/spool/cron/ -k T1168_Local_Job_Scheduling
 -w /etc/inittab -p wa -k T1168_Local_Job_Scheduling
 -w /etc/init.d/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/init/ -p wa -k T1168_Local_Job_Scheduling
@@ -117,11 +119,12 @@
 -w /etc/at.deny -p wa -k T1168_Local_Job_Scheduling
 -w /var/spool/at/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/anacrontab -p wa -k T1168_Local_Job_Scheduling
--w /etc/systemd/system/*.timer -p wa -k T1168_Local_Job_Scheduling  # Added for systemd timers
+# auditctl -w does not support glob wildcards; watch the parent dir instead.
+-w /etc/systemd/system/ -p wa -k T1168_Local_Job_Scheduling
 
 ## Account Related Events
 -w /etc/sudoers -p wa -k T1078_Valid_Accounts
--w /etc/sudoers.d/ -p wa -k T1078_Valid_Accounts  # Added
+-w /etc/sudoers.d/ -p wa -k T1078_Valid_Accounts
 -w /usr/bin/passwd -p x -k T1078_Valid_Accounts
 -w /usr/sbin/groupadd -p x -k T1078_Valid_Accounts
 -w /usr/sbin/groupmod -p x -k T1078_Valid_Accounts
@@ -245,7 +248,7 @@
 
 ## Recon Related Events
 -w /etc/group -p wa -k T1087_Account_Discovery
--w /etc/passwd -p wa -k T1087_Account_Discovery  # Fixed typo: TT1087 -> T1087
+-w /etc/passwd -p wa -k T1087_Account_Discovery
 -w /etc/gshadow -k T1087_Account_Discovery
 -w /etc/shadow -k T1087_Account_Discovery
 -w /etc/security/opasswd -k T1087_Account_Discovery
@@ -263,10 +266,10 @@
 -w /var/log/faillog -p wa -k T1082_System_Information_Discovery
 -w /var/log/lastlog -p wa -k T1082_System_Information_Discovery
 -w /var/log/tallylog -p wa -k T1082_System_Information_Discovery
--w /usr/sbin/tcpdump -p x -k T1049_System_Network_Connections_Discovery  # Fixed typo
--w /usr/bin/traceroute -p x -k T1049_System_Network_Connections_Discovery  # Fixed typo
--w /usr/bin/wireshark -p x -k T1049_System_Network_Connections_Discovery  # Fixed typo
--w /usr/bin/rawshark -p x -k T1049_System_Network_Connections_Discovery  # Fixed typo
+-w /usr/sbin/tcpdump -p x -k T1049_System_Network_Connections_Discovery
+-w /usr/bin/traceroute -p x -k T1049_System_Network_Connections_Discovery
+-w /usr/bin/wireshark -p x -k T1049_System_Network_Connections_Discovery
+-w /usr/bin/rawshark -p x -k T1049_System_Network_Connections_Discovery
 -w /usr/bin/grep -p x -k T1081_Credentials_In_Files
 -w /usr/bin/egrep -p x -k T1081_Credentials_In_Files
 -w /usr/bin/ps -p x -k T1057_Process_Discovery
@@ -285,7 +288,7 @@
 -w /usr/bin/ssh -p x -k T1219_Remote_Access_Tools
 -w /usr/bin/socat -p x -k T1219_Remote_Access_Tools
 -w /usr/bin/rdesktop -p x -k T1219_Remote_Access_Tools
--w /etc/openvpn/ -p wa -k T1219_Remote_Access_Tools  # Added for VPN monitoring
+-w /etc/openvpn/ -p wa -k T1219_Remote_Access_Tools
 
 ## Third Party Software
 
@@ -296,19 +299,16 @@
 -w /etc/makepkg.conf -p wa -k T1072_Third_Party_Software_Arch
 -w /usr/bin/paru -p x -k T1072_Third_Party_Software_Arch
 
-# RPM (Redhat/CentOS)
--w /usr/bin/rpm -p x -k T1072_Third_Party_Software  # Fixed key name consistency
--w /usr/bin/yum -p x -k T1072_Third_Party_Software
-
-# YAST/Zypper/RPM (SuSE)
--w /sbin/yast -p x -k T1072_Third_Party_Software
--w /sbin/yast2 -p x -k T1072_Third_Party_Software
--w /bin/rpm -p x -k T1072_Third_Party_Software
--w /usr/bin/zypper -p x -k T1072_Third_Party_Software  # Fixed missing -p x
-
-# DPKG / APT-GET (Debian/Ubuntu)
--w /usr/bin/dpkg -p x -k T1072_Third_Party_Software
--w /usr/bin/apt-add-repository -p x -k T1072_Third_Party_Software
+# Cross-distro package managers — disabled by default on Arch (binaries
+# do not exist; auditctl errors and skips). Uncomment if installed.
+# -w /usr/bin/rpm -p x -k T1072_Third_Party_Software
+# -w /usr/bin/yum -p x -k T1072_Third_Party_Software
+# -w /sbin/yast -p x -k T1072_Third_Party_Software
+# -w /sbin/yast2 -p x -k T1072_Third_Party_Software
+# -w /bin/rpm -p x -k T1072_Third_Party_Software
+# -w /usr/bin/zypper -p x -k T1072_Third_Party_Software
+# -w /usr/bin/dpkg -p x -k T1072_Third_Party_Software
+# -w /usr/bin/apt-add-repository -p x -k T1072_Third_Party_Software
 -w /usr/bin/apt-get -p x -k T1072_Third_Party_Software
 -w /usr/bin/aptitude -p x -k T1072_Third_Party_Software
 
@@ -331,15 +331,15 @@
 -w /etc/csh.login -k T1156_bash_profile_and_bashrc
 
 ## Temporary Directory Monitoring
--w /tmp/ -p wa -k T1074_Temporary_File_Creation  # Added
--w /var/tmp/ -p wa -k T1074_Temporary_File_Creation  # Added
+-w /tmp/ -p wa -k T1074_Temporary_File_Creation
+-w /var/tmp/ -p wa -k T1074_Temporary_File_Creation
 
 ## Log all commands (Noisy, commented out)
 #-a exit,always -F arch=b64 -S execve -k T1059_CommandLine_Interface
 #-a exit,always -F arch=b32 -S execve -k T1059_CommandLine_Interface
 
 ## Remote File Copy
--w /usr/bin/ftp -p x -k T1105_Remote_File_Copy  # Fixed key name consistency
+-w /usr/bin/ftp -p x -k T1105_Remote_File_Copy
 
 ## File Deletion by User Related Events
 -a always,exit -F arch=b32 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid>=500 -F auid!=4294967295 -k T1107_File_Deletion
