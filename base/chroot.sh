@@ -1216,6 +1216,10 @@ if [[ "$NVIDIA_CARD" == true ]]; then
             ;;
     esac
 
+    # Ensure egl-wayland is installed (Wayland-EGL adapter; usually pulled
+    # in by nvidia-utils but belt + braces).
+    pacman -S --needed --noconfirm egl-wayland || true
+
     # Adjust mkinitcpio.conf
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
     sed -ri 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
@@ -1224,13 +1228,37 @@ if [[ "$NVIDIA_CARD" == true ]]; then
     if ! grep -Eq '(^|\s)kms(\s|\))' /etc/mkinitcpio.conf; then
       sed -ri 's/(HOOKS=\(.*modconf) /\1 kms /' /etc/mkinitcpio.conf
     fi
-    
+
+    # NVreg_PreserveVideoMemoryAllocations=1 is required for reliable
+    # suspend / resume on NVIDIA. Without it, GPU VRAM is not restored
+    # and gnome-shell logs "Page flip failed: drmModeAtomicCommit:
+    # Invalid argument" on wake. Combined with the nvidia-suspend /
+    # nvidia-resume / nvidia-hibernate systemd services (enabled
+    # below), this is the current (nvidia 470+) correct setup.
+    echo -e "${BBlue}Writing NVIDIA modprobe options for suspend/resume...${NC}"
+    cat > /etc/modprobe.d/nvidia.conf <<'EOF'
+# Preserve GPU memory across suspend/hibernate.
+# Pair with nvidia-suspend.service / nvidia-resume.service / nvidia-hibernate.service.
+options nvidia NVreg_PreserveVideoMemoryAllocations=1
+EOF
+
+    # Enable NVIDIA suspend/resume/hibernate helpers. These save and
+    # restore VRAM around power state transitions. With
+    # NVreg_PreserveVideoMemoryAllocations=1 above, this is the modern
+    # correct way to handle suspend on NVIDIA proprietary.
+    systemctl enable nvidia-suspend.service 2>/dev/null || true
+    systemctl enable nvidia-resume.service 2>/dev/null || true
+    systemctl enable nvidia-hibernate.service 2>/dev/null || true
+
     # Re-generate initramfs
     mkinitcpio -P  # -P regenerates all presets for all installed kernels
 
     # Adjust GRUB
+    # nvidia-drm.modeset=1  -> DRM KMS (required for Wayland, smooth boot)
+    # nvidia-drm.fbdev=1    -> expose DRM framebuffer console (nicer tty
+    #                          on NVIDIA, required by modern GDM/KMS path)
     echo -e "${BBlue}Adjusting /etc/default/grub for NVIDIA...${NC}"
-    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia-drm.modeset=1\2|' /etc/default/grub
+    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia-drm.modeset=1 nvidia-drm.fbdev=1\2|' /etc/default/grub
 
     # Update GRUB config
     if [[ -f /boot/grub/grub.cfg ]]; then
