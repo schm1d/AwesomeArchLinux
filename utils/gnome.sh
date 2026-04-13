@@ -59,11 +59,14 @@ pacman -S --noconfirm \
   baobab deja-dup sushi xdg-desktop-portal-gnome gnome-font-viewer gnome-nettool gnome-session \
   gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin \
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
-  xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
+  xdg-user-dirs-gtk xorg-server xorg-xwayland xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
   networkmanager-openconnect networkmanager-strongswan
 # Note: seahorse-nautilus was merged into seahorse. gtk-engine-murrine and
 # gtk-engines (GTK2 theme engines) were dropped from Arch repos — only in
 # AUR now, and not needed for modern GTK3/GTK4 themes.
+# xorg-xwayland is required for X11 apps to work under a Wayland session;
+# without it gnome-shell logs "Failed to init X11 display: Unknown error"
+# and X11-only apps (some older tools, screen sharing helpers) won't run.
 
 # 2) Optional packages prompt
 echo -e "${BBlue}Optional packages...${NC}"

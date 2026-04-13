@@ -90,7 +90,7 @@ if [[ ! -d "$ASSETS_DIR" ]]; then
 fi
 
 PACMAN_PACKAGES=(
-    xorg-server xorg-xinit xorg-xrandr autorandr xorg-xsetroot xorg-xprop
+    xorg-server xorg-xwayland xorg-xinit xorg-xrandr autorandr xorg-xsetroot xorg-xprop
     xorg-xwininfo xorg-xinput xorg-fonts-misc ttf-dejavu
     xf86-input-libinput libinput
     openbox obconf-qt
