@@ -82,7 +82,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 - Encrypts the third partition with LUKS1 (AES-XTS, 512-bit)
 - Creates LVM volumes (swap, root, var, home)
 - Generates a LUKS keyfile for unattended boot unlocking
-- Runs pacstrap with base, linux, linux-hardened, linux-firmware
+- Runs pacstrap with base, linux, linux-firmware
 - Detects CPU vendor and installs microcode (intel-ucode / amd-ucode)
 - Copies chroot.sh plus the selected sysctl helper/profile, then enters arch-chroot
 

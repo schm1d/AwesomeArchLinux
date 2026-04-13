@@ -788,7 +788,7 @@ echo -e "${BBlue}Installing base system...${NC}"
 log_action "Installing base system"
 
 pacstrap /mnt base base-devel archlinux-keyring \
-    linux linux-headers linux-hardened linux-hardened-headers \
+    linux linux-headers \
     linux-firmware wireless-regdb intel-ucode amd-ucode \
     lvm2 cryptsetup device-mapper \
     grub efibootmgr os-prober \
@@ -1007,7 +1007,6 @@ CRITICAL POST-INSTALLATION STEPS:
    sbctl status
    sbctl sign -s /efi/EFI/GRUB/grubx64.efi
    sbctl sign -s /boot/vmlinuz-linux
-   sbctl sign -s /boot/vmlinuz-linux-hardened
 
 5. MAINTENANCE:
    - Weekly: arch-audit

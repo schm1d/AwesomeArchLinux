@@ -444,7 +444,7 @@ echo -e "${BBlue}Installing base system...${NC}"
 log_action "Installing base system"
 
 pacstrap /mnt base base-devel archlinux-keyring \
-    linux linux-headers linux-hardened linux-hardened-headers \
+    linux linux-headers \
     linux-firmware \
     grub efibootmgr \
     networkmanager openssh \

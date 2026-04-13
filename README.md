@@ -129,7 +129,7 @@ AwesomeArchLinux/
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
 - **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs GRUB EFI binaries.
 - **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
-- **Dual Kernel** &mdash; Installs both `linux` and `linux-hardened` kernels.
+- **Mainline kernel** &mdash; Installs the standard `linux` kernel. We previously shipped `linux-hardened` alongside it, but its stricter module signing and syscall hardening break the NVIDIA proprietary driver (XWayland/DRI3 path stops bridging, gnome-shell loops on `Failed to init X11 display`) and several other proprietary kmods. Users who need `linux-hardened` for non-NVIDIA hardening can install it manually with `pacman -S linux-hardened linux-hardened-headers`.
 - **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
 
 #### Encryption & Key Management (bare-metal)
@@ -593,7 +593,6 @@ After rebooting:
    sbctl status
    sbctl sign -s /efi/EFI/GRUB/grubx64.efi
    sbctl sign -s /boot/vmlinuz-linux
-   sbctl sign -s /boot/vmlinuz-linux-hardened
    ```
 
 4. **TPM2 enrollment** (bare-metal, if TPM was selected):
