@@ -55,6 +55,15 @@ CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}'
 pacman-key --init
 pacman-key --populate archlinux
 
+# Tell GnuPG dirmngr to skip IPv6 — we disable IPv6 in sysctl, and the
+# default IPv6-first keyserver lookup logs "Network is unreachable"
+# noise on every key fetch before falling back to IPv4.
+mkdir -p /etc/gnupg
+cat > /etc/gnupg/dirmngr.conf <<'EOF'
+disable-ipv6
+honor-http-proxy
+EOF
+
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 groupdel games 2>/dev/null || true
 
