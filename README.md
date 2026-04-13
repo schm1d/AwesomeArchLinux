@@ -55,6 +55,9 @@ AwesomeArchLinux/
 |   |   +-- README.md
 |   +-- firehol/
 |   |   +-- firehol.sh       # FireHOL firewall with IP blocklist integration
+|   +-- fscrypt/
+|   |   +-- fscrypt.sh       # Per-user ext4 home encryption tied to login password (opt-in)
+|   |   +-- README.md
 |   +-- mariadb/
 |   |   +-- mariadb.sh       # MariaDB/MySQL server hardening
 |   |   +-- README.md
@@ -102,7 +105,8 @@ AwesomeArchLinux/
 |   +-- docker.sh            # Docker/Podman hardening (rootless, seccomp, AppArmor)
 |   +-- monitoring.sh        # Prometheus node_exporter + optional Grafana
 |   +-- gnome.sh             # Minimal GNOME desktop (no bloat)
-|   +-- openbox.sh           # Archcraft-inspired Openbox desktop (Tint2 top panel, Picom, Terminator)
+|   +-- openbox.sh           # Openbox desktop installer (vendors openbox-assets/, recolors to Arch blue, applies overlays)
+|   +-- openbox-assets/      # Vendored upstream Openbox/Tint2/Rofi/Dunst/Picom configs + Fleon theme (GPL)
 |   +-- neovim.sh            # NeoVim + Treesitter configuration
 |   +-- vim.sh               # Vim plugins & hardening
 |   +-- nano.sh              # Nano configuration & hardening
@@ -133,7 +137,8 @@ AwesomeArchLinux/
 - LUKS1 container with passphrase, boot key file, and recovery key (3 key slots)
 - LUKS header backup with secure external storage prompt
 - Secure cleanup: `shred` of all key material after installation
-- Encrypted swap via `/etc/crypttab`
+- Swap on the LUKS-encrypted LVM volume (no double-crypt wrapper — avoids the systemd-cryptsetup-generator + LVM activation race that triggered `dev-mapper-swap.device` dependency failures on first boot)
+- **Optional per-user home encryption** &mdash; [`hardening/fscrypt/`](hardening/fscrypt/) layers ext4 fscrypt on top of LUKS, so each user's home is unreadable to root and other users while they are logged out. Tied to the login password via `pam_fscrypt`. Opt-in via `--setup` and `--encrypt-user <name>`.
 
 #### Firewall
 
@@ -295,7 +300,7 @@ Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_o
 
 - **PAM faillock** &mdash; Account lockout after 5 failed attempts, 15-minute unlock time.
 - **Password quality** (`pam_pwquality`) &mdash; Minimum 12 characters, requires uppercase, lowercase, digit, and symbol. Enforced for root.
-- **login.defs** &mdash; YESCRYPT encryption (cost factor 7), HMAC SHA512, UMASK 027, fail delay 5s, login timeout 30s, max retries 3, password max age 730 days.
+- **login.defs** &mdash; YESCRYPT encryption (cost factor 7), HMAC SHA512, UMASK 027, fail delay 5s, login timeout 30s, max retries 3, password max age 730 days, `HOME_MODE 0700` (new accounts get a private home).
 
 #### Sudo Hardening
 
@@ -451,6 +456,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 
 - **Mount hardening** &mdash; `/tmp` and `/dev/shm` mounted with `nosuid,nodev,noexec`. `/proc` mounted with `hidepid=2`.
 - **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (644).
+- **`/home` is traversable but not listable** &mdash; `chmod 0711 /home` lets users `cd ~` but `ls /home` reveals no usernames to non-root observers. Per-user dirs stay 700 via `HOME_MODE 0700` in `/etc/login.defs` and explicit `chmod 700` at user creation.
 - **UMASK 027** &mdash; Set globally in `/etc/profile`, `/etc/bash.bashrc`, and `/etc/login.defs`.
 - **Home directory ACLs** &mdash; Default ACLs restrict group and other access.
 - **Compiler restrictions** &mdash; `gcc`, `g++`, `clang`, `make`, `as`, `ld` restricted to `compilers` group (750).
@@ -485,7 +491,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
 | `utils/gnome.sh` | Minimal GNOME desktop installation (no games/bloat) with security settings |
-| `utils/openbox.sh` | Archcraft-inspired Openbox desktop with top Tint2 panel, Picom transparency, Terminator, Rofi, Dunst, and Neofetch/Fastfetch |
+| `utils/openbox.sh` | Openbox desktop installer &mdash; vendors a recolored upstream config (vertical Tint2 dock, Fleon-ArchBlue Openbox theme, Picom, Rofi, Dunst, Terminator). Six install-time overlays add window-snapping keybinds, an `obexit` power menu (Ctrl+Alt+Delete), a dynamic Applications submenu via `obmenu-generator`, autorandr + `xrandr --auto` autodetection, and an NM &rarr; systemd-resolved DNS handoff. Vendored configs live in [`utils/openbox-assets/`](utils/openbox-assets/) (GPL-3.0/2.0; see NOTICE). |
 | `utils/neovim.sh` | NeoVim with Treesitter syntax highlighting |
 | `utils/vim.sh` | Vim with plugins and hardening |
 | `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
@@ -625,6 +631,11 @@ sudo ./hardening/react/react.sh -a /var/www/myapp -d app.example.com  # React SP
 sudo ./hardening/nodejs/nodejs.sh -a /opt/api -n api-server           # Node.js hardening
 sudo ./hardening/php/php.sh -a /var/www/myapp                         # PHP production hardening
 sudo ./hardening/wordpress/wordpress.sh -a /var/www/wordpress -d wp.example.com  # WordPress hardening
+
+# --- Per-user disk encryption (opt-in, complements LUKS FDE) ---
+sudo ./hardening/fscrypt/fscrypt.sh --setup                  # System-wide PAM wiring + fscrypt config
+sudo ./hardening/fscrypt/fscrypt.sh --encrypt-user myuser   # Encrypt an existing user's home
+sudo ./hardening/fscrypt/fscrypt.sh --status                 # Report PAM/encryption state
 
 # --- AI Agent ---
 sudo ./hardening/openclaw/openclaw.sh -u myuser --with-sandbox --with-firewall --with-apparmor  # OpenClaw hardening
