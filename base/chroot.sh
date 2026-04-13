@@ -644,12 +644,40 @@ systemctl enable auditd
 # Enable and configure necessary services
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager
+# NetworkManager-dispatcher.service runs hook scripts under
+# /etc/NetworkManager/dispatcher.d/ on connection events. Without it,
+# dbus-broker logs "Activation request for org.freedesktop.nm_dispatcher
+# failed" every time a profile changes. Enable explicitly.
+systemctl enable NetworkManager-dispatcher.service 2>/dev/null || true
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
 
-# NOTE: dhcpcd is NOT enabled — NetworkManager handles DHCP.
-# Enabling both causes conflicts (duplicate IP requests, route fighting).
+# Mask dhcpcd: pacstrap installs it but NetworkManager owns DHCP.
+# When both run, they race for the lease and dhcpcd has been observed
+# to segfault (journalctl: dhcpcd[N]: segfault at 0). Masking is
+# stronger than disable — prevents accidental re-enablement by deps.
+echo -e "${BBlue}Masking dhcpcd (NetworkManager owns DHCP)...${NC}"
+systemctl mask dhcpcd.service 2>/dev/null || true
+
+# Wi-Fi regulatory domain: the wireless-regdb package ships a udev hook
+# (/usr/bin/set-wireless-regdom) that reads /etc/conf.d/wireless-regdom
+# and applies it. If the file is missing the hook exits 1 every udev
+# event. Derive a 2-letter country code from the LOCALE (e.g.
+# de_CH.UTF-8 -> CH, en_US.UTF-8 -> US). Fall back to a blank line that
+# the user can fill in if we can't infer one.
+WIRELESS_COUNTRY=""
+case "$LOCALE" in
+    *_*) WIRELESS_COUNTRY="${LOCALE#*_}"; WIRELESS_COUNTRY="${WIRELESS_COUNTRY%%.*}" ;;
+esac
+mkdir -p /etc/conf.d
+if [[ -n "$WIRELESS_COUNTRY" && ${#WIRELESS_COUNTRY} -eq 2 ]]; then
+    echo "WIRELESS_REGDOM=\"$WIRELESS_COUNTRY\"" > /etc/conf.d/wireless-regdom
+    echo -e "${BBlue}Wi-Fi regulatory domain set to $WIRELESS_COUNTRY (from locale).${NC}"
+else
+    echo "# WIRELESS_REGDOM=\"XX\"  # set your 2-letter country code (ISO 3166)" > /etc/conf.d/wireless-regdom
+    echo -e "${BYellow}Could not infer WIRELESS_REGDOM from LOCALE; edit /etc/conf.d/wireless-regdom${NC}"
+fi
 
 # Installing Fail2ban
 echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
