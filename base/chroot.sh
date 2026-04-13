@@ -225,11 +225,24 @@ if [ -d /etc/NetworkManager ]; then
 systemd-resolved=true
 
 [connection]
-# Generate random MAC addresses for privacy
-wifi.cloned-mac-address=random
-ethernet.cloned-mac-address=random
-connection.stable-id=\${CONNECTION}/\${BOOT}
+# MAC address policy: "stable" derives a deterministic MAC from
+# stable-id + SSID (Wi-Fi) or interface name (Ethernet). Same network
+# always gets the same MAC -> same DHCP lease -> stable IP that you
+# can SSH to. Hardware MAC stays hidden from the access point.
+#
+# Use "random" instead if you actively want to avoid being tracked
+# across reconnects on hostile networks (coffee shops). The cost is
+# a fresh DHCP lease and IP every time.
+wifi.cloned-mac-address=stable
+ethernet.cloned-mac-address=stable
+# stable-id without \${BOOT} so the MAC is the same across reboots
+# (with \${BOOT} the "stable" derivation reseeds every boot).
+connection.stable-id=\${CONNECTION}
 EOF
+
+    # Wi-Fi probe-request randomization stays on (default) — that is
+    # a separate setting that randomizes only during scans, not during
+    # connections, so it has no effect on DHCP lease stability.
 fi
 
 
