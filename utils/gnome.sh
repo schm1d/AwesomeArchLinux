@@ -55,12 +55,15 @@ echo -e "${BBlue}Installing core GNOME packages...${NC}"
 pacman -S --noconfirm \
   gdm gnome gnome-backgrounds gnome-connections gnome-logs evince glib2 \
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware eog \
-  gnome-keyring networkmanager-openvpn nautilus seahorse-nautilus gnome-control-center chromium \
+  gnome-keyring networkmanager-openvpn nautilus seahorse gnome-control-center chromium \
   baobab deja-dup sushi xdg-desktop-portal-gnome gnome-font-viewer gnome-nettool gnome-session \
   gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin \
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
   xdg-user-dirs-gtk xorg-server xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
-  networkmanager-openconnect networkmanager-strongswan gtk-engine-murrine gtk-engines
+  networkmanager-openconnect networkmanager-strongswan
+# Note: seahorse-nautilus was merged into seahorse. gtk-engine-murrine and
+# gtk-engines (GTK2 theme engines) were dropped from Arch repos — only in
+# AUR now, and not needed for modern GTK3/GTK4 themes.
 
 # 2) Optional packages prompt
 echo -e "${BBlue}Optional packages...${NC}"
