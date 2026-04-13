@@ -810,13 +810,18 @@ if ! id -u "$USERNAME" >/dev/null 2>&1; then
   #   sudo,wheel    -> privilege escalation (wheel is the Arch default, sudo
   #                    is the Debian alias; kept for cross-distro tooling)
   #   uucp          -> serial port / modem access (tty devices)
-  #   video,audio   -> GPU/webcam (/dev/video*, /dev/dri/*) and ALSA (/dev/snd/*).
-  #                    Without video, pipewire logs "spa.v4l2: Permission denied"
-  #                    on every webcam/screen-capture init.
+  #   video         -> GPU + webcam enumeration (/dev/video*)
+  #   render        -> DRM render node (/dev/dri/renderD*) access for GPU
+  #                    compute / GBM / Wayland / VA-API hardware decode.
+  #                    Without it, GTK4 GSK falls back to software renderer,
+  #                    Wayland apps render slowly, and dma-buf screen share
+  #                    fails.
+  #   audio         -> ALSA (/dev/snd/*). PipeWire usually routes via logind,
+  #                    but this is the safe fallback.
   #   input         -> raw input devices (/dev/input/event*). Some games and
   #                    accessibility tools need this.
   #   storage       -> removable media mount access under polkit fallback
-  useradd -m -G sudo,wheel,uucp,video,audio,input,storage -s /bin/zsh "$USERNAME"
+  useradd -m -G sudo,wheel,uucp,video,render,audio,input,storage -s /bin/zsh "$USERNAME"
   chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
   chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"

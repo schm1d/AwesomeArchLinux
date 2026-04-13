@@ -121,6 +121,21 @@ systemctl enable gdm.service
 if lspci 2>/dev/null | grep -qi 'vga.*nvidia\|3d.*nvidia'; then
     echo -e "${BBlue}NVIDIA GPU detected — overriding GDM's NVIDIA-blocks-Wayland rule...${NC}"
     ln -sf /dev/null /etc/udev/rules.d/61-gdm.rules
+
+    # GTK4 GSK defaults to the GL/Vulkan renderer, which crashes GTK apps
+    # on NVIDIA proprietary driver with segfaults in libgtk-3.so (Nautilus
+    # is the most common victim). Force the "ngl" renderer system-wide —
+    # faster than cairo software fallback while still avoiding the crash.
+    # If "ngl" also crashes on this hardware, change to "cairo" by hand.
+    echo -e "${BBlue}Applying GSK renderer workaround for NVIDIA GTK segfaults...${NC}"
+    install -d /etc/environment.d
+    cat > /etc/environment.d/00-nvidia-gsk.conf <<'EOF'
+# Force GTK4 GSK to use the "ngl" renderer instead of the default
+# GL/Vulkan path, which segfaults in libgtk-3.so on NVIDIA proprietary.
+# Switch to "cairo" if ngl also crashes (cairo is pure software — stable
+# everywhere but slower). Revert by deleting this file.
+GSK_RENDERER=ngl
+EOF
 fi
 
 echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
