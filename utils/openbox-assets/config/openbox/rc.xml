@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc" xmlns:xi="http://www.w3.org/2001/XInclude">
+  <resistance>
+    <strength>10</strength>
+    <screen_edge_strength>20</screen_edge_strength>
+  </resistance>
+  <focus>
+    <!-- Always try to focus new windows when they appear. Other rules do apply. -->
+    <focusNew>yes</focusNew>
+    <!-- Move focus to a window when you move the mouse into it. -->
+    <followMouse>yes</followMouse>
+    <!-- Focus the last used window when changing desktops,
+         instead of the one under the mouse pointer. When followMouse is enabled. -->
+    <focusLast>yes</focusLast>
+    <!-- Move focus under the mouse, even when the mouse is not moving. -->
+    <underMouse>no</underMouse>
+    <!-- When followMouse is enabled, the mouse must be inside the window for
+         this many milliseconds (1000 = 1 sec) before moving focus to it. -->
+    <focusDelay>10</focusDelay>
+    <!-- When followMouse is enabled, and a window is given focus by moving the mouse into it,
+         also raise the window. -->
+    <raiseOnFocus>no</raiseOnFocus>
+  </focus>
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+    <monitor>Mouse</monitor>
+    <primaryMonitor>1</primaryMonitor>
+  </placement>
+  <theme>
+    <name>Fleon</name>
+    <titleLayout>CIML</titleLayout>
+    <keepBorder>yes</keepBorder>
+    <animateIconify>yes</animateIconify>
+    <font place="ActiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <weight>Normal</weight>
+      <slant>Normal</slant>
+    </font>
+    <font place="InactiveWindow">
+      <name>Cantarell</name>
+      <size>10</size>
+      <weight>Normal</weight>
+      <slant>Normal</slant>
+    </font>
+    <font place="MenuHeader">
+      <name>Cantarell</name>
+      <size>10</size>
+      <weight>Bold</weight>
+      <slant>Normal</slant>
+    </font>
+    <font place="MenuItem">
+      <name>Cantarell</name>
+      <size>9</size>
+      <weight>Normal</weight>
+      <slant>Normal</slant>
+    </font>
+    <font place="ActiveOnScreenDisplay">
+      <name>Cantarell</name>
+      <size>9</size>
+      <weight>Normal</weight>
+      <slant>Normal</slant>
+    </font>
+    <font place="InactiveOnScreenDisplay">
+      <name>Cantarell</name>
+      <size>9</size>
+      <weight>Normal</weight>
+      <slant>Normal</slant>
+    </font>
+  </theme>
+  <desktops>
+    <number>8</number>
+    <firstdesk>1</firstdesk>
+    <names>
+      <name>1</name>
+      <name>2</name>
+      <name>3</name>
+      <name>4</name>
+      <name>5</name>
+      <name>6</name>
+      <name>7</name>
+      <name>8</name>
+    </names>
+    <popupTime>0</popupTime>
+  </desktops>
+  <resize>
+    <drawContents>yes</drawContents>
+    <popupShow>NonPixel</popupShow>
+    <popupPosition>Center</popupPosition>
+    <popupFixedPosition>
+      <x>10</x>
+      <y>10</y>
+    </popupFixedPosition>
+  </resize>
+  <margins>
+    <top>10</top>
+    <bottom>10</bottom>
+    <left>55</left>
+    <right>10</right>
+  </margins>
+  <dock>
+    <position>Bottom</position>
+    <floatingX>0</floatingX>
+    <floatingY>0</floatingY>
+    <noStrut>yes</noStrut>
+    <stacking>Below</stacking>
+    <direction>Horizontal</direction>
+    <autoHide>no</autoHide>
+    <hideDelay>300</hideDelay>
+    <showDelay>300</showDelay>
+    <moveButton>Middle</moveButton>
+  </dock>
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+    <!-- Audio-volume control. -->
+    <keybind key="XF86AudioRaiseVolume">
+      <action name="Execute">
+        <command>pamixer --increase 5</command>
+      </action>
+    </keybind>
+    <keybind key="XF86AudioLowerVolume">
+      <action name="Execute">
+        <command>pamixer --decrease 5</command>
+      </action>
+    </keybind>
+    <keybind key="XF86AudioMute">
+      <action name="Execute">
+        <command>pamixer --toggle-mute</command>
+      </action>
+    </keybind>
+    <!-- Brightness control. -->
+    <keybind key="XF86MonBrightnessUp">
+      <action name="Execute">
+        <command>brightnessctl set +5%</command>
+      </action>
+    </keybind>
+    <keybind key="XF86MonBrightnessDown">
+      <action name="Execute">
+        <command>brightnessctl set 5%-</command>
+      </action>
+    </keybind>
+    <!-- Move window-focus across visible windows. -->
+    <keybind key="W-Left">
+      <action name="DirectionalCycleWindows">
+        <bar>yes</bar>
+        <dialog>no</dialog>
+        <direction>left</direction>
+      </action>
+    </keybind>
+    <keybind key="W-Right">
+      <action name="DirectionalCycleWindows">
+        <bar>yes</bar>
+        <dialog>no</dialog>
+        <direction>right</direction>
+      </action>
+    </keybind>
+    <keybind key="W-Up">
+      <action name="DirectionalCycleWindows">
+        <bar>yes</bar>
+        <dialog>no</dialog>
+        <direction>up</direction>
+      </action>
+    </keybind>
+    <keybind key="W-Down">
+      <action name="DirectionalCycleWindows">
+        <bar>yes</bar>
+        <dialog>no</dialog>
+        <direction>down</direction>
+      </action>
+    </keybind>
+    <!-- Manage workspaces/desktop. -->
+    <keybind key="W-1"><action name="GoToDesktop"><to>1</to></action></keybind>
+    <keybind key="W-2"><action name="GoToDesktop"><to>2</to></action></keybind>
+    <keybind key="W-3"><action name="GoToDesktop"><to>3</to></action></keybind>
+    <keybind key="W-4"><action name="GoToDesktop"><to>4</to></action></keybind>
+    <keybind key="W-5"><action name="GoToDesktop"><to>5</to></action></keybind>
+    <keybind key="W-6"><action name="GoToDesktop"><to>6</to></action></keybind>
+    <keybind key="W-7"><action name="GoToDesktop"><to>7</to></action></keybind>
+    <keybind key="W-8"><action name="GoToDesktop"><to>8</to></action></keybind>
+    <keybind key="W-S-1"><action name="SendToDesktop"><to>1</to></action></keybind>
+    <keybind key="W-S-2"><action name="SendToDesktop"><to>2</to></action></keybind>
+    <keybind key="W-S-3"><action name="SendToDesktop"><to>3</to></action></keybind>
+    <keybind key="W-S-4"><action name="SendToDesktop"><to>4</to></action></keybind>
+    <keybind key="W-S-5"><action name="SendToDesktop"><to>5</to></action></keybind>
+    <keybind key="W-S-6"><action name="SendToDesktop"><to>6</to></action></keybind>
+    <keybind key="W-S-7"><action name="SendToDesktop"><to>7</to></action></keybind>
+    <keybind key="W-S-8"><action name="SendToDesktop"><to>8</to></action></keybind>
+    <!-- Basic window control and menus. -->
+    <keybind key="A-space">
+      <action name="ShowMenu"><menu>client-menu</menu></action>
+    </keybind>
+    <keybind key="W-c"><action name="Close"/></keybind>
+    <keybind key="W-d"><action name="ToggleShowDesktop"/></keybind>
+    <keybind key="W-f"><action name="ToggleFullscreen"/></keybind>
+    <keybind key="W-space">
+      <action name="ShowMenu"><menu>root-menu</menu></action>
+    </keybind>
+    <keybind key="W-t"><action name="ToggleDecorations"/></keybind>
+    <keybind key="W-x"><action name="ToggleMaximize"/></keybind>
+    <keybind key="W-z"><action name="Iconify"/></keybind>
+    <!-- Switch active windows. -->
+    <keybind key="A-Tab">
+      <action name="NextWindow">
+        <bar>no</bar>
+        <finalactions>
+          <action name="Focus"/>
+          <action name="Raise"/>
+          <action name="Unshade"/>
+        </finalactions>
+      </action>
+    </keybind>
+    <keybind key="A-S-Tab">
+      <action name="PreviousWindow">
+        <bar>no</bar>
+        <finalactions>
+          <action name="Focus"/>
+          <action name="Raise"/>
+          <action name="Unshade"/>
+        </finalactions>
+      </action>
+    </keybind>
+    <!-- Misc. -->
+    <keybind key="W-e">
+      <action name="Execute"><command>thunar</command></action>
+    </keybind>
+    <keybind key="W-l">
+      <action name="Execute"><command>loginctl --no-ask-password lock-session</command></action>
+    </keybind>
+    <keybind key="W-Return">
+      <action name="Execute"><command>terminator</command></action>
+    </keybind>
+    <keybind key="W-r">
+      <action name="Execute"><command>rofi -show drun</command></action>
+    </keybind>
+    <keybind key="Print">
+      <action name="Execute"><command>maim "$HOME/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png"</command></action>
+    </keybind>
+    <keybind key="S-Print">
+      <action name="Execute"><command>maim -s "$HOME/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png"</command></action>
+    </keybind>
+  </keyboard>
+  <mouse>
+    <dragThreshold>1</dragThreshold>
+    <doubleClickTime>500</doubleClickTime>
+    <screenEdgeWarpTime>400</screenEdgeWarpTime>
+    <screenEdgeWarpMouse>false</screenEdgeWarpMouse>
+    <context name="Frame">
+      <mousebind button="W-Left" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="W-Left" action="Drag">
+        <action name="Move"/>
+      </mousebind>
+      <mousebind button="W-Right" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="W-Right" action="Drag">
+        <action name="Resize"/>
+      </mousebind>
+      <mousebind button="W-Middle" action="Press">
+        <action name="Lower"/>
+        <action name="FocusToBottom"/>
+        <action name="Unfocus"/>
+      </mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Drag">
+        <action name="Move"/>
+      </mousebind>
+      <mousebind button="Left" action="DoubleClick">
+        <action name="ToggleMaximizeFull"/>
+      </mousebind>
+      <mousebind button="Right" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+        <action name="ShowMenu"><menu>client-menu</menu></action>
+      </mousebind>
+    </context>
+    <context name="Client">
+      <mousebind button="Left" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="Middle" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="Right" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+    </context>
+    <context name="Maximize">
+      <mousebind button="Left" action="Click">
+        <action name="ToggleMaximize"/>
+      </mousebind>
+    </context>
+    <context name="Close">
+      <mousebind button="Left" action="Click">
+        <action name="Close"/>
+      </mousebind>
+    </context>
+    <context name="Iconify">
+      <mousebind button="Left" action="Click">
+        <action name="Iconify"/>
+      </mousebind>
+    </context>
+    <context name="Root">
+      <mousebind button="Right" action="Press">
+        <action name="ShowMenu"><menu>root-menu</menu></action>
+      </mousebind>
+      <mousebind button="Middle" action="Press">
+        <action name="ShowMenu"><menu>client-list-combined-menu</menu></action>
+      </mousebind>
+    </context>
+  </mouse>
+  <menu>
+    <file>menu.xml</file>
+    <hideDelay>200</hideDelay>
+    <middle>no</middle>
+    <submenuShowDelay>100</submenuShowDelay>
+    <submenuHideDelay>400</submenuHideDelay>
+    <showIcons>yes</showIcons>
+    <manageDesktops>no</manageDesktops>
+  </menu>
+  <applications>
+    <application class="*" type="normal">
+      <decor>yes</decor>
+    </application>
+  </applications>
+</openbox_config>

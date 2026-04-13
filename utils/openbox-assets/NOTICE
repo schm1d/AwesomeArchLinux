@@ -1,0 +1,41 @@
+AwesomeArchLinux licensing notice
+=================================
+
+The AwesomeArchLinux repository is licensed MIT (see the top-level LICENSE
+file). The contents of this directory (utils/openbox-assets/) are NOT
+covered by that license — they are vendored from upstream projects
+released under the GNU General Public License:
+
+  * Configuration files under config/ and the rest of openbox-assets/
+    (excluding themes/Fleon/) are derived from owl4ce/dotfiles-ng,
+    licensed GPL-3.0. Full text: LICENSE-dotfiles-ng.
+
+  * The Openbox theme under themes/Fleon/ is licensed GPL-2.0.
+    Full text: LICENSE-Fleon.
+
+These two sets of files retain their original GPL licenses. The MIT-licensed
+utils/openbox.sh script in the parent directory installs and recolors them
+at runtime; doing so is not a derivative work of the GPL files (analogous
+to a package manager that installs GPL software), so the MIT license of
+openbox.sh and the rest of the AwesomeArchLinux repository is unaffected.
+
+When redistributing this repository, the GPL files in this directory must
+continue to be accompanied by their respective LICENSE-* files and any
+modifications must be made available under the same GPL terms.
+
+Modifications applied to the upstream files at vendor time:
+  * Pink/magenta accents in tint2rc, rofi themes, dunstrc, and the Fleon
+    Openbox theme have been recolored to Arch Linux blue (#1793D1 and
+    derivatives).
+  * Buttons and executor blocks in tint2rc that referenced unshipped
+    helper scripts (music-controller, screenshot helpers, joyful-desktop
+    submenus, ncmpcpp launcher) have been removed; comments mark each
+    deletion.
+  * config/openbox/autostart.sh has been rewritten to drop the upstream
+    dependency on a sourced ~/.joyfuld helper file.
+  * config/rofi/config.rasi imports themes/colorschemes/eyecandy.rasi
+    instead of the upstream-default mechanical.rasi (we vendor only the
+    eyecandy colorscheme).
+
+A summary of the vendor + recolor + overlay pipeline is documented in
+README.md alongside this file.

@@ -1,0 +1,86 @@
+// User's rofi theme configuration.
+// Vendored from https://github.com/owl4ce/dotfiles (GPL-3.0).
+
+configuration {
+
+  filebrowser {
+    directories-first: true;
+  }
+
+  cycle:               true;
+  disable-history:     true;
+  hover-select:        true;
+  show-icons:          true;
+  steal-focus:         false;
+  window-thumbnail:    true;
+
+  monitor:             "-4";
+  dpi:                    0;
+
+  modi:                "drun,run,filebrowser,window";
+
+  display-drun:        "";
+  display-run:         "";
+  display-filebrowser: "";
+  display-window:      "";
+//display-calc:        "";
+
+  me-select-entry:     "";
+  me-accept-entry:     "MousePrimary";
+}
+
+// Default vertical with max 3 columns with fixed spacing configuration,
+// for rofi version 1.7.x, 4px for outer space, 6px for inner space.
+
+window {
+  border: inherit;
+  border-radius: inherit;
+}
+
+mainbox {
+  children: [ inputbar, listview, message ];
+}
+
+inputbar {
+  margin: 4px 4px 2px 4px;
+  padding: inherit;
+  spacing: 6px;
+}
+
+listview {
+  scrollbar: false;
+  margin: 0px 2px 2px 2px;
+  padding: inherit;
+  border: inherit;
+}
+
+element {
+  margin: 2px;
+}
+
+element.alternate.normal {
+  background-color: black/4%;
+}
+
+element-text,
+element-icon {
+  background-color: transparent;
+}
+
+message {
+  margin: 2px 4px 4px 4px;
+  border: inherit;
+}
+
+mode-switcher {
+  padding: 0px 1px;
+}
+
+button {
+  margin: -1px;
+}
+
+// AwesomeArch: upstream imported mechanical.rasi (not vendored). Redirected
+// to eyecandy.rasi which ships alongside this file.
+@import "themes/colorschemes/eyecandy.rasi"
+@theme "~/.config/rofi/themes/main.rasi"
