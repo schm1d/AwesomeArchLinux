@@ -1215,9 +1215,16 @@ NoNewPrivileges=no
 # 'no' or users can't install packages, write to /var, /etc, or /home.
 ProtectSystem=no
 ProtectHome=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
+# ProtectKernel*=yes bind-mounts /run/systemd/inaccessible/dir over
+# /usr/lib/modules, /proc/kcore, /proc/kallsyms, /proc/kmsg, /dev/kmsg
+# in sshd's mount namespace. PAM-spawned user sessions inherit that
+# namespace, breaking modinfo/nvidia-modprobe/DKMS/GTK GSK device probes
+# in every SSH login. Must be off on sshd for the same reason
+# ProtectSystem and ProtectHome are off here: sshd spawns interactive
+# user sessions that need normal kernel-info access.
+ProtectKernelTunables=no
+ProtectKernelModules=no
+ProtectKernelLogs=no
 ProtectControlGroups=yes
 # AF_NETLINK is required for PAM/auditd communication during session setup.
 # Without it, sshd drops connections immediately after authentication.

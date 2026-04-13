@@ -1582,9 +1582,21 @@ NoNewPrivileges=no
 # 'no' or users can't install packages, write to /var, /etc, or /home.
 ProtectSystem=no
 ProtectHome=no
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
+# ProtectKernel*=yes bind-mounts /run/systemd/inaccessible/dir over
+# /usr/lib/modules, /proc/kcore, /proc/kallsyms, /proc/kmsg, /dev/kmsg
+# in sshd's mount namespace. PAM-spawned user sessions INHERIT that
+# namespace, so every SSH login (and any GNOME/Wayland session started
+# from one) gets:
+#   - "modinfo: Module nvidia not found" (modules.dep unreadable)
+#   - "nvidia-modprobe -c0 -u failed exit 1" (no module deps)
+#   - DKMS "Built modules are missing in the kernel modules folder"
+#   - GTK GSK / EGL device probes degrade silently
+#   - dmesg / sysctl reads fail in user shells
+# These must be off on sshd for the same reason ProtectSystem and
+# ProtectHome are off here: sshd spawns interactive user sessions.
+ProtectKernelTunables=no
+ProtectKernelModules=no
+ProtectKernelLogs=no
 ProtectControlGroups=yes
 # AF_NETLINK is required for PAM/auditd communication during session setup.
 # Without it, sshd drops connections immediately after authentication.
