@@ -106,6 +106,20 @@ fi
 echo -e "${BBlue}Enabling GDM...${NC}"
 systemctl enable gdm.service
 
+# GDM ships /usr/lib/udev/rules.d/61-gdm.rules which disables Wayland
+# whenever the NVIDIA proprietary driver is loaded. That rule is stale
+# for modern NVIDIA (470+) where Wayland works fine, and when it kicks
+# in GDM falls back to an Xorg session that can also fail, leaving
+# "gnome-shell: Failed to init X11 display: Unknown error" in the
+# journal and no usable desktop. Symlinking the rule to /dev/null
+# overrides it without touching the system file, so GDM can start
+# Wayland on NVIDIA. Safe no-op on AMD/Intel (the rule only matches
+# NVIDIA proprietary).
+if lspci 2>/dev/null | grep -qi 'vga.*nvidia\|3d.*nvidia'; then
+    echo -e "${BBlue}NVIDIA GPU detected — overriding GDM's NVIDIA-blocks-Wayland rule...${NC}"
+    ln -sf /dev/null /etc/udev/rules.d/61-gdm.rules
+fi
+
 echo -e "${BBlue}Ensuring DNS-over-TLS works with NetworkManager...${NC}"
 
 # On an already-running system the NM -> resolved handoff only works if

@@ -78,7 +78,12 @@ echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 # games is a group on Arch, not a user — userdel not needed
 groupdel games 2>/dev/null || true
 
-timedatectl set-timezone "$TIMEZONE"
+# timedatectl requires systemd to be running; inside arch-chroot it isn't,
+# so the call silently fails and /etc/localtime is never created. GLib-based
+# apps (GNOME calendar, epiphany, anything using GDateTime) then assert on
+# NULL timezone and misbehave. Use the classic symlink approach instead.
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+echo "$TIMEZONE" > /etc/timezone
 hwclock --systohc --utc
 
 sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
@@ -287,8 +292,12 @@ wifi.backend=iwd
 EOF
 fi
 
-# Disable wpa_supplicant to prevent radio contention with iwd
-systemctl mask wpa_supplicant.service 2>/dev/null || true
+# Disable wpa_supplicant from auto-starting (NM uses iwd as the Wi-Fi
+# backend), but do NOT mask it: masking breaks D-Bus on-demand activation
+# of fi.w1.wpa_supplicant1, which GNOME's network settings and some VPN
+# plugins still depend on (dbus-broker logs "wpa_supplicant.service is
+# masked" otherwise).
+systemctl disable wpa_supplicant.service 2>/dev/null || true
 systemctl enable iwd.service
 
 echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
@@ -644,11 +653,12 @@ systemctl enable auditd
 # Enable and configure necessary services
 echo -e "${BBlue}Enabling NetworkManager...${NC}"
 systemctl enable NetworkManager
-# NetworkManager-dispatcher.service runs hook scripts under
-# /etc/NetworkManager/dispatcher.d/ on connection events. Without it,
-# dbus-broker logs "Activation request for org.freedesktop.nm_dispatcher
-# failed" every time a profile changes. Enable explicitly.
-systemctl enable NetworkManager-dispatcher.service 2>/dev/null || true
+# NetworkManager-dispatcher.service is D-Bus activated by NM on demand
+# (via org.freedesktop.nm_dispatcher). On Arch we do NOT enable it
+# directly — the unit is designed for D-Bus activation and a direct
+# `systemctl enable` causes "unit is invalid" errors. The dispatcher
+# will activate automatically if any script in /etc/NetworkManager/
+# dispatcher.d/ is registered.
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd
