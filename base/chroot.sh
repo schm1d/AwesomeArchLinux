@@ -541,6 +541,14 @@ echo -e "${BBlue}Setting password expiring dates...${NC}"
 sed -i '/^PASS_MAX_DAYS/c\PASS_MAX_DAYS 730' /etc/login.defs # modify here the amount of MAX days
 sed -i '/^PASS_MIN_DAYS/c\PASS_MIN_DAYS 2' /etc/login.defs
 
+# HOME_MODE 0700 so new user homes aren't world-readable.
+# The value is replaced in-place if present, appended otherwise.
+if grep -qE '^[#[:space:]]*HOME_MODE' /etc/login.defs; then
+    sed -i 's/^[#[:space:]]*HOME_MODE.*/HOME_MODE\t\t0700/' /etc/login.defs
+else
+    echo -e "HOME_MODE\t\t0700" >> /etc/login.defs
+fi
+
 # Logging Failed Login Attempts
 echo -e "${BBlue}Configuring PAM to Log Failed Attempts...${NC}"
 
@@ -727,6 +735,7 @@ echo -e "${BBlue}Adding the user $USERNAME...${NC}"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
   useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"  # Create user
   chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
+  chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"
 
 else
@@ -1277,6 +1286,10 @@ EOF
 echo -e "${BBlue}Setting permission on config files...${NC}"
 
 chmod 0700 /boot
+# /home is traversable (users can reach their own dir) but not listable:
+# `ls /home` reveals no usernames to non-root observers. Per-user dirs
+# stay 700 via HOME_MODE in login.defs.
+chmod 0711 /home
 chmod 644 /etc/passwd
 chown root:root /etc/passwd
 chmod 644 /etc/group
