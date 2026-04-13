@@ -65,6 +65,15 @@ CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}'
 pacman-key --init
 pacman-key --populate archlinux
 
+# Tell GnuPG dirmngr to skip IPv6 — we disable IPv6 in sysctl, and the
+# default IPv6-first keyserver lookup logs "Network is unreachable"
+# noise on every key fetch before falling back to IPv4.
+mkdir -p /etc/gnupg
+cat > /etc/gnupg/dirmngr.conf <<'EOF'
+disable-ipv6
+honor-http-proxy
+EOF
+
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 # games is a group on Arch, not a user — userdel not needed
 groupdel games 2>/dev/null || true
@@ -254,7 +263,20 @@ if [ -d /etc/NetworkManager/conf.d ]; then
 [main]
 dns=systemd-resolved
 EOF
+
+    # Use iwd as the Wi-Fi backend so NM and iwd don't fight for the
+    # radio (iwd is installed by archinstall.sh; default NM backend is
+    # wpa_supplicant, which causes scan failures and "Network is down"
+    # errors when iwd is also enabled).
+    cat > /etc/NetworkManager/conf.d/wifi-backend.conf <<'EOF'
+[device]
+wifi.backend=iwd
+EOF
 fi
+
+# Disable wpa_supplicant to prevent radio contention with iwd
+systemctl mask wpa_supplicant.service 2>/dev/null || true
+systemctl enable iwd.service
 
 echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
 # Force the symlink; overwrite whatever pacstrap / chroot left behind so
