@@ -61,7 +61,8 @@ pacman -S --noconfirm \
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
   xdg-user-dirs-gtk xorg-server xorg-xwayland xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
   networkmanager-openconnect networkmanager-strongswan \
-  qt5-wayland qt6-wayland
+  qt5-wayland qt6-wayland \
+  veracrypt
 # Note: seahorse-nautilus was merged into seahorse. gtk-engine-murrine and
 # gtk-engines (GTK2 theme engines) were dropped from Arch repos — only in
 # AUR now, and not needed for modern GTK3/GTK4 themes.
