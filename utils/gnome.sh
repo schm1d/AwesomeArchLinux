@@ -113,6 +113,17 @@ fi
 echo -e "${BBlue}Enabling GDM...${NC}"
 systemctl enable gdm.service
 
+# The base installer mounts /proc with hidepid=2,gid=proc. Without
+# membership in the `proc` group, gdm cannot walk /proc/<pid>/cgroup
+# under the hood of PAM/logind session setup, which leaves Wayland
+# sessions unable to register ("GdmDisplay: Session never registered").
+# Regular desktop users get added to `proc` in chroot.sh's useradd;
+# the system `gdm` user needs it too.
+# (Same root cause as nixpkgs issue #112867 for GNOME 45 Wayland.)
+if id -u gdm >/dev/null 2>&1; then
+    gpasswd -a gdm proc 2>/dev/null || true
+fi
+
 # GDM ships /usr/lib/udev/rules.d/61-gdm.rules which disables Wayland
 # whenever the NVIDIA proprietary driver is loaded. That rule is stale
 # for modern NVIDIA (470+) where Wayland works fine, and when it kicks
