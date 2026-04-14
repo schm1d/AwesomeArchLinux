@@ -810,6 +810,16 @@ if ! id -u "$USERNAME" >/dev/null 2>&1; then
   #   sudo,wheel    -> privilege escalation (wheel is the Arch default, sudo
   #                    is the Debian alias; kept for cross-distro tooling)
   #   uucp          -> serial port / modem access (tty devices)
+  #   proc          -> required because we mount /proc with
+  #                    hidepid=2,gid=proc (see archinstall.sh). Without
+  #                    membership the user can only see their own /proc
+  #                    entries, and GNOME's sd_pid_get_user_unit()-style
+  #                    lookups silently fail with ESRCH, breaking logind
+  #                    session tracking — symptoms include
+  #                    "Error fetching user unit for own pid",
+  #                    "Failed to register AuthenticationAgent", and
+  #                    GNOME apps not showing their windows. (Same root
+  #                    cause as the NixOS discourse/42440 thread.)
   #   video         -> GPU + webcam enumeration (/dev/video*)
   #   render        -> DRM render node (/dev/dri/renderD*) access for GPU
   #                    compute / GBM / Wayland / VA-API hardware decode.
@@ -821,7 +831,7 @@ if ! id -u "$USERNAME" >/dev/null 2>&1; then
   #   input         -> raw input devices (/dev/input/event*). Some games and
   #                    accessibility tools need this.
   #   storage       -> removable media mount access under polkit fallback
-  useradd -m -G sudo,wheel,uucp,video,render,audio,input,storage -s /bin/zsh "$USERNAME"
+  useradd -m -G sudo,wheel,uucp,proc,video,render,audio,input,storage -s /bin/zsh "$USERNAME"
   chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
   chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"

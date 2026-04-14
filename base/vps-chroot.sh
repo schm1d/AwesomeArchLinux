@@ -771,7 +771,12 @@ fi
 
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
-  useradd -m -G sudo,wheel,uucp -s /bin/zsh "$USERNAME"
+  # `proc` group is required because /proc is mounted with
+  # hidepid=2,gid=proc (see archinstall.sh). Without it a non-root
+  # user can only see their own /proc entries, which breaks PID
+  # tracking in logind and systemd-user. Same root cause as the
+  # NixOS GNOME-45 Wayland startup failure reported on Discourse.
+  useradd -m -G sudo,wheel,uucp,proc -s /bin/zsh "$USERNAME"
   chown "$USERNAME:$USERNAME" /home/"$USERNAME"
   chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"
