@@ -105,8 +105,6 @@ AwesomeArchLinux/
 |   +-- docker.sh            # Docker/Podman hardening (rootless, seccomp, AppArmor)
 |   +-- monitoring.sh        # Prometheus node_exporter + optional Grafana
 |   +-- gnome.sh             # Minimal GNOME desktop (no bloat)
-|   +-- openbox.sh           # Openbox desktop installer (vendors openbox-assets/, recolors to Arch blue, applies overlays)
-|   +-- openbox-assets/      # Vendored upstream Openbox/Tint2/Rofi/Dunst/Picom configs + Fleon theme (GPL)
 |   +-- neovim.sh            # NeoVim + Treesitter configuration
 |   +-- vim.sh               # Vim plugins & hardening
 |   +-- nano.sh              # Nano configuration & hardening
@@ -491,7 +489,6 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
 | `utils/gnome.sh` | Minimal GNOME desktop installation (no games/bloat). Installer configures NVIDIA Wayland (kms-modifiers, egl-wayland, Qt Wayland plugins, GDM Wayland-block rule override), sets `GSK_RENDERER=ngl` on NVIDIA to avoid GTK segfaults, and wires the NM→systemd-resolved DNS handoff. **Requires the user to be in the `proc` group** (the base installer adds this automatically); without it, gnome-shell loses logind session tracking because of our `/proc hidepid=2,gid=proc` mount. |
-| `utils/openbox.sh` | Openbox desktop installer &mdash; vendors a recolored upstream config (vertical Tint2 dock, Fleon-ArchBlue Openbox theme, Picom, Rofi, Dunst, Terminator). Six install-time overlays add window-snapping keybinds, an `obexit` power menu (Ctrl+Alt+Delete), a dynamic Applications submenu via `obmenu-generator`, autorandr + `xrandr --auto` autodetection, and an NM &rarr; systemd-resolved DNS handoff. Vendored configs live in [`utils/openbox-assets/`](utils/openbox-assets/) (GPL-3.0/2.0; see NOTICE). |
 | `utils/neovim.sh` | NeoVim with Treesitter syntax highlighting |
 | `utils/vim.sh` | Vim with plugins and hardening |
 | `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
@@ -664,7 +661,6 @@ sudo ./utils/backup.sh --backup --prune        # Run backup with retention
 sudo ./utils/aide-config.sh --init             # Initialize AIDE file integrity DB
 sudo ./utils/monitoring.sh --with-prometheus --with-grafana  # Full monitoring stack
 sudo ./utils/docker.sh --podman -u myuser      # Rootless Podman containers
-sudo ./utils/openbox.sh                        # Lightweight Openbox desktop rice
 sudo ./utils/audit-check.sh                    # Check hardening compliance
 sudo ./utils/audit-check.sh --json             # Machine-readable compliance report
 ```
