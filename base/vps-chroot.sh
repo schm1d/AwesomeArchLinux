@@ -1037,7 +1037,12 @@ chmod 0700 /boot
 # /home is traversable (users can reach their own dir) but not listable:
 # `ls /home` reveals no usernames to non-root observers. Per-user dirs
 # stay 700 via HOME_MODE in login.defs.
+# See chroot.sh for rationale on the tmpfiles.d rule.
 chmod 0711 /home
+install -Dm644 /dev/stdin /etc/tmpfiles.d/home-perms.conf <<'EOF'
+# Keep /home traversable-but-not-listable across boots.
+d /home 0711 root root -
+EOF
 chmod 644 /etc/passwd
 chown root:root /etc/passwd
 chmod 644 /etc/group

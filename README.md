@@ -490,7 +490,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | `utils/backup.sh` | Encrypted borg backups with configurable retention and systemd timer |
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
-| `utils/gnome.sh` | Minimal GNOME desktop installation (no games/bloat) with security settings |
+| `utils/gnome.sh` | Minimal GNOME desktop installation. **Currently known-broken on the fully hardened base**: GNOME apps fail to activate via the shell (D-Bus `Activate` times out, gnome-shell logs `Error fetching own systemd unit: No such process` and `Failed to register AuthenticationAgent`). Root cause is a conflict between our systemd service hardening and the gnome-shell ↔ systemd-user integration that needs live A/B bisection. **Use `utils/openbox.sh` instead** for a working desktop on this base. Contributions welcome. |
 | `utils/openbox.sh` | Openbox desktop installer &mdash; vendors a recolored upstream config (vertical Tint2 dock, Fleon-ArchBlue Openbox theme, Picom, Rofi, Dunst, Terminator). Six install-time overlays add window-snapping keybinds, an `obexit` power menu (Ctrl+Alt+Delete), a dynamic Applications submenu via `obmenu-generator`, autorandr + `xrandr --auto` autodetection, and an NM &rarr; systemd-resolved DNS handoff. Vendored configs live in [`utils/openbox-assets/`](utils/openbox-assets/) (GPL-3.0/2.0; see NOTICE). |
 | `utils/neovim.sh` | NeoVim with Treesitter syntax highlighting |
 | `utils/vim.sh` | Vim with plugins and hardening |

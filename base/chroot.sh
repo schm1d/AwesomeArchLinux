@@ -1122,16 +1122,19 @@ configure_bluetooth() {
 
 cat <<EOF >/etc/bluetooth/main.conf
 [General]
-# Hardening and Auto-Enable settings
-AutoEnable=true             # Enable automatic Bluetooth activation
+# Hardening and Auto-Enable settings.
+# NOTE: bluetoothd does NOT support inline hash comments in main.conf;
+# it treats everything after the equals sign as part of the value.
+# Keep values clean (no trailing comments).
+AutoEnable=true
 DiscoverableTimeout=0
 PairableTimeout=0
-Privacy=device              # Enhanced privacy
-JustWorksRepairing=confirm   # Require confirmation for pairing repairs
-MinEncryptionKeySize=16      # Minimum encryption key size
-SecureConnectionsOnly=true   # Enforce secure connections
-ControllerMode=le           # Use Low Energy mode
-Name=$HOSTNAME-Bluetooth    # Use hostname in Bluetooth device name
+Privacy=device
+JustWorksRepairing=confirm
+MinEncryptionKeySize=16
+SecureConnectionsOnly=true
+ControllerMode=le
+Name=$HOSTNAME-Bluetooth
 EOF
 
   # Systemd override (using install -Dm)
@@ -1405,7 +1408,16 @@ chmod 0700 /boot
 # /home is traversable (users can reach their own dir) but not listable:
 # `ls /home` reveals no usernames to non-root observers. Per-user dirs
 # stay 700 via HOME_MODE in login.defs.
+#
+# We set it two ways: a one-shot chmod here, AND a tmpfiles.d rule that
+# re-applies the mode on every boot. The tmpfiles rule is the
+# authoritative one — it survives package post-install hooks (pambase,
+# systemd, etc.) that sometimes chmod /home back to 755.
 chmod 0711 /home
+install -Dm644 /dev/stdin /etc/tmpfiles.d/home-perms.conf <<'EOF'
+# Keep /home traversable-but-not-listable across boots. See chroot.sh.
+d /home 0711 root root -
+EOF
 chmod 644 /etc/passwd
 chown root:root /etc/passwd
 chmod 644 /etc/group
