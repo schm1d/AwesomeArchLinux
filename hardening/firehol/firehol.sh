@@ -46,13 +46,19 @@ EOF
 UPDATE_ONLY=false
 while getopts ":l:uh" opt; do
   case ${opt} in
-    l) LEVEL=${OPTARG} ;;    
-    u) UPDATE_ONLY=true ;;    
-    h) usage ;;              
-    :) echo_err "Option -$OPTARG requires an argument."; usage ;;  
-   \?) echo_err "Invalid option: -$OPTARG"; usage ;;  
+    l) LEVEL=${OPTARG} ;;
+    u) UPDATE_ONLY=true ;;
+    h) usage ;;
+    :) echo_err "Option -$OPTARG requires an argument."; usage ;;
+   \?) echo_err "Invalid option: -$OPTARG"; usage ;;
   esac
 done
+
+# Validate LEVEL is one of the FireHOL blocklist levels (1-3)
+if ! [[ "$LEVEL" =~ ^[1-3]$ ]]; then
+  echo_err "Invalid -l level '$LEVEL' (must be 1, 2, or 3)."
+  usage
+fi
 
 # Ensure running as root
 if [[ ${EUID} -ne 0 ]]; then
@@ -67,41 +73,51 @@ exec > >(tee -a "$LOGFILE") 2>&1
 # ==============================
 
 install_pkgs() {
-  local pkgs=(wget git cronie iputils iproute2 jq less)
+  local pkgs=(wget git base-devel cronie iputils iproute2 jq less)
   echo_msg "Installing dependencies: ${pkgs[*]}"
-  pacman -Syu --noconfirm "${pkgs[@]}"
+  pacman -Sy --needed --noconfirm "${pkgs[@]}"
+}
+
+# Run makepkg as an unprivileged, throwaway build user.
+# $1 = build directory (must already contain PKGBUILD)
+_run_makepkg_as_build_user() {
+  local builddir=$1
+  local build_user="_makepkg"
+
+  if [[ ${EUID} -eq 0 ]]; then
+    useradd -r -M -d /var/empty -s /usr/bin/nologin "$build_user" 2>/dev/null || true
+    chown -R "$build_user":"$build_user" "$builddir"
+    ( cd "$builddir" && sudo -u "$build_user" makepkg -si --noconfirm )
+    userdel "$build_user" 2>/dev/null || true
+  else
+    ( cd "$builddir" && makepkg -si --noconfirm )
+  fi
 }
 
 install_yay() {
-  if ! command -v yay &>/dev/null; then
-    echo_msg "Installing yay AUR helper"
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    git clone https://aur.archlinux.org/yay.git "$tmpdir"
-
-    # makepkg refuses to run as root — use a temporary build user
-    if [[ ${EUID} -eq 0 ]]; then
-      local build_user="_makepkg"
-      useradd -r -M -d "$tmpdir" -s /usr/bin/nologin "$build_user" 2>/dev/null || true
-      chown -R "$build_user":"$build_user" "$tmpdir"
-      pushd "$tmpdir"
-      sudo -u "$build_user" makepkg -si --noconfirm
-      popd
-      userdel "$build_user" 2>/dev/null || true
-    else
-      pushd "$tmpdir"
-      makepkg -si --noconfirm
-      popd
-    fi
-
-    rm -rf "$tmpdir"
+  if command -v yay &>/dev/null; then
+    return 0
   fi
+  echo_msg "Installing yay AUR helper"
+  local tmpdir builddir
+  tmpdir=$(mktemp -d)
+  builddir="$tmpdir/yay"
+  git clone https://aur.archlinux.org/yay.git "$builddir"
+  _run_makepkg_as_build_user "$builddir"
+  rm -rf "$tmpdir"
 }
 
 install_aur_pkg() {
   local pkg=$1
   echo_msg "Installing $pkg from AUR"
-  sudo -u "$SUDO_USER" yay -S --noconfirm "$pkg"
+  # Build AUR packages via makepkg under a throwaway build user instead of
+  # relying on $SUDO_USER (which is unset when the script is run as root).
+  local tmpdir builddir
+  tmpdir=$(mktemp -d)
+  builddir="$tmpdir/$pkg"
+  git clone "https://aur.archlinux.org/${pkg}.git" "$builddir"
+  _run_makepkg_as_build_user "$builddir"
+  rm -rf "$tmpdir"
 }
 
 backup_conf() {
@@ -118,6 +134,14 @@ write_firehol_conf() {
   cat > "$tmpconf" <<EOF
 version 6
 
+# Blocklist ipsets must be created before 'blacklist' can reference them.
+# update-ipsets must have downloaded these at least once.
+ipv4 ipset create firehol_level${level} hash:net
+ipv4 ipset addfile firehol_level${level} /etc/firehol/ipsets/firehol_level${level}.netset
+
+ipv4 ipset create fullbogons hash:net
+ipv4 ipset addfile fullbogons /etc/firehol/ipsets/fullbogons.netset
+
 # Hardened drop-all policy
 interface any world
     policy drop
@@ -127,19 +151,26 @@ interface any world
     server https accept
     client all accept
 
-# Blocklists: firehol_level$level
-blacklist fullbogons ipset:firehol_level$level
+    # Apply blocklists
+    blacklist full ipset:firehol_level${level}
+    blacklist full ipset:fullbogons
 EOF
   install -Dm600 "$tmpconf" "$dest"
   rm -f "$tmpconf"
 }
 
+# Prime the ipsets so firehol.conf can load them on first run.
+prime_ipsets() {
+  echo_msg "Enabling and fetching FireHOL ipsets (level $LEVEL, fullbogons)"
+  /usr/bin/update-ipsets enable "firehol_level${LEVEL}" fullbogons || true
+  /usr/bin/update-ipsets
+}
+
 setup_cron() {
   local cronfile=/etc/cron.d/firehol-ipsets entry
-  entry="$CRON_SCHEDULE root /usr/bin/update-ipsets && /usr/bin/firehol try"
+  entry="$CRON_SCHEDULE root /usr/bin/update-ipsets ; /usr/bin/firehol try"
   echo_msg "Configuring cron job: $entry"
-  echo "$entry" > /tmp/firehol-ipsets
-  install -Dm644 /tmp/firehol-ipsets "$cronfile"
+  install -Dm644 /dev/stdin "$cronfile" <<<"$entry"
   systemctl enable --now cronie
 }
 
@@ -154,7 +185,6 @@ enable_firehol_service() {
 # ==============================
 if ! $UPDATE_ONLY; then
   install_pkgs
-  install_yay
   install_aur_pkg firehol
   install_aur_pkg update-ipsets
 fi
@@ -170,7 +200,8 @@ done
 # Backup and write config
 mkdir -p /etc/firehol
 backup_conf /etc/firehol/firehol.conf "/etc/firehol/firehol.conf.bak.$(date +%F_%H%M%S)"
-write_firehol_conf /etc/firehol/firehol.conf $LEVEL
+prime_ipsets
+write_firehol_conf /etc/firehol/firehol.conf "$LEVEL"
 
 # Automate updates
 setup_cron
