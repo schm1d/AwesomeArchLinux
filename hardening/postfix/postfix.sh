@@ -105,16 +105,17 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -d)         DOMAIN="$2"; shift 2 ;;
-        -H)         MAIL_HOSTNAME="$2"; shift 2 ;;
-        -s)         DKIM_SELECTOR="$2"; shift 2 ;;
-        -r)         RELAY_HOST="$2"; shift 2 ;;
-        -R)         RELAY_PORT="$2"; shift 2 ;;
-        -u)         RELAY_USER="$2"; shift 2 ;;
-        -p)         RELAY_PASS="$2"; shift 2 ;;
-        -e)         ADMIN_EMAIL="$2"; shift 2 ;;
+        -d)         need_arg "$@"; DOMAIN="$2"; shift 2 ;;
+        -H)         need_arg "$@"; MAIL_HOSTNAME="$2"; shift 2 ;;
+        -s)         need_arg "$@"; DKIM_SELECTOR="$2"; shift 2 ;;
+        -r)         need_arg "$@"; RELAY_HOST="$2"; shift 2 ;;
+        -R)         need_arg "$@"; RELAY_PORT="$2"; shift 2 ;;
+        -u)         need_arg "$@"; RELAY_USER="$2"; shift 2 ;;
+        -p)         need_arg "$@"; RELAY_PASS="$2"; shift 2 ;;
+        -e)         need_arg "$@"; ADMIN_EMAIL="$2"; shift 2 ;;
         --dry-run)  DRY_RUN=true; shift ;;
         -h|--help)  usage ;;
         *)          err "Unknown option: $1" ;;
@@ -125,8 +126,10 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$DOMAIN" ]] || err "Domain is required (-d). Use -h for help."
 
-if [[ -n "$RELAY_HOST" ]] && ! [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] ; then
-    err "Invalid relay port: $RELAY_PORT (must be 1-65535)"
+if [[ -n "$RELAY_HOST" ]]; then
+    if ! [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] || (( RELAY_PORT < 1 || RELAY_PORT > 65535 )); then
+        err "Invalid relay port: $RELAY_PORT (must be 1-65535)"
+    fi
 fi
 
 # Derive defaults
@@ -165,15 +168,34 @@ backup_file() {
     fi
 }
 
-# --- Helper: detect AUR helper ---
-aur_helper() {
-    if command -v yay &>/dev/null; then
-        echo "yay"
-    elif command -v paru &>/dev/null; then
-        echo "paru"
-    else
-        echo ""
-    fi
+# --- Helper: build an AUR package from source under a throwaway user ---
+# $1 = package name
+# Clones the AUR repo, runs makepkg -si as _makepkg (never as root, never
+# relying on SUDO_USER/NOPASSWD), then cleans up the build user.
+install_from_aur() {
+    local pkg="$1"
+    local tmpdir builddir build_user="_makepkg"
+    tmpdir="$(mktemp -d)"
+    builddir="$tmpdir/$pkg"
+
+    git clone --depth=1 "https://aur.archlinux.org/${pkg}.git" "$builddir"
+
+    useradd -r -M -d /var/empty -s /usr/bin/nologin "$build_user" 2>/dev/null || true
+    chown -R "$build_user":"$build_user" "$tmpdir"
+
+    # Grant passwordless pacman -U/-S for the duration of this build
+    local sudoers="/etc/sudoers.d/99-${build_user}-postfix-sh"
+    printf '%s ALL=(root) NOPASSWD: /usr/bin/pacman\n' "$build_user" > "$sudoers"
+    chmod 440 "$sudoers"
+
+    ( cd "$builddir" && sudo -u "$build_user" makepkg -si --noconfirm )
+    local rc=$?
+
+    rm -f "$sudoers"
+    userdel "$build_user" 2>/dev/null || true
+    rm -rf "$tmpdir"
+
+    return $rc
 }
 
 # =============================================================================
@@ -192,49 +214,23 @@ for pkg in postfix dovecot redis clamav s-nail pigeonhole; do
     fi
 done
 
-# rspamd (community/AUR)
+# rspamd (community, with AUR fallback)
 if pacman -Qi rspamd &>/dev/null; then
     info "rspamd is already installed"
-elif pacman -Si rspamd &>/dev/null 2>&1; then
+elif pacman -Si rspamd &>/dev/null; then
     pacman -S --noconfirm --needed rspamd
     msg "rspamd installed"
 else
-    AUR="$(aur_helper)"
-    if [[ -n "$AUR" ]]; then
-        sudo -u nobody "$AUR" -S --noconfirm rspamd 2>/dev/null || \
-            warn "Failed to install rspamd from AUR. Install manually: $AUR -S rspamd"
-    else
-        warn "rspamd not in repos and no AUR helper (yay/paru) found. Install manually."
-    fi
+    install_from_aur rspamd && msg "rspamd installed from AUR" \
+        || warn "Failed to install rspamd from AUR; install manually."
 fi
 
 # opendkim (AUR)
 if pacman -Qi opendkim &>/dev/null; then
     info "opendkim is already installed"
 else
-    AUR="$(aur_helper)"
-    if [[ -n "$AUR" ]]; then
-        # AUR helpers cannot run as root; find a non-root user
-        BUILD_USER=""
-        if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-            BUILD_USER="$SUDO_USER"
-        else
-            # Create temporary build user
-            BUILD_USER="_makepkg"
-            useradd -m -r -s /usr/bin/nologin "$BUILD_USER" 2>/dev/null || true
-        fi
-        if sudo -u "$BUILD_USER" "$AUR" -S --noconfirm opendkim 2>/dev/null; then
-            msg "opendkim installed from AUR"
-        else
-            warn "Failed to install opendkim from AUR. Install manually: $AUR -S opendkim"
-        fi
-        # Clean up temp user if we created one
-        if [[ "$BUILD_USER" == "_makepkg" ]]; then
-            userdel -r "$BUILD_USER" 2>/dev/null || true
-        fi
-    else
-        warn "opendkim is in the AUR. Install yay or paru, then: yay -S opendkim"
-    fi
+    install_from_aur opendkim && msg "opendkim installed from AUR" \
+        || warn "Failed to install opendkim from AUR; install manually."
 fi
 
 # =============================================================================
@@ -274,11 +270,16 @@ if ! getent passwd vmail &>/dev/null; then
 fi
 
 mkdir -p "$MAIL_DIR/$DOMAIN"
-chown -R vmail:vmail "$MAIL_DIR"
-chmod -R 770 "$MAIL_DIR"
-
 # Dovecot sieve directory
 mkdir -p "$MAIL_DIR/sieve-before"
+
+# Ownership: everything under MAIL_DIR belongs to vmail.
+chown -R vmail:vmail "$MAIL_DIR"
+# Permissions: set mode on directories only; leave existing mail files
+# (Maildir uses 0600) untouched. A blanket `chmod -R 770` would make every
+# stored message group-writable and executable.
+chmod 0770 "$MAIL_DIR"
+find "$MAIL_DIR" -type d -exec chmod 0770 {} +
 
 # OpenDKIM directories
 mkdir -p /etc/opendkim/keys/"$DOMAIN"
@@ -303,14 +304,8 @@ msg "Mail directories created"
 
 msg "Generating DH parameters..."
 
-if [[ -f /etc/postfix/dh2048.pem ]]; then
-    info "Postfix DH params already exist, skipping"
-else
-    openssl dhparam -out /etc/postfix/dh2048.pem 2048
-    chmod 644 /etc/postfix/dh2048.pem
-    msg "Postfix DH params generated (2048-bit)"
-fi
-
+# Postfix 3.6+ supplies its own 2048-bit FFDHE group by default, so no
+# smtpd_tls_dh*_param_file is needed. Dovecot still wants its own dh.pem.
 if [[ -f /etc/dovecot/dh.pem ]]; then
     info "Dovecot DH params already exist, skipping"
 else
@@ -341,6 +336,9 @@ mydestination = \$myhostname, localhost.\$mydomain, localhost
 # --- Network ---
 inet_interfaces = all
 inet_protocols = all
+# Explicit mynetworks: don't rely on mynetworks_style=subnet, which would
+# grant permit_mynetworks to the whole LAN subnet the server sits on.
+mynetworks = 127.0.0.0/8 [::1]/128
 
 # --- Virtual mailbox ---
 virtual_mailbox_domains = ${DOMAIN}
@@ -362,7 +360,6 @@ smtpd_tls_mandatory_ciphers = high
 smtpd_tls_mandatory_exclude_ciphers = aNULL, MD5, DES, 3DES, RC4, eNULL
 smtpd_tls_exclude_ciphers = aNULL, MD5, DES, 3DES, RC4, eNULL
 tls_high_cipherlist = ${TLS_CIPHERS}
-smtpd_tls_dh1024_param_file = /etc/postfix/dh2048.pem
 smtpd_tls_eecdh_grade = ultra
 smtpd_tls_loglevel = 1
 
@@ -381,8 +378,8 @@ smtpd_forbid_bare_newline_exclusions = \$mynetworks
 
 # --- Postscreen (connection-level screening) ---
 postscreen_access_list = permit_mynetworks
-postscreen_dnsbl_sites = zen.spamhaus.org*2, bl.spamcop.net, b.barracudacentral.org
-postscreen_dnsbl_threshold = 2
+postscreen_dnsbl_sites = zen.spamhaus.org*3, bl.spamcop.net*2, b.barracudacentral.org*2
+postscreen_dnsbl_threshold = 3
 postscreen_dnsbl_action = enforce
 postscreen_greet_action = enforce
 postscreen_pipelining_enable = yes
@@ -616,7 +613,6 @@ else
     DKIM_CONFIGURED=true
 
     DKIM_KEY_DIR="/etc/opendkim/keys/$DOMAIN"
-    mkdir -p "$DKIM_KEY_DIR"
 
     # Generate RSA 2048 key if not present
     if [[ ! -f "$DKIM_KEY_DIR/$DKIM_SELECTOR.private" ]]; then
@@ -722,6 +718,14 @@ ssl_dh = </etc/dovecot/dh.pem
 EOF
 
 # 10-mail.conf — Mail storage
+#
+# NOTE on encryption-at-rest:
+#   mail_crypt only encrypts when per-user keypairs exist. Loading the plugin
+#   alone is a no-op. After creating a Dovecot user, run:
+#     doveadm -o plugin/mail_crypt_private_password=<pw> \\
+#             mailbox cryptokey generate -u user@${DOMAIN} -U
+#   (Or set mail_crypt_global_private_key / _public_key below to sign all
+#   mail with one shared keypair — simpler, weaker isolation.)
 cat > /etc/dovecot/conf.d/10-mail.conf <<EOF
 mail_location = maildir:${MAIL_DIR}/%d/%n/Maildir
 mail_uid = ${VMAIL_UID}
@@ -730,7 +734,7 @@ mail_privileged_group = vmail
 first_valid_uid = ${VMAIL_UID}
 last_valid_uid = ${VMAIL_UID}
 
-# Encryption at rest (ProtonMail-grade)
+# Encryption at rest — requires per-user key generation to actually encrypt.
 mail_plugins = \$mail_plugins mail_crypt
 plugin {
   mail_crypt_curve = secp521r1
@@ -803,10 +807,10 @@ protocol imap {
 EOF
 
 # 90-sieve.conf — Server-side filtering
-cat > /etc/dovecot/conf.d/90-sieve.conf <<'EOF'
+cat > /etc/dovecot/conf.d/90-sieve.conf <<EOF
 plugin {
   sieve = file:~/sieve;active=~/.dovecot.sieve
-  sieve_before = /var/mail/vdomains/sieve-before/
+  sieve_before = ${MAIL_DIR}/sieve-before/
 }
 EOF
 
@@ -896,8 +900,23 @@ report_settings {
 }
 EOF
 
-    # ARC signing
+    # ARC signing — rspamd runs as _rspamd and cannot read the OpenDKIM
+    # private key (mode 0600, owned opendkim:opendkim). Stage a copy that
+    # _rspamd owns so ARC signing actually succeeds at runtime.
     if [[ "$DKIM_CONFIGURED" == true ]]; then
+        RSPAMD_ARC_KEY="/var/lib/rspamd/arc-${DKIM_SELECTOR}.key"
+        if getent passwd _rspamd &>/dev/null; then
+            install -d -o _rspamd -g _rspamd -m 0750 /var/lib/rspamd
+            install -o _rspamd -g _rspamd -m 0600 \
+                "/etc/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.private" \
+                "$RSPAMD_ARC_KEY"
+        else
+            mkdir -p /var/lib/rspamd
+            cp "/etc/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.private" "$RSPAMD_ARC_KEY"
+            chmod 0600 "$RSPAMD_ARC_KEY"
+            warn "_rspamd user not found yet; ARC key ownership may need fixing after rspamd install"
+        fi
+
         cat > /etc/rspamd/local.d/arc.conf <<EOF
 allow_envfrom_empty = true;
 allow_hdrfrom_mismatch = false;
@@ -905,7 +924,7 @@ allow_hdrfrom_multiple = false;
 allow_username_mismatch = false;
 sign_authenticated = true;
 use_domain = "header";
-path = "/etc/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.private";
+path = "${RSPAMD_ARC_KEY}";
 selector = "${DKIM_SELECTOR}";
 EOF
         chmod 640 /etc/rspamd/local.d/arc.conf
@@ -994,6 +1013,7 @@ if [[ -f /etc/clamav/clamd.conf ]]; then
         echo 'LocalSocket /run/clamav/clamd.ctl' >> /etc/clamav/clamd.conf
 else
     cat > /etc/clamav/clamd.conf <<'EOF'
+User clamav
 LocalSocket /run/clamav/clamd.ctl
 LogSyslog yes
 DatabaseDirectory /var/lib/clamav
@@ -1135,7 +1155,7 @@ DevicePolicy=closed
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-ReadWritePaths=/var/lib/rspamd
+ReadWritePaths=/var/lib/rspamd /run/rspamd /var/log/rspamd
 CapabilityBoundingSet=
 EOF
 fi
@@ -1149,23 +1169,34 @@ msg "systemd hardening applied to all mail services"
 
 msg "Adding firewall rules for mail ports..."
 
-if command -v nft &>/dev/null && nft list table inet filter &>/dev/null 2>&1; then
-    for port in 25 465 587 993; do
-        nft insert rule inet filter input tcp dport "$port" accept 2>/dev/null || true
+MAIL_PORTS=(25 465 587 993)
+
+if command -v nft &>/dev/null && nft list table inet filter &>/dev/null; then
+    for port in "${MAIL_PORTS[@]}"; do
+        # Skip if an identical accept rule already exists (handle):
+        if ! nft -a list chain inet filter input 2>/dev/null \
+                | grep -Eq "tcp dport ${port}[[:space:]]+accept"; then
+            nft add rule inet filter input tcp dport "$port" accept || true
+        fi
     done
-    # Persist rules
-    if [[ -f /etc/nftables.conf ]]; then
-        nft list ruleset > /etc/nftables.conf
-    fi
-    msg "nftables rules added for ports 25, 465, 587, 993"
+    # Persist: dump with a flush header so `nft -f` is idempotent on reload.
+    {
+        printf '#!/usr/bin/nft -f\nflush ruleset\n\n'
+        nft list ruleset
+    } > /etc/nftables.conf
+    chmod 0644 /etc/nftables.conf
+    msg "nftables rules added for ports ${MAIL_PORTS[*]}"
 elif command -v iptables &>/dev/null; then
-    for port in 25 465 587 993; do
-        iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
-        ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+    for port in "${MAIL_PORTS[@]}"; do
+        # Only insert if the rule isn't already present, avoiding duplicates on rerun.
+        iptables  -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+            iptables  -I INPUT -p tcp --dport "$port" -j ACCEPT
+        ip6tables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+            ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT
     done
-    msg "iptables rules added for ports 25, 465, 587, 993"
+    warn "iptables rules added for ports ${MAIL_PORTS[*]} but NOT persisted — install iptables-nft + iptables-save to persist."
 else
-    warn "No firewall tool found. Manually open ports 25, 465, 587, 993."
+    warn "No firewall tool found. Manually open ports ${MAIL_PORTS[*]}."
 fi
 
 # =============================================================================
@@ -1262,8 +1293,9 @@ echo
 if [[ "$DRY_RUN" == false ]] && [[ -f "$CERT_DIR/cert.pem" ]]; then
     TLSA_HASH=$(openssl x509 -in "$CERT_DIR/cert.pem" -noout -pubkey 2>/dev/null | \
                 openssl pkey -pubin -outform DER 2>/dev/null | \
-                openssl dgst -sha256 -binary 2>/dev/null | \
-                xxd -p -c 64 2>/dev/null || echo "ERROR_GENERATING_HASH")
+                openssl dgst -sha256 -hex 2>/dev/null | \
+                awk '{print $NF}' || echo "ERROR_GENERATING_HASH")
+    TLSA_HASH=${TLSA_HASH:-ERROR_GENERATING_HASH}
 
     if [[ "$TLSA_HASH" != "ERROR_GENERATING_HASH" ]]; then
         echo -e "${C_GREEN}--- DANE/TLSA Records ---${C_NC}"
