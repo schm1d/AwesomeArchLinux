@@ -8,8 +8,9 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 
 | Script | Purpose |
 |--------|---------|
-| `archinstall.sh` | Bare-metal installer — LVM on LUKS1, UEFI, optional TPM2 |
+| `archinstall.sh` | Bare-metal installer — LVM on LUKS1, UEFI, optional TPM2, desktop/server profile |
 | `chroot.sh` | Bare-metal post-install — system hardening inside chroot |
+| `systemd-boot.sh` | Server profile helper — bootctl install + TPM 2.0 enrollment + crypttab.initramfs |
 | `vps-install.sh` | VPS/cloud installer — single partition, swap file, BIOS/UEFI |
 | `vps-chroot.sh` | VPS post-install — same hardening adapted for VPS |
 | `vps-harden.sh` | VPS live hardening — filesystem mounts on a running system |
@@ -64,6 +65,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    - LUKS encryption passphrase
    - TPM2 binding (if hardware is detected)
    - Sysctl profile (`security`, `security+performance`, or `full-performance`)
+   - Boot profile (`desktop` = GRUB + passphrase, `server` = systemd-boot + TPM 2.0 silent unlock)
 
 5. After partitioning and pacstrap, the script copies `chroot.sh` plus the selected sysctl helper/profile into the new system and enters chroot automatically.
 
@@ -251,6 +253,58 @@ sudo ./secureBoot.sh
 - Signs EFI binaries (GRUB, kernel, etc.)
 - Enrolls keys into UEFI firmware
 - Supports `-d` (key directory), `-p` (EFI mount), `-k` (key size), `-v` (validity days)
+
+---
+
+## Server Boot Profile (systemd-boot + TPM 2.0)
+
+When `archinstall.sh` prompts for boot profile, pick **`server`** to install a fully unattended boot path:
+
+- **No bootloader prompt.** GRUB is not installed; systemd-boot loads the kernel directly from the unencrypted ESP.
+- **No LUKS passphrase prompt.** A TPM 2.0–sealed key unlocks the root volume silently, bound to PCRs 0+7 (UEFI firmware state + Secure Boot state).
+- **Recovery passphrase keyslot** remains as the manual fallback when the TPM seal becomes invalid (e.g., after a firmware update or hardware change).
+
+Intended for headless boxes that must come back online after `sudo reboot` without a human at the console.
+
+### What the server profile changes vs the desktop profile
+
+| | Desktop (default) | Server |
+|---|---|---|
+| Bootloader | GRUB (`pacman -S grub`) | systemd-boot (`bootctl install`) |
+| LUKS unlock at boot | Interactive passphrase prompt | TPM 2.0 sealed key (silent) |
+| initramfs hooks | `udev + encrypt + keymap` (or `sd-encrypt` if TPM2 enabled) | `systemd + sd-encrypt + sd-vconsole` |
+| `/etc/crypttab.initramfs` | absent | `<lvm> UUID=<luks-uuid> - tpm2-device=auto` |
+| Kernel cmdline shape | `cryptdevice=…cryptkey=rootfs:/etc/luksKeys/boot.key` | `rd.luks.name=<uuid>=<lvm> rd.luks.options=tpm2-device=auto` |
+| Kernel + initramfs location | `/boot/` (inside LUKS) | `/efi/EFI/Linux/` (on the ESP) |
+| `/efi` free space required | ~50 MiB | ~250 MiB (kernel + initramfs + microcode) |
+
+The kernel-hardening cmdline flags (`slab_nomerge`, `init_on_alloc=1`, `pti=on`, etc.) and sysctl profile choice are identical across both profiles.
+
+### Hard prerequisites for the server profile
+
+- TPM 2.0 hardware detected at install time (`/sys/class/tpm/tpm0/tpm_version_major == 2`). Without it, `archinstall.sh` automatically falls back to desktop with a warning.
+- `systemd ≥ 252` (ships `systemd-cryptenroll --tpm2-device=auto`).
+- `/efi` partition with at least 500 MiB free.
+
+### What survives + what to keep off-host
+
+After installation, the LUKS header carries multiple keyslots:
+
+- **Recovery passphrase** — entered during `archinstall.sh`. Write it down off the host (paper, password manager, USB). This is your only way back in if both the TPM seal breaks **and** the boot.key file is lost.
+- **`/etc/luksKeys/boot.key`** — random keyfile seeded pre-chroot. Used to authorize the TPM enrollment during install. **Back it up off-host** (e.g., `sudo cat /etc/luksKeys/boot.key | …` to a USB drive), then optionally remove it after a confirmed silent boot.
+- **TPM-sealed slot** — the everyday auto-unlock keyslot. Regenerated on demand if PCRs change:
+
+  ```bash
+  sudo systemd-cryptenroll --wipe-slot=tpm2 /dev/<luks-part>
+  sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 \
+      --unlock-key-file=/etc/luksKeys/boot.key /dev/<luks-part>
+  ```
+
+### Caveats
+
+- Firmware updates that change measured PCRs 0 or 7 invalidate the TPM seal; the next boot will fall through to the passphrase prompt. Re-enroll with the command above after the new firmware is stable.
+- Toggling Secure Boot on or off after install also invalidates the seal (PCR 7 changes).
+- The server profile does not enable Secure Boot itself — pair it with `secureBoot.sh` if you want signed-binary verification on top of the silent-unlock path.
 
 ---
 

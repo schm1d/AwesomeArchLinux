@@ -170,6 +170,41 @@ describe_sysctl_profile() {
     esac
 }
 
+# Prompt user for boot profile.
+#
+# - desktop: GRUB + interactive LUKS passphrase prompt (default; what every
+#   prior version of this installer produced).
+# - server:  systemd-boot + TPM 2.0 sealed key unlock. Boot is fully silent
+#   (no GRUB password, no LUKS passphrase) when PCRs 0+7 match. A recovery
+#   passphrase keyslot remains as the fallback. Intended for headless boxes
+#   that need to come back online without a human at the console.
+#
+# The server profile requires TPM 2.0 hardware. If absent, this prompt falls
+# back to desktop with a warning so the install never silently breaks.
+ask_for_boot_profile() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select boot profile:${NC}" >&2
+        echo "1) desktop  (GRUB + interactive LUKS passphrase) [default]" >&2
+        echo "2) server   (systemd-boot + TPM 2.0 silent unlock, recovery passphrase fallback)" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "desktop"; return 0 ;;
+            2) echo "server";  return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+describe_boot_profile() {
+    case "$1" in
+        desktop) echo "desktop (GRUB + passphrase)" ;;
+        server)  echo "server (systemd-boot + TPM 2.0 silent unlock)" ;;
+        *)       echo "$1" ;;
+    esac
+}
+
 # Prompt user for timezone
 ask_for_timezone() {
     local tz
@@ -584,15 +619,38 @@ echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
 SYSCTL_PROFILE=$(ask_for_sysctl_profile)
 SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
 
+echo -e "\n${BBlue}Boot profile:${NC}"
+BOOT_PROFILE=$(ask_for_boot_profile)
+BOOT_PROFILE_LABEL=$(describe_boot_profile "$BOOT_PROFILE")
+
+# Server profile presupposes a usable TPM 2.0. If the earlier TPM detection
+# failed, refuse to start the install rather than producing an unbootable box.
+if [[ "$BOOT_PROFILE" == "server" ]]; then
+    if [ "$TPM_AVAILABLE" != true ]; then
+        echo -e "${BRed}Server profile requires TPM 2.0, but no usable TPM 2.0 was detected.${NC}"
+        echo -e "${BRed}Falling back to desktop profile (GRUB + passphrase).${NC}"
+        BOOT_PROFILE="desktop"
+        BOOT_PROFILE_LABEL=$(describe_boot_profile "$BOOT_PROFILE")
+    else
+        # Server profile is silent-unlock by definition: force TPM-LUKS on,
+        # default PCRs 0+7 if the user wasn't already enrolling.
+        USE_TPM_LUKS=true
+        TPM_PCRS="${TPM_PCRS:-0+7}"
+        echo -e "${BGreen}Server profile selected — TPM 2.0 LUKS unlock enabled (PCRs: $TPM_PCRS).${NC}"
+        log_action "Server profile forced USE_TPM_LUKS=true, PCRs=$TPM_PCRS"
+    fi
+fi
+
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
 echo -e "Timezone: $TIMEZONE"
 echo -e "Locale: $LOCALE"
 echo -e "Keymap: $KEYMAP"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+echo -e "Boot Profile:   $BOOT_PROFILE_LABEL"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Boot Profile: $BOOT_PROFILE_LABEL"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -791,7 +849,7 @@ pacstrap /mnt base base-devel archlinux-keyring \
     linux linux-headers \
     linux-firmware wireless-regdb intel-ucode amd-ucode \
     lvm2 cryptsetup device-mapper \
-    grub efibootmgr os-prober \
+    efibootmgr os-prober \
     networkmanager iwd dhcpcd openssh \
     iptables-nft nftables \
     apparmor audit rng-tools haveged \
@@ -810,7 +868,15 @@ pacstrap /mnt base base-devel archlinux-keyring \
     noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation \
     man-db man-pages texinfo
 
-# Install TPM tools if TPM is being used
+# Install bootloader package per chosen profile.
+# - desktop: GRUB (default, what the rest of chroot.sh assumes)
+# - server:  systemd-boot ships inside the systemd package, already pulled
+#            by base; no extra package needed here.
+if [[ "$BOOT_PROFILE" == "desktop" ]]; then
+    pacstrap /mnt grub
+fi
+
+# Install TPM tools if TPM is being used (always true for the server profile)
 if [ "$USE_TPM_LUKS" = true ]; then
     pacstrap /mnt tpm2-tools tpm2-tss tpm2-abrmd tpm2-pkcs11
 fi
@@ -872,6 +938,8 @@ export INSTALL_CRYPT="$CRYPT_NAME"
 export INSTALL_LVM="$LVM_NAME"
 export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export INSTALL_TPM_PCRS="${TPM_PCRS:-0+7}"
+export INSTALL_BOOT_PROFILE="$BOOT_PROFILE"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export INSTALL_TIMEZONE="$TIMEZONE"
@@ -888,6 +956,8 @@ export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export INSTALL_TPM_PCRS="${TPM_PCRS:-0+7}"
+export INSTALL_BOOT_PROFILE="$BOOT_PROFILE"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export _INSTALL_TIMEZONE="$TIMEZONE"
@@ -897,6 +967,14 @@ EOF
 
 chmod +x /mnt/set-install-vars.sh
 cp ./chroot.sh /mnt/
+
+# Server profile needs the systemd-boot helper inside the chroot to set up
+# bootctl + systemd-cryptenroll + crypttab.initramfs after the base system
+# is in place. Ship it next to chroot.sh; chroot.sh sources it on demand.
+if [[ "$BOOT_PROFILE" == "server" && -f ./systemd-boot.sh ]]; then
+    cp ./systemd-boot.sh /mnt/
+    chmod +x /mnt/systemd-boot.sh
+fi
 chmod +x /mnt/chroot.sh
 
 # Copy hardening scripts

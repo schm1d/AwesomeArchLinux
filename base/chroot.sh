@@ -1032,18 +1032,27 @@ echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
 
-echo -e "${BBlue}Adding GRUB package...${NC}"
-pacman -S grub efibootmgr os-prober --noconfirm
+# Boot profile branch — desktop uses GRUB (default); server uses systemd-boot
+# and is wired below after mkinitcpio finalizes HOOKS.
+if [[ "${INSTALL_BOOT_PROFILE:-desktop}" != "server" ]]; then
+    echo -e "${BBlue}Adding GRUB package...${NC}"
+    pacman -S grub efibootmgr os-prober --noconfirm
 
-# GRUB hardening setup and encryption
-echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
-sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
-# NOTE: mkinitcpio is called AFTER the TPM/non-TPM HOOKS are finalized below
+    # GRUB hardening setup and encryption
+    echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
+    sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
+    sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
+    # NOTE: mkinitcpio is called AFTER the TPM/non-TPM HOOKS are finalized below
 
-echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
-sed -ri 's|^#?GRUB_PRELOAD_MODULES=.*|GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"|' /etc/default/grub
-sed -ri 's|^#?GRUB_ENABLE_CRYPTODISK=.*|GRUB_ENABLE_CRYPTODISK=y|' /etc/default/grub
+    echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
+    sed -ri 's|^#?GRUB_PRELOAD_MODULES=.*|GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"|' /etc/default/grub
+    sed -ri 's|^#?GRUB_ENABLE_CRYPTODISK=.*|GRUB_ENABLE_CRYPTODISK=y|' /etc/default/grub
+else
+    echo -e "${BBlue}Boot profile: server (systemd-boot + TPM 2.0); skipping GRUB install${NC}"
+    # efibootmgr was pacstrapped by archinstall.sh in the base set; we don't
+    # need GRUB. Initial HOOKS/FILES are left untouched — the TPM-aware block
+    # below sets the final sd-encrypt HOOKS that systemd-boot.sh depends on.
+fi
 
 chmod 400 /etc/luksKeys/boot.key
 
@@ -1078,21 +1087,55 @@ fi
 echo -e "${BBlue}Generating initramfs with final HOOKS configuration...${NC}"
 mkinitcpio -P
 
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
+if [[ "${INSTALL_BOOT_PROFILE:-desktop}" != "server" ]]; then
+    # Desktop profile — finalize GRUB cmdline + framebuffer.
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
+    sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
 
-# Force a low-res GRUB framebuffer. Without this, GRUB on some UEFI firmwares
-# falls back to a mode where the password prompt never renders (black screen
-# on boot). 1024x768 is the safest universally-supported fallback.
-if grep -q '^#\?GRUB_GFXMODE=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXMODE=.*|GRUB_GFXMODE=1024x768,auto|' /etc/default/grub
+    # Force a low-res GRUB framebuffer. Without this, GRUB on some UEFI firmwares
+    # falls back to a mode where the password prompt never renders (black screen
+    # on boot). 1024x768 is the safest universally-supported fallback.
+    if grep -q '^#\?GRUB_GFXMODE=' /etc/default/grub; then
+        sed -ri 's|^#?GRUB_GFXMODE=.*|GRUB_GFXMODE=1024x768,auto|' /etc/default/grub
+    else
+        echo 'GRUB_GFXMODE=1024x768,auto' >> /etc/default/grub
+    fi
+    if grep -q '^#\?GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
+        sed -ri 's|^#?GRUB_GFXPAYLOAD_LINUX=.*|GRUB_GFXPAYLOAD_LINUX=keep|' /etc/default/grub
+    else
+        echo 'GRUB_GFXPAYLOAD_LINUX=keep' >> /etc/default/grub
+    fi
 else
-    echo 'GRUB_GFXMODE=1024x768,auto' >> /etc/default/grub
-fi
-if grep -q '^#\?GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXPAYLOAD_LINUX=.*|GRUB_GFXPAYLOAD_LINUX=keep|' /etc/default/grub
-else
-    echo 'GRUB_GFXPAYLOAD_LINUX=keep' >> /etc/default/grub
+    # Server profile — call the systemd-boot + TPM 2.0 helper. This is the
+    # equivalent of the boot_hardening.sh phases H3 + H4 + H7 collapsed into
+    # one install-time call:
+    #   - bootctl install (UEFI Linux Boot Manager entry + ESP staging)
+    #   - kernel + initramfs + microcode → /efi/EFI/Linux/
+    #   - /efi/loader/loader.conf + entries/arch.conf with rd.luks.name
+    #     and tpm2-device=auto
+    #   - /etc/crypttab.initramfs wired for tpm2-device=auto
+    #   - mkinitcpio -P (second build, now embedding crypttab.initramfs)
+    #   - systemd-cryptenroll seals a new keyslot to TPM PCRs 0+7
+    #   - verifies the systemd-tpm2 token landed; hard-fails if not
+    #
+    # The helper script ships next to chroot.sh; archinstall.sh copies it
+    # to /systemd-boot.sh when BOOT_PROFILE=server.
+    if [[ ! -x /systemd-boot.sh ]]; then
+        echo -e "${BRed}FATAL: /systemd-boot.sh missing or not executable.${NC}" >&2
+        echo -e "${BRed}archinstall.sh did not stage it for the server profile.${NC}" >&2
+        exit 50
+    fi
+
+    # Forward the variables systemd-boot.sh expects. LUKS_UUID and LVM_NAME
+    # are already set above in the encryption section of chroot.sh.
+    LUKS_UUID="$LUKS_UUID" \
+    LVM_NAME="$LVM_NAME" \
+    LUKS_KEYS="/etc/luksKeys" \
+    INSTALL_TPM_PCRS="${INSTALL_TPM_PCRS:-0+7}" \
+    EFI_MOUNT="/efi" \
+    KERNEL_NAME="linux" \
+    KERNEL_HARDEN="${GRUBSEC//\"/}" \
+    bash /systemd-boot.sh
 fi
 
 sleep 1
