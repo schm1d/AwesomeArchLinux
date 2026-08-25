@@ -552,6 +552,42 @@ systemctl enable rkhunter-check.timer
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
 pacman -S --noconfirm arpwatch
 
+echo -e "${BBlue}Installing disk health monitoring (SMART/NVMe)...${NC}"
+# smartmontools watches SATA and NVMe health; nvme-cli provides the manual
+# investigation tools (nvme smart-log, nvme error-log) needed after an
+# unexplained freeze. Without these, a failing drive gives no warning and
+# leaves no history to review after the fact.
+pacman -S --noconfirm smartmontools nvme-cli
+
+# -a          monitor all attributes
+# -o on       enable automatic offline data collection
+# -S on       enable attribute autosave
+# -s ...      short self-test daily 02:00, long self-test Saturday 03:00
+# -W 4,45,55  DIFF,INFO,CRIT: log on 4C swings, log an advisory at 45C,
+#             and treat 55C as critical. Only the CRIT threshold invokes
+#             the -M exec handler; INFO events are journal-only.
+# -m <nomailer> -M exec  route alerts through the script below instead of an
+#             MTA, which this system does not guarantee is configured
+cat <<'SMARTD' > /etc/smartd.conf
+DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,45,55 -m <nomailer> -M exec /usr/local/bin/smart-alert
+SMARTD
+
+install -Dm0755 /dev/stdin /usr/local/bin/smart-alert <<'SMARTALERT'
+#!/usr/bin/env bash
+# Invoked by smartd when a SMART event fires. smartd exports SMARTD_* in the
+# environment. Log to the journal and the console so the alert survives even
+# when no mail transport is configured.
+set -uo pipefail
+
+device="${SMARTD_DEVICE:-unknown device}"
+message="${SMARTD_MESSAGE:-SMART event with no message}"
+
+logger -t smartd -p daemon.crit "SMART alert on ${device}: ${message}"
+wall "SMART alert on ${device}: ${message}" 2>/dev/null || true
+SMARTALERT
+
+systemctl enable smartd.service
+
 echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S --noconfirm usbguard
 

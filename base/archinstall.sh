@@ -538,6 +538,8 @@ echo
 
 TARGET_DISK=$(ask_for_disk)
 DISK="/dev/$TARGET_DISK"
+# Informational only -- see the partitioning section for why there is no
+# drive-type-specific behaviour.
 DEVICE_TYPE=$(detect_device_type "$DISK")
 
 echo -e "${BGreen}Selected: $DISK (Type: $DEVICE_TYPE)${NC}\n"
@@ -662,9 +664,16 @@ log_action "Creating partition table"
 sgdisk -Z "$DISK"
 sgdisk -o "$DISK"
 
-if [ "$DEVICE_TYPE" = "SSD" ]; then
-    sgdisk -a 2048 "$DISK"
-fi
+# No drive-type-specific partitioning: sgdisk already aligns to 2048 sectors
+# (1 MiB) by default, so an explicit "-a 2048" for SSDs was a no-op. DEVICE_TYPE
+# is informational only -- it is reported to the operator at disk selection and
+# in the install summary. Do not re-add a drive-type branch here without a real
+# behavioural difference to put in it.
+#
+# TRIM/discard is deliberately NOT enabled anywhere in this installer (no LUKS
+# --allow-discards, no LVM issue_discards, no fstrim.timer). Passing discards
+# through a LUKS container leaks filesystem usage patterns into the ciphertext,
+# which this project treats as an unacceptable trade for SSD wear levelling.
 
 sgdisk -n 1:2048:4095 -t 1:ef02 -c 1:"BIOS_Boot" "$DISK"
 sgdisk -n 2:4096:2101247 -t 2:ef00 -c 2:"EFI_System" "$DISK"

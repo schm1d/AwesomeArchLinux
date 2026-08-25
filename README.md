@@ -450,10 +450,12 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 
 - **USBGuard** &mdash; Default-block policy with a one-time allow policy generated for devices present at the first service start; root IPC access remains available to authorize later devices.
 - **Bluetooth** &mdash; Hardware detection, secure connections only, LE mode, minimum 16-byte encryption key, privacy mode, systemd service hardened.
+- **Disk health monitoring** &mdash; `smartd` scans all SATA and NVMe devices, runs a short self-test daily and a long self-test weekly, and tracks drive temperature (advisory entries logged at 45 &deg;C; only the 55 &deg;C critical threshold raises an alert). Alerts are written to the journal and the console rather than mailed, so they arrive without a configured MTA. `nvme-cli` is installed for post-incident investigation (`nvme smart-log`, `nvme error-log`).
 
 #### File System Security
 
 - **Mount hardening** &mdash; `/tmp` and `/dev/shm` mounted with `nosuid,nodev,noexec`. `/proc` mounted with `hidepid=2`.
+- **TRIM deliberately disabled** &mdash; discards are not passed through LUKS (no `--allow-discards`, no LVM `issue_discards`, no `fstrim.timer`). Forwarding discards would leak filesystem usage patterns into the ciphertext. This costs SSD wear levelling and is an intentional trade, not an oversight.
 - **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (644).
 - **`/home` is traversable but not listable** &mdash; `chmod 0711 /home` lets users `cd ~` but `ls /home` reveals no usernames to non-root observers. Per-user dirs stay 700 via `HOME_MODE 0700` in `/etc/login.defs` and explicit `chmod 700` at user creation.
 - **UMASK 027** &mdash; Set globally in `/etc/profile`, `/etc/bash.bashrc`, and `/etc/login.defs`.
@@ -601,6 +603,7 @@ After rebooting:
    ```bash
    sbctl status
    sbctl sign -s /efi/EFI/GRUB/grubx64.efi
+   sbctl sign -s /efi/EFI/BOOT/BOOTX64.EFI
    sbctl sign -s /boot/vmlinuz-linux
    ```
 

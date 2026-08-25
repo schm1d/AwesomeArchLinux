@@ -303,6 +303,16 @@ configure_grub() {
     mkdir -p /boot/grub
     grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
 
+    # Removable-media fallback loader at /efi/EFI/BOOT/BOOTX64.EFI.
+    # Without it, losing the "GRUB" UEFI NVRAM entry leaves the firmware with
+    # nothing to boot even though the ESP and grubx64.efi are intact -- the
+    # drive simply reports as unbootable. --removable implies no NVRAM write,
+    # so it cannot disturb the entry the first pass just created, and it works
+    # inside a chroot. Non-fatal: an otherwise-good install should not abort
+    # over a redundancy, but the operator must hear about it.
+    # shellcheck disable=SC2154  # Color variables are defined by chroot.sh.
+    grub-install --target=x86_64-efi --efi-directory=/efi --removable --recheck \
+        || echo -e "${BYellow}Warning: fallback loader install failed; the UEFI NVRAM entry is the only boot path.${NC}"
 
     # Preserve the existing interactive password flow: the operator must
     # successfully create a GRUB PBKDF2 password before installation proceeds.
