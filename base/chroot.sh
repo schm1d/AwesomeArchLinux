@@ -556,7 +556,7 @@ echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S --noconfirm usbguard
 
 echo -e "${BBlue}Enhancing usbguard configuration...${NC}"
-cat <<EOF > /etc/usbguard/usbguard-daemon.conf
+cat <<'EOF' > /etc/usbguard/usbguard-daemon.conf
 RuleFile=/etc/usbguard/rules.conf
 ImplicitPolicyTarget=block
 PresentDevicePolicy=apply-policy
@@ -564,9 +564,54 @@ PresentControllerPolicy=keep
 InsertedDevicePolicy=apply-policy
 RestoreControllerDeviceState=false
 DeviceRulesWithPort=false
+IPCAccessControlFiles=/etc/usbguard/IPCAccessControl.d/
 EOF
 
-sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
+install -d -m 0755 /etc/usbguard/IPCAccessControl.d
+install -m 0600 /dev/stdin /etc/usbguard/IPCAccessControl.d/root <<'EOF'
+Devices=modify,list,listen
+Policy=modify,list
+Exceptions=listen
+Parameters=modify,list,listen
+EOF
+
+install -Dm0755 /dev/stdin /usr/local/bin/usbguard-initial-policy <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+RULES=/etc/usbguard/rules.conf
+
+if [[ -f "$RULES" ]] && grep -qvE '^[[:space:]]*(#|$)' "$RULES"; then
+    exit 0
+fi
+
+tmp=$(mktemp /etc/usbguard/rules.conf.XXXXXX)
+
+# Only a non-zero exit is a genuine failure. Empty output is a legitimate
+# result on a machine with no USB devices attached, and must still install a
+# policy so the daemon can start and enforce block-by-default.
+if usbguard generate-policy > "$tmp"; then
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$RULES"
+    exit 0
+fi
+
+# Generation genuinely failed. Leave any existing policy untouched and exit
+# non-zero so ExecStartPre aborts the unit. USBGuard must NOT start with an
+# empty policy: ImplicitPolicyTarget=block plus PresentDevicePolicy=apply-policy
+# would block every attached device, including the console keyboard, and
+# stopping the daemon would not restore them. A daemon that never starts leaves
+# USB permissive -- unprotected, but reachable and recoverable.
+rm -f "$tmp"
+exit 1
+EOF
+
+# No "-" prefix: a failed policy generation must prevent USBGuard from starting.
+install -Dm0644 /dev/stdin /etc/systemd/system/usbguard.service.d/10-initial-policy.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/local/bin/usbguard-initial-policy
+EOF
+
 systemctl enable usbguard.service
 
 # Hardening /etc/login.defs

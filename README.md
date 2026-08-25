@@ -448,7 +448,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 
 #### Physical Security (bare-metal only)
 
-- **USBGuard** &mdash; Default-block policy for USB devices, auto-generated allow policy for currently connected devices.
+- **USBGuard** &mdash; Default-block policy with a one-time allow policy generated for devices present at the first service start; root IPC access remains available to authorize later devices.
 - **Bluetooth** &mdash; Hardware detection, secure connections only, LE mode, minimum 16-byte encryption key, privacy mode, systemd service hardened.
 
 #### File System Security
