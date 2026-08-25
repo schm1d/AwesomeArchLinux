@@ -625,18 +625,36 @@ check_service_security() {
 check_boot_security() {
     category_header "Boot Security"
 
-    # GRUB password
-    local grub_password_set=false
+    # Bootloader console protection. The two supported profiles achieve this
+    # differently, so detect which one is installed rather than assuming GRUB:
+    #   GRUB profile  -> password_pbkdf2 superuser
+    #   UKI profile   -> "editor no" in loader.conf, which stops an attacker at
+    #                    the console appending init=/bin/sh to the kernel cmdline
+    local boot_protected=false boot_evidence=""
+
     for f in /etc/grub.d/40_custom /boot/grub/grub.cfg; do
         if [[ -f "$f" ]] && grep -q "password_pbkdf2" "$f" 2>/dev/null; then
-            grub_password_set=true
+            boot_protected=true
+            boot_evidence="GRUB password set (password_pbkdf2 in $f)"
             break
         fi
     done
-    if [[ "$grub_password_set" == true ]]; then
-        result_pass "GRUB password is set (password_pbkdf2 found)"
+
+    if [[ "$boot_protected" == false ]]; then
+        for f in /efi/loader/loader.conf /boot/loader/loader.conf; do
+            if [[ -f "$f" ]] && grep -qE '^[[:space:]]*editor[[:space:]]+no([[:space:]]|$)' "$f" 2>/dev/null; then
+                boot_protected=true
+                boot_evidence="systemd-boot editor disabled (editor no in $f)"
+                break
+            fi
+        done
+    fi
+
+    if [[ "$boot_protected" == true ]]; then
+        result_pass "Bootloader console access is restricted — $boot_evidence"
     else
-        result_fail "GRUB password not set — bootloader is unprotected" "password_pbkdf2 not found"
+        result_fail "Bootloader console access is unrestricted" \
+            "neither password_pbkdf2 (GRUB) nor 'editor no' (systemd-boot) found"
     fi
 
     # Kernel boot parameters

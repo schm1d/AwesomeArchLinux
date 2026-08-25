@@ -9,7 +9,7 @@ A collection of shell scripts for hardened Arch Linux installation, configuratio
 
 Two installation paths are provided:
 
-- **Bare-metal / Desktop** (`archinstall.sh`) &mdash; Full disk encryption with [LVM on LUKS with encrypted boot partition](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system#Encrypted_boot_partition_(GRUB)) (GRUB, UEFI), optional TPM2 binding.
+- **Bare-metal / Desktop** (`archinstall.sh`) &mdash; Full disk encryption with LVM on LUKS and an explicit choice between encrypted-boot GRUB or signed systemd-boot UKIs, with optional TPM2 binding.
 - **VPS / Cloud** (`vps-install.sh`) &mdash; Simplified partitioning (no LUKS, no TPM, no GRUB encryption), swap file instead of LVM, serial console support for VPS provider access. All software hardening is preserved.
 
 Both paths share the same hardening philosophy: the scripts will prepare everything for you. No need to worry about partitioning or encryption. All you have to do is provide a few inputs (disk, username, hostname, passwords) and the installer handles the rest.
@@ -28,6 +28,7 @@ AwesomeArchLinux/
 +-- base/
 |   +-- archinstall.sh       # Bare-metal installer (LUKS + LVM + UEFI + TPM2)
 |   +-- chroot.sh            # Bare-metal chroot configuration & hardening
+|   +-- bootloader.sh        # GRUB and systemd-boot/UKI configuration helpers
 |   +-- vps-install.sh       # VPS/cloud installer (no encryption, swap file)
 |   +-- vps-chroot.sh        # VPS chroot configuration & hardening
 |   +-- vps-harden.sh        # VPS live hardening (running system, no reformat)
@@ -120,12 +121,12 @@ AwesomeArchLinux/
 #### Installation
 
 - **Automated Arch Linux Installation** &mdash; Automates disk partitioning, formatting, mounting, base system installation, and chroot configuration.
-- **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS1 with encrypted boot partition, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time.
-- **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment with configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9).
+- **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS2, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time. The key derivation function follows the boot profile: the **GRUB** profile uses `pbkdf2` (GRUB cannot read Argon2id) and keeps `/boot` encrypted; the **systemd-boot + UKI** profile uses the stronger `argon2id` default.
+- **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment. The GRUB profile offers configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9); the UKI profile pins **PCR 7** alone, so firmware updates do not invalidate the policy and strand an unattended reboot.
 - **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
 - **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), optionally separates `/var`, generates rollback script, and runs software hardening — all on a live, running system without reformatting.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
-- **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs GRUB EFI binaries.
+- **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images and systemd-boot with `sbctl` during install and re-signs them on every kernel update.
 - **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
 - **Mainline kernel** &mdash; Installs the standard `linux` kernel. We previously shipped `linux-hardened` alongside it, but its stricter module signing and syscall hardening break the NVIDIA proprietary driver (XWayland/DRI3 path stops bridging, gnome-shell loops on `Failed to init X11 display`) and several other proprietary kmods. Users who need `linux-hardened` for non-NVIDIA hardening can install it manually with `pacman -S linux-hardened linux-hardened-headers`.
 - **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
@@ -562,7 +563,7 @@ Preview changes first with `--dry-run`, or run filesystem-only hardening with `-
 
 Download the scripts on another machine and copy them to a removable media.
 
-1. Copy `archinstall.sh` + `chroot.sh` (or `vps-install.sh` + `vps-chroot.sh`) to the same directory on the live system.
+1. Copy `archinstall.sh` + `chroot.sh` + `bootloader.sh` (or `vps-install.sh` + `vps-chroot.sh`) to the same directory on the live system.
 2. Make them executable: `chmod +x *.sh`
 3. Run the installer: `./archinstall.sh` or `./vps-install.sh`
 
@@ -586,16 +587,28 @@ After rebooting:
    ```
 
 3. **Secure Boot enrollment** (bare-metal, if desired):
+
+   *systemd-boot + UKI profile* &mdash; use the bundled helper, which is stage-aware and
+   refuses to bind the TPM before Secure Boot is actually enforcing:
+   ```bash
+   awesome-secureboot status
+   awesome-secureboot enroll-keys     # requires firmware in Setup Mode
+   # enable Secure Boot in firmware, reboot, then:
+   awesome-secureboot bind-tpm        # binds LUKS unlock to PCR 7
+   ```
+
+   *GRUB profile*:
    ```bash
    sbctl status
    sbctl sign -s /efi/EFI/GRUB/grubx64.efi
    sbctl sign -s /boot/vmlinuz-linux
    ```
 
-4. **TPM2 enrollment** (bare-metal, if TPM was selected):
+4. **TPM2 enrollment** (bare-metal GRUB profile, if TPM was selected):
    ```bash
    systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 /dev/<partition>
    ```
+   On the UKI profile this is done by `awesome-secureboot bind-tpm` in step 3 instead.
 
 5. **Add SSH authorized keys** (VPS):
    ```bash

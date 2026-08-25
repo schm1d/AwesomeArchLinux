@@ -6,6 +6,8 @@
 
 set -euo pipefail
 source /root/.install-env || { echo "Failed to source /root/.install-env"; exit 1; }
+# shellcheck source=bootloader.sh
+source /bootloader.sh || { echo "Failed to source /bootloader.sh"; exit 1; }
 
 # Set up the variables
 BBlue='\033[1;34m'
@@ -33,11 +35,24 @@ KEYMAP="${_INSTALL_KEYMAP:-us}"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
 SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
-# shellcheck disable=SC2034  # Referenced in GRUB config and comments
-CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
-LVM_NAME="lvm_arch"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+CRYPT_NAME="${_INSTALL_CRYPT:-crypt_lvm}"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+LVM_NAME="${_INSTALL_LVM:-lvm_arch}"
 INSTALL_TPM="${INSTALL_TPM:-false}"
 SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-security}}"
+INSTALL_BOOTLOADER="${_INSTALL_BOOTLOADER:?Missing explicit bootloader profile}"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+TPM_PCRS="${_INSTALL_TPM_PCRS:-7}"
+BOOT_EXTRA_CMDLINE=()
+
+case "$INSTALL_BOOTLOADER" in
+    grub|uki) ;;
+    *)
+        echo "Invalid bootloader profile: $INSTALL_BOOTLOADER" >&2
+        exit 1
+        ;;
+esac
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -57,6 +72,7 @@ fi
 #PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 LUKS_UUID=$(cryptsetup luksUUID "$PARTITION3")
 
 CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')
@@ -1032,67 +1048,12 @@ echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
 
-echo -e "${BBlue}Adding GRUB package...${NC}"
-pacman -S grub efibootmgr os-prober --noconfirm
-
-# GRUB hardening setup and encryption
-echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
-sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
-# NOTE: mkinitcpio is called AFTER the TPM/non-TPM HOOKS are finalized below
-
-echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
-sed -ri 's|^#?GRUB_PRELOAD_MODULES=.*|GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"|' /etc/default/grub
-sed -ri 's|^#?GRUB_ENABLE_CRYPTODISK=.*|GRUB_ENABLE_CRYPTODISK=y|' /etc/default/grub
-
-chmod 400 /etc/luksKeys/boot.key
-
-sleep 1
-
-echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
-
-# GRUBSEC Hardening explanation:
-# slab_nomerge: This disables slab merging, which significantly increases the difficulty of heap exploitation
-# init_on_alloc=1 Init_on_free=1: enables zeroing of memory during allocation and free time, which can help mitigate use-after-free vulnerabilities and erase sensitive information in memory.
-# page_alloc.shuffle=1: Randomises page allocator freelists, improving security by making page allocations less predictable. This also improves performance.
-# pti=on: Enables Kernel Page Table Isolation, which mitigates Meltdown and prevents some KASLR bypasses.
-# randomize_kstack_offset=on: Randomises the kernel stack offset on each syscall, which makes attacks that rely on deterministic kernel stack layout significantly more difficult
-# vsyscall=none: Disables vsyscalls, as they are obsolete and have been replaced with vDSO. vsyscalls are also at fixed addresses in memory, making them a potential target for ROP attacks.
-# lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
-# lockdown=confidentiality - This was removed because it locked nvidia and vmware module so they couldn't be loaded.
-GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none quiet loglevel=3\""
-#GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
-if [ "$INSTALL_TPM" = true ]; then
-    sed -i "s|^HOOKS=.*|HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-    GRUBCMD="\"rd.luks.name=${LUKS_UUID}=${LVM_NAME} rd.lvm.lv=${LVM_NAME}/root root=/dev/mapper/${LVM_NAME}-root\""
-    # No cryptkey needed for sd-encrypt; TPM handles unlock post-enroll
-    sed -i "s|^MODULES=.*|MODULES=(tpm tpm_tis tpm_crb)|" /etc/mkinitcpio.conf
-else
-    
-    GRUBCMD="\"cryptdevice=UUID=${LUKS_UUID}:${LVM_NAME} root=/dev/mapper/${LVM_NAME}-root cryptkey=rootfs:/etc/luksKeys/boot.key\""
-    sed -ri 's|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|' /etc/mkinitcpio.conf
-    sed -ri 's|^FILES=.*|FILES=(/etc/luksKeys/boot.key)|' /etc/mkinitcpio.conf
-fi
-
-# Generate initramfs AFTER final HOOKS/FILES are configured
-echo -e "${BBlue}Generating initramfs with final HOOKS configuration...${NC}"
-mkinitcpio -P
-
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
-
-# Force a low-res GRUB framebuffer. Without this, GRUB on some UEFI firmwares
-# falls back to a mode where the password prompt never renders (black screen
-# on boot). 1024x768 is the safest universally-supported fallback.
-if grep -q '^#\?GRUB_GFXMODE=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXMODE=.*|GRUB_GFXMODE=1024x768,auto|' /etc/default/grub
-else
-    echo 'GRUB_GFXMODE=1024x768,auto' >> /etc/default/grub
-fi
-if grep -q '^#\?GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXPAYLOAD_LINUX=.*|GRUB_GFXPAYLOAD_LINUX=keep|' /etc/default/grub
-else
-    echo 'GRUB_GFXPAYLOAD_LINUX=keep' >> /etc/default/grub
+# Establish the profile-specific encryption hooks before hardware-specific
+# modules are discovered. The final image/UKI is generated after GPU setup.
+echo -e "${BBlue}Preparing boot hooks for the $INSTALL_BOOTLOADER profile...${NC}"
+bl_set_hooks
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chmod 400 "$LUKS_KEYS"
 fi
 
 sleep 1
@@ -1235,12 +1196,12 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     # Adjust mkinitcpio.conf
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
-    sed -ri 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
-
-    # Optional but recommended: early KMS for smoother boot
-    if ! grep -Eq '(^|\s)kms(\s|\))' /etc/mkinitcpio.conf; then
-      sed -ri 's/(HOOKS=\(.*modconf) /\1 kms /' /etc/mkinitcpio.conf
-    fi
+    bl_set_hooks \
+        --hook kms \
+        --module nvidia \
+        --module nvidia_drm \
+        --module nvidia_uvm \
+        --module nvidia_modeset
 
     # NVreg_PreserveVideoMemoryAllocations=1 is required for reliable
     # suspend / resume on NVIDIA. Without it, GPU VRAM is not restored
@@ -1263,20 +1224,12 @@ EOF
     systemctl enable nvidia-resume.service 2>/dev/null || true
     systemctl enable nvidia-hibernate.service 2>/dev/null || true
 
-    # Re-generate initramfs
-    mkinitcpio -P  # -P regenerates all presets for all installed kernels
-
-    # Adjust GRUB
+    # Add NVIDIA DRM settings to either GRUB's command line or the embedded UKI
+    # command line. The selected bootloader function writes the final value.
     # nvidia-drm.modeset=1  -> DRM KMS (required for Wayland, smooth boot)
     # nvidia-drm.fbdev=1    -> expose DRM framebuffer console (nicer tty
     #                          on NVIDIA, required by modern GDM/KMS path)
-    echo -e "${BBlue}Adjusting /etc/default/grub for NVIDIA...${NC}"
-    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia-drm.modeset=1 nvidia-drm.fbdev=1\2|' /etc/default/grub
-
-    # Update GRUB config
-    if [[ -f /boot/grub/grub.cfg ]]; then
-        grub-mkconfig -o /boot/grub/grub.cfg
-    fi
+    BOOT_EXTRA_CMDLINE+=(nvidia-drm.modeset=1 nvidia-drm.fbdev=1)
 fi
 
 # --- If not NVIDIA, check for AMD/Radeon ---
@@ -1317,49 +1270,20 @@ fi
 
 sleep 2
 
-configure_grub() {
-  echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
-
-  echo -e "${BBlue}Setting up GRUB...${NC}"
-  mkdir -p /boot/grub
-
-  grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
-
-  # --- Set GRUB Password ---
-set +e  # Temporarily disable 'exit on error'
-
-while true; do
-  echo -e "${BBlue}Setting GRUB password...${NC}"
-  GRUB_TMPFILE=$(mktemp /tmp/grubpass.XXXXXX)
-  chmod 600 "$GRUB_TMPFILE"
-  grub-mkpasswd-pbkdf2 | tee "$GRUB_TMPFILE"
-  GRUB_PASS=$(grep 'grub.pbkdf2' "$GRUB_TMPFILE" | awk '{print $NF}')
-  rm -f "$GRUB_TMPFILE"
-  if [[ -n "$GRUB_PASS" ]]; then
-     break # Exit loop if the password was correctly created
-  else
-      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
-      sleep 1 # Add a delay
-  fi
-done
-
-set -e # Re-enable 'exit on error'
-
-# Use a generic "admin" superuser instead of leaking the system username
-cat <<EOF >> /etc/grub.d/40_custom
-set superusers="admin"
-password_pbkdf2 admin $GRUB_PASS
-EOF
-
-grub-mkconfig -o /boot/grub/grub.cfg
-
-}
-
-configure_grub
+case "$INSTALL_BOOTLOADER" in
+    grub)
+        configure_grub
+        ;;
+    uki)
+        configure_systemd_boot_uki
+        ;;
+esac
 
 sleep 2
 
-chmod 600 "$LUKS_KEYS"
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chmod 600 "$LUKS_KEYS"
+fi
 
 # Creating a cool /etc/issue
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
@@ -1441,8 +1365,10 @@ chmod 600 /etc/ssh/sshd_config
 chown root:root /etc/fstab
 chown root:root /etc/issue
 chmod 644 /etc/issue
-chown root:root /boot/grub/grub.cfg
-chmod og-rwx /boot/grub/grub.cfg
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chown root:root /boot/grub/grub.cfg
+    chmod og-rwx /boot/grub/grub.cfg
+fi
 chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
 chown -c root:root /etc/sudoers
@@ -1810,5 +1736,6 @@ sleep 2
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 # Securely remove sensitive files
 shred -u /root/.install-env 2>/dev/null || true
+shred -u /bootloader.sh 2>/dev/null || true
 shred -u /chroot.sh
 exit

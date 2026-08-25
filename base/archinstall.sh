@@ -44,7 +44,7 @@ TPM_DEVICE=""
 USE_TPM_LUKS=false
 # shellcheck disable=SC2034  # Used by TPM enrollment commands
 TPM_PCR_BANK="sha256"
-TPM_PCRS="0+7"
+TPM_PCRS="7"
 
 # --- Logging setup ---
 INSTALL_LOG="/tmp/installation-audit-$(date +%Y%m%d-%H%M%S).log"
@@ -64,6 +64,13 @@ if [ ! -d "/sys/firmware/efi/efivars" ]; then
   echo -e "${BRed}UEFI is not supported. Exiting.${NC}"
   exit 1
 fi
+
+for installer_component in ./chroot.sh ./bootloader.sh; do
+    if [[ ! -r "$installer_component" ]]; then
+        echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
+        exit 1
+    fi
+done
 
 echo -e "${BBlue}\nUEFI is supported, proceeding...\n${NC}"
 log_action "UEFI support confirmed"
@@ -157,6 +164,21 @@ ask_for_sysctl_profile() {
             2) echo "security-performance"; return 0 ;;
             3) echo "full-performance"; return 0 ;;
             *) echo -e "${BRed}Invalid choice. Please enter 1, 2, or 3.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+ask_for_bootloader_profile() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select the boot profile:${NC}" >&2
+        echo "1) grub - encrypted /boot, PBKDF2 LUKS, embedded boot key" >&2
+        echo "2) uki  - signed UKIs on the ESP, Argon2id LUKS, no embedded key" >&2
+        read -p "Choice (1 or 2): " choice
+        case "$choice" in
+            1) echo "grub"; return 0 ;;
+            2) echo "uki"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2; there is no default.\n${NC}" >&2 ;;
         esac
     done
 }
@@ -416,30 +438,22 @@ setup_tpm_in_chroot() {
     if [ "$USE_TPM_LUKS" = true ]; then
         echo -e "${BBlue}Configuring TPM2 in chroot environment...${NC}"
         
-        arch-chroot /mnt pacman -S --needed --noconfirm \
-            tpm2-tools tpm2-tss tpm2-abrmd tpm2-pkcs11
+        arch-chroot /mnt pacman -S --needed --noconfirm tpm2-tools
         
         if [ -f ./tpm_luks.conf ]; then
             cp ./tpm_luks.conf /mnt/etc/tpm_luks.conf
             chmod 600 /mnt/etc/tpm_luks.conf
         fi
         
-        # Configure mkinitcpio for TPM2
-        arch-chroot /mnt bash -c '
-            sed -i "s/^MODULES=.*/MODULES=(tpm tpm_tis tpm_crb)/" /etc/mkinitcpio.conf
-            sed -i "s/^HOOKS=.*/HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)/" /etc/mkinitcpio.conf
-            mkinitcpio -P
-        '
-        
         # Create PCR check tool
-        cat > /mnt/usr/local/bin/check-tpm-pcrs <<'TPMCHECK'
+        cat > /mnt/usr/local/bin/check-tpm-pcrs <<TPMCHECK
 #!/bin/bash
 echo "Current PCR values:"
 tpm2_pcrread sha256:0+1+4+7+9
 echo
 echo "If system fails to unlock automatically after updates:"
 echo "1. Boot with recovery key"
-echo "2. Re-enroll TPM: systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=0+7 /dev/[device]"
+echo "2. Re-enroll TPM: systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=$TPM_PCRS /dev/[device]"
 TPMCHECK
         chmod +x /mnt/usr/local/bin/check-tpm-pcrs
     fi
@@ -467,6 +481,14 @@ EOF
 # Validate network
 validate_network
 
+# The profiles have materially different boot and key-handling threat models,
+# so the operator must make an explicit choice. There is intentionally no
+# default selection.
+echo
+INSTALL_BOOTLOADER=$(ask_for_bootloader_profile)
+echo -e "${BGreen}Selected boot profile: $INSTALL_BOOTLOADER${NC}"
+log_action "Selected boot profile: $INSTALL_BOOTLOADER"
+
 # Select mirrors - avoid SIGPIPE from head
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
@@ -488,12 +510,18 @@ if [ "$TPM_AVAILABLE" = true ]; then
             USE_TPM_LUKS=true
             
             echo -e "${BBlue}Select PCRs to bind:${NC}"
-            echo "  0+7 - Firmware and Secure Boot (Recommended)"
-            echo "  0+1+7 - Plus BIOS config (More secure)"
-            echo "  0+1+4+7+9 - Plus bootloader and kernel (Most secure)"
+            echo "  7 - Secure Boot state (Recommended)"
+            echo "  0+7 - Plus firmware code"
+            echo "  0+1+4+7+9 - Plus firmware config, bootloader, and kernel"
             
-            read -p "Enter PCRs (default: 0+7): " TPM_PCRS
-            TPM_PCRS=${TPM_PCRS:-"0+7"}
+            while true; do
+                read -p "Enter PCRs (default: 7): " TPM_PCRS
+                TPM_PCRS=${TPM_PCRS:-"7"}
+                if [[ "$TPM_PCRS" =~ ^([0-9]|1[0-9]|2[0-3])(\+([0-9]|1[0-9]|2[0-3]))*$ ]]; then
+                    break
+                fi
+                echo -e "${BRed}Invalid PCR list. Use plus-separated indexes from 0 to 23.${NC}" >&2
+            done
             echo -e "${BGreen}Will bind to PCRs: $TPM_PCRS${NC}"
             log_action "TPM2 binding configured for PCRs: $TPM_PCRS"
         fi
@@ -590,9 +618,10 @@ echo -e "Timezone: $TIMEZONE"
 echo -e "Locale: $LOCALE"
 echo -e "Keymap: $KEYMAP"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+echo -e "Boot Profile: $INSTALL_BOOTLOADER"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Boot Profile: $INSTALL_BOOTLOADER"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -655,10 +684,18 @@ CLEANUP_ENABLED=1
 echo -e "${BBlue}\nCreating LUKS container...${NC}"
 log_action "Creating LUKS container"
 
+LUKS_PBKDF_ARGS=()
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    # GRUB can read LUKS2 but cannot derive Argon2id keys.
+    LUKS_PBKDF_ARGS=(--pbkdf pbkdf2)
+else
+    LUKS_PBKDF_ARGS=(--pbkdf argon2id)
+fi
+
 # Create LUKS container
 cryptsetup -v \
     --type luks2 \
-    --pbkdf pbkdf2 \
+    "${LUKS_PBKDF_ARGS[@]}" \
     --cipher aes-xts-plain64 \
     --key-size 512 \
     --hash sha512 \
@@ -666,8 +703,6 @@ cryptsetup -v \
     --use-random \
     --verify-passphrase \
     luksFormat "$PARTITION3"
-# Note: LUKS2 with --pbkdf pbkdf2 is required for GRUB compatibility.
-# GRUB 2.06+ supports LUKS2 but only with PBKDF2, not Argon2id.
 
 # Test password
 ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
@@ -787,11 +822,21 @@ pacman -Sy --noconfirm archlinux-keyring
 echo -e "${BBlue}Installing base system...${NC}"
 log_action "Installing base system"
 
+BOOT_PACKAGES=(efibootmgr)
+case "$INSTALL_BOOTLOADER" in
+    grub)
+        BOOT_PACKAGES+=(grub os-prober)
+        ;;
+    uki)
+        BOOT_PACKAGES+=(sbctl tpm2-tools)
+        ;;
+esac
+
 pacstrap /mnt base base-devel archlinux-keyring \
     linux linux-headers \
     linux-firmware wireless-regdb intel-ucode amd-ucode \
     lvm2 cryptsetup device-mapper \
-    grub efibootmgr os-prober \
+    "${BOOT_PACKAGES[@]}" \
     networkmanager iwd dhcpcd openssh \
     iptables-nft nftables \
     apparmor audit rng-tools haveged \
@@ -806,13 +851,13 @@ pacstrap /mnt base base-devel archlinux-keyring \
     net-tools usbutils pciutils \
     go rust nasm \
     dialog \
-    sbctl \
     noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-dejavu ttf-liberation \
     man-db man-pages texinfo
 
-# Install TPM tools if TPM is being used
-if [ "$USE_TPM_LUKS" = true ]; then
-    pacstrap /mnt tpm2-tools tpm2-tss tpm2-abrmd tpm2-pkcs11
+# The UKI package set always includes tpm2-tools. Add it separately only when
+# the optional TPM flow is selected with GRUB.
+if [[ "$USE_TPM_LUKS" == true && "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    pacstrap /mnt tpm2-tools
 fi
 
 # -----------------------
@@ -849,13 +894,17 @@ cat <<EOF > /mnt/etc/systemd/system/systemd-logind.service.d/hidepid.conf
 SupplementaryGroups=proc
 EOF
 
-# Copy LUKS key
-echo -e "${BBlue}Setting up LUKS keys...${NC}"
-mkdir --verbose -p "/mnt$LUKS_KEYS"
-cp ./boot.key "/mnt$LUKS_KEYS/boot.key"
-chmod 400 "/mnt$LUKS_KEYS/boot.key"
-chown -R root:root "/mnt$LUKS_KEYS"
-chmod 700 "/mnt$LUKS_KEYS"
+# GRUB reads /boot from inside the encrypted container, so its initramfs may
+# safely carry the keyfile. A UKI lives on the unencrypted ESP and must never
+# receive this key.
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    echo -e "${BBlue}Setting up the GRUB initramfs LUKS key...${NC}"
+    mkdir --verbose -p "/mnt$LUKS_KEYS"
+    cp ./boot.key "/mnt$LUKS_KEYS/boot.key"
+    chmod 400 "/mnt$LUKS_KEYS/boot.key"
+    chown -R root:root "/mnt$LUKS_KEYS"
+    chmod 700 "/mnt$LUKS_KEYS"
+fi
 
 # Copy TPM config if used
 if [ "$USE_TPM_LUKS" = true ] && [ -f ./tpm_luks.conf ]; then
@@ -872,11 +921,13 @@ export INSTALL_CRYPT="$CRYPT_NAME"
 export INSTALL_LVM="$LVM_NAME"
 export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export _INSTALL_TPM_PCRS="$TPM_PCRS"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export INSTALL_TIMEZONE="$TIMEZONE"
 export INSTALL_LOCALE="$LOCALE"
 export INSTALL_KEYMAP="$KEYMAP"
+export _INSTALL_BOOTLOADER="$INSTALL_BOOTLOADER"
 export INSTALL_DATE="$(date)"
 EOF
 chmod 600 /mnt/root/.install-env
@@ -888,16 +939,20 @@ export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
 export INSTALL_TPM="$USE_TPM_LUKS"
+export _INSTALL_TPM_PCRS="$TPM_PCRS"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
 export _INSTALL_TIMEZONE="$TIMEZONE"
 export _INSTALL_LOCALE="$LOCALE"
 export _INSTALL_KEYMAP="$KEYMAP"
+export _INSTALL_BOOTLOADER="$INSTALL_BOOTLOADER"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
 cp ./chroot.sh /mnt/
 chmod +x /mnt/chroot.sh
+cp ./bootloader.sh /mnt/
+chmod +x /mnt/bootloader.sh
 
 # Copy hardening scripts
 case "$SYSCTL_PROFILE" in
@@ -972,6 +1027,35 @@ AURSCRIPT
 
 chmod 700 /mnt/root/install-aur-packages.sh
 
+if [[ "$INSTALL_BOOTLOADER" == "uki" ]]; then
+    BOOT_PROFILE_GUIDANCE=$(cat <<EOF
+   - Inspect the signed boot chain: awesome-secureboot status
+   - Put firmware in Secure Boot Setup Mode, then run:
+       awesome-secureboot enroll-keys
+   - Reboot with Secure Boot enabled.
+   - If TPM unlock was selected, bind it only after Secure Boot is active:
+       awesome-secureboot bind-tpm
+   - Reboot once more and confirm unattended LUKS unlock.
+EOF
+)
+else
+    BOOT_PROFILE_GUIDANCE=$(cat <<EOF
+   - GRUB and its initramfs live inside the encrypted root container.
+   - The GRUB menu is protected by the password created during installation.
+   - Secure Boot provisioning is not performed by the GRUB profile.
+EOF
+)
+    if [[ "$USE_TPM_LUKS" == true ]]; then
+        BOOT_PROFILE_GUIDANCE+=$(cat <<EOF
+
+   - Enroll TPM unlock after first boot:
+       systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=$TPM_PCRS $PARTITION3
+   - GRUB still requires its passphrase to decrypt /boot.
+EOF
+)
+    fi
+fi
+
 # Create post-installation README
 cat > /mnt/root/POST_INSTALL_README.txt <<EOF
 ================================================================================
@@ -984,6 +1068,7 @@ Username: $USERNAME
 Disk: $DISK (Type: $DEVICE_TYPE)
 TPM2 Enabled: $USE_TPM_LUKS
 Sysctl Profile: $SYSCTL_PROFILE_LABEL
+Boot Profile: $INSTALL_BOOTLOADER
 
 CRITICAL POST-INSTALLATION STEPS:
 =================================
@@ -998,17 +1083,10 @@ CRITICAL POST-INSTALLATION STEPS:
    systemctl enable --now rkhunter-check.timer
    systemctl enable --now arch-audit.timer
 
-3. TPM2 ENROLLMENT (if TPM enabled):
-   - After first boot, enroll TPM:
-     systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=$TPM_PCRS $PARTITION3
-   - Test with: systemctl restart systemd-cryptsetup@*.service
+3. BOOT SECURITY:
+$BOOT_PROFILE_GUIDANCE
 
-4. SECURE BOOT:
-   sbctl status
-   sbctl sign -s /efi/EFI/GRUB/grubx64.efi
-   sbctl sign -s /boot/vmlinuz-linux
-
-5. MAINTENANCE:
+4. MAINTENANCE:
    - Weekly: arch-audit
    - Weekly: rkhunter --check
    - Weekly: aide --check
@@ -1045,14 +1123,26 @@ fi
 
 arch-chroot /mnt bash -c "source /set-install-vars.sh && /chroot.sh"
 
+# The UKI initramfs is stored in cleartext on the ESP. Slot 1 exists only to
+# unlock the container during installation and is removed as soon as chroot
+# configuration has completed successfully.
+if [[ "$INSTALL_BOOTLOADER" == "uki" ]]; then
+    echo -e "${BBlue}Removing the install-session LUKS keyslot...${NC}"
+    cryptsetup -v luksRemoveKey "$PARTITION3" ./boot.key
+    log_action "Removed UKI install-session key from LUKS slot 1"
+fi
+
 # -----------------------
 # 12. FINAL TPM ENROLLMENT
 # -----------------------
 
 if [ "$USE_TPM_LUKS" = true ]; then
-    echo -e "${BBlue}Finalizing TPM2 enrollment...${NC}"
-    echo -e "${BYellow}TPM2 enrollment will be completed on first boot${NC}"
-    echo -e "${BYellow}The system will initially require password, then you can enroll TPM${NC}"
+    echo -e "${BBlue}TPM2 enrollment is ready for first boot.${NC}"
+    if [[ "$INSTALL_BOOTLOADER" == "uki" ]]; then
+        echo -e "${BYellow}Boot once with the passphrase, establish the final Secure Boot state, then bind the TPM.${NC}"
+    else
+        echo -e "${BYellow}Boot once with the passphrase, then enroll the TPM from the installed system.${NC}"
+    fi
 fi
 
 # -----------------------
@@ -1073,6 +1163,7 @@ shred -vzu ./tpm_luks.conf 2>/dev/null || true
 
 # Clean up scripts
 shred -vzu /mnt/chroot.sh 2>/dev/null || true
+shred -vzu /mnt/bootloader.sh 2>/dev/null || true
 shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl-profile.conf 2>/dev/null || true
@@ -1097,7 +1188,11 @@ echo "1. Reboot: reboot"
 echo "2. Login as root"
 echo "3. Run: /root/install-aur-packages.sh"
 if [ "$USE_TPM_LUKS" = true ]; then
-    echo "4. Enroll TPM: systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=$TPM_PCRS $PARTITION3"
+    if [[ "$INSTALL_BOOTLOADER" == "uki" ]]; then
+        echo "4. After enabling Secure Boot: awesome-secureboot bind-tpm"
+    else
+        echo "4. Enroll TPM: systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=$TPM_PCRS $PARTITION3"
+    fi
 fi
 echo "5. Review: /root/POST_INSTALL_README.txt"
 echo
