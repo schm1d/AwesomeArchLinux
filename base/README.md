@@ -8,7 +8,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 
 | Script | Purpose |
 |--------|---------|
-| `archinstall.sh` | Bare-metal installer — LVM on LUKS1, UEFI, optional TPM2 |
+| `archinstall.sh` | Bare-metal installer — LVM on LUKS2, UEFI, optional TPM2 |
 | `chroot.sh` | Bare-metal post-install — system hardening inside chroot |
 | `vps-install.sh` | VPS/cloud installer — single partition, swap file, BIOS/UEFI |
 | `vps-chroot.sh` | VPS post-install — same hardening adapted for VPS |
@@ -30,13 +30,13 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 ### Disk Layout (archinstall.sh)
 
 ```
-+----------+----------+------------------------------------------+
-| EFI (1)  | Boot (2) | LUKS1-encrypted LVM (3)                  |
-| FAT32    | ext4     | +--------+--------+--------+-----------+ |
-| 512 MiB  | 1 GiB    | | swap   | root   | var    | home      | |
-|          |          | +--------+--------+--------+-----------+ |
-| /efi     | /boot    | Sizes chosen interactively               |
-+----------+----------+------------------------------------------+
++------------+-------------+---------------------------------------------+
+| BIOS (1)   | EFI (2)     | LUKS2-encrypted LVM (3)                     |
+| 1 MiB ef02 | 1 GiB FAT32 | +------+------+------+--------+-----------+ |
+| unmounted  | /efi        | | swap | root | var* | tmp    | home      | |
+|            |             | +------+------+------+--------+-----------+ |
+|            |             | /tmp: 10 GiB, or 25 GiB on >=1 TB disks    |
++------------+-------------+---------------------------------------------+
 ```
 
 ### Steps
@@ -63,9 +63,9 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    - Timezone, locale, and console keymap (common presets with live preview via `loadkeys`)
    - LUKS encryption passphrase
    - TPM2 binding (if hardware is detected)
-   - Sysctl profile (`security`, `security+performance`, or `full-performance`)
+   - Sysctl profile (`workstation`, `strict`, or `performance`) and IPv6 policy
 
-5. After partitioning and pacstrap, the script copies `chroot.sh` plus the selected sysctl helper/profile into the new system and enters chroot automatically.
+5. After partitioning and pacstrap, the script copies `chroot.sh` plus the composable sysctl bundle into the new system and enters chroot automatically.
 
 6. Inside chroot you will be prompted for:
    - User password
@@ -78,9 +78,10 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 
 - Validates UEFI support, network, and disk space
 - Detects TPM2 hardware and version
-- Creates GPT partition table (EFI + boot + LUKS)
-- Encrypts the third partition with LUKS1 (AES-XTS, 512-bit)
-- Creates LVM volumes (swap, root, var, home)
+- Creates GPT partition table (BIOS boot compatibility slot + EFI system partition + LUKS)
+- Encrypts the third partition with LUKS2 (AES-XTS, 512-bit)
+- Creates LVM volumes (swap, root, optional var, dedicated tmp, home)
+- Allocates a disk-backed `/tmp` LV of 10 GiB, increased to 25 GiB when the target disk is at least 1 TB
 - Generates a LUKS keyfile for unattended boot unlocking
 - Runs pacstrap with base, linux, linux-firmware
 - Detects CPU vendor and installs microcode (intel-ucode / amd-ucode)
@@ -115,7 +116,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 - Core dump disabled
 - Chrony NTP with network time synchronization
 - 15+ systemd service hardening overrides
-- Applies the selected sysctl profile (`security`, `security+performance`, or `full-performance`)
+- Installs the selected composable sysctl profile (`workstation`, `strict`, or `performance`) and IPv6 policy for first boot
 - Secure cleanup of install artifacts on exit
 
 ---
@@ -138,13 +139,13 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
    sudo ./vps-install.sh
    ```
 
-3. The script auto-detects BIOS vs UEFI and adjusts accordingly, then prompts for the sysctl profile to apply during chroot.
+3. The script auto-detects BIOS vs UEFI and adjusts accordingly, then prompts for the sysctl profile and IPv6 policy to install during chroot.
 
 ### Differences from Bare-Metal
 
 | Feature | Bare-metal | VPS |
 |---------|-----------|-----|
-| Disk encryption | LUKS1 + LVM | None (provider handles it) |
+| Disk encryption | LUKS2 + LVM | None (provider handles it) |
 | TPM2 | Optional auto-enrollment | Not available |
 | Boot | GRUB + encrypted /boot | GRUB (UEFI) or syslinux (BIOS) |
 | Partitioning | EFI + boot + LUKS(LVM) | Single root + swap file |
@@ -180,7 +181,8 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 
 ### What it Does
 
-- Mounts `/tmp` as tmpfs with `noexec,nosuid,nodev` (configurable size)
+- Mounts `/tmp` as tmpfs with `noexec,nosuid,nodev` (10 GiB minimum; automatic 25 GiB ceiling when the root disk is at least 1 TB)
+- The VPS tmpfs size is a maximum, not reserved space; pages consume RAM and swap only as `/tmp` fills
 - Remounts `/dev/shm` with `noexec,nosuid,nodev`
 - Remounts `/proc` with `hidepid=2,gid=proc`
 - Bind-mounts `/var/tmp` to `/tmp` (inherits hardened options)
@@ -192,7 +194,7 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 ### CLI Options
 
 ```
-  -t SIZE     tmpfs size for /tmp in GB (default: 2)
+  -t SIZE     tmpfs size for /tmp in GB (minimum/default: 10; automatic: 25 on >=1 TB root disks)
   -v SIZE     /var loop image size in GB (default: 10)
   -u USER     Username for vps-chroot.sh integration (auto-detected)
   -p PORT     SSH port (default: 22)

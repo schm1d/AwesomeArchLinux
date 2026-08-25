@@ -134,6 +134,26 @@ check_sysctl() {
     fi
 }
 
+check_sysctl_one_of() {
+    local key="$1"
+    local expected_values="$2"
+    local description="$3"
+    local actual
+
+    if actual=$(sysctl -n "$key" 2>/dev/null); then
+        case ",${expected_values}," in
+            *",${actual},"*)
+                result_pass "$description ($key = $actual)"
+                ;;
+            *)
+                result_fail "$description ($key should be one of: $expected_values)" "$actual"
+                ;;
+        esac
+    else
+        result_fail "$description ($key not available)" "sysctl key not found"
+    fi
+}
+
 # --- Usage ---
 usage() {
     cat <<EOF
@@ -179,26 +199,35 @@ done
 check_kernel_hardening() {
     category_header "Kernel Hardening (sysctl)"
 
-    check_sysctl "kernel.kptr_restrict" "2" \
-        "Kernel pointer restriction"
-
     check_sysctl "kernel.dmesg_restrict" "1" \
         "Dmesg access restricted to root"
 
-    check_sysctl "kernel.yama.ptrace_scope" "2" \
-        "Ptrace scope restricted" "min"
-
-    check_sysctl "kernel.kexec_load_disabled" "1" \
-        "Kexec loading disabled"
-
-    check_sysctl "kernel.unprivileged_bpf_disabled" "1" \
-        "Unprivileged BPF disabled"
+    if [[ -f /etc/sysctl.d/90-awesome-strict.conf ]]; then
+        check_sysctl "kernel.kptr_restrict" "2" \
+            "Strict kernel pointer restriction"
+        check_sysctl "kernel.yama.ptrace_scope" "2" \
+            "Strict ptrace restriction" "min"
+        check_sysctl "kernel.kexec_load_disabled" "1" \
+            "Strict kexec loading disabled"
+        check_sysctl "kernel.unprivileged_bpf_disabled" "1" \
+            "Strict unprivileged BPF policy"
+        check_sysctl "net.ipv4.conf.all.rp_filter" "1" \
+            "Strict reverse path filtering"
+    else
+        check_sysctl "kernel.kptr_restrict" "1" \
+            "Kernel pointer restriction" "min"
+        check_sysctl "kernel.yama.ptrace_scope" "1" \
+            "Compatible ptrace restriction" "min"
+        # Both values disable ordinary unprivileged BPF. Value 1 is the
+        # irreversible strict state; value 2 remains reversible by an admin.
+        check_sysctl_one_of "kernel.unprivileged_bpf_disabled" "1,2" \
+            "Unprivileged BPF restricted"
+        check_sysctl "net.ipv4.conf.all.rp_filter" "2" \
+            "VPN-compatible reverse path filtering"
+    fi
 
     check_sysctl "net.ipv4.tcp_syncookies" "1" \
         "TCP SYN cookies enabled"
-
-    check_sysctl "net.ipv4.conf.all.rp_filter" "1" \
-        "Reverse path filtering enabled"
 
     check_sysctl "net.ipv4.conf.all.accept_redirects" "0" \
         "ICMP redirects disabled (accept)"
@@ -217,8 +246,17 @@ check_kernel_hardening() {
         result_fail "Could not read net.ipv4.ip_forward" "$ip_fwd"
     fi
 
-    check_sysctl "net.ipv6.conf.all.disable_ipv6" "1" \
-        "IPv6 disabled"
+    if [[ -f /etc/sysctl.d/90-awesome-ipv6-disabled.conf ]]; then
+        check_sysctl "net.ipv6.conf.all.disable_ipv6" "1" \
+            "Selected IPv6-disable policy enforced"
+    else
+        check_sysctl "net.ipv6.conf.all.disable_ipv6" "0" \
+            "IPv6 enabled by selected policy"
+        check_sysctl "net.ipv6.conf.all.accept_redirects" "0" \
+            "IPv6 redirects disabled"
+        check_sysctl "net.ipv6.conf.all.accept_source_route" "-1" \
+            "All IPv6 source-routing headers rejected"
+    fi
 
     check_sysctl "kernel.randomize_va_space" "2" \
         "Full ASLR enabled"
@@ -262,6 +300,26 @@ check_filesystem_security() {
     }
 
     check_mount_opts "/tmp" "nosuid,nodev,noexec" "/tmp mount hardened"
+
+    local tmp_source tmp_fstype tmp_size_bytes
+    read -r tmp_source tmp_fstype < <(findmnt -n -o SOURCE,FSTYPE /tmp 2>/dev/null) || true
+    tmp_size_bytes=""
+    if [[ "$tmp_fstype" == "tmpfs" ]]; then
+        tmp_size_bytes=$(findmnt -n -b -o SIZE /tmp 2>/dev/null || true)
+    elif [[ "$tmp_source" == /dev/* ]]; then
+        tmp_size_bytes=$(lsblk -b -n -o SIZE "$tmp_source" 2>/dev/null | head -1 || true)
+    fi
+    if [[ ! "$tmp_size_bytes" =~ ^[0-9]+$ ]]; then
+        tmp_size_bytes=$(findmnt -n -b -o SIZE /tmp 2>/dev/null || true)
+    fi
+
+    if [[ "$tmp_size_bytes" =~ ^[0-9]+$ ]] &&
+       ((tmp_size_bytes >= 10 * 1073741824)); then
+        result_pass "/tmp capacity is at least 10 GiB ($((tmp_size_bytes / 1073741824)) GiB)"
+    else
+        result_fail "/tmp capacity should be at least 10 GiB" "${tmp_size_bytes:-unknown} bytes"
+    fi
+
     check_mount_opts "/dev/shm" "nosuid,nodev,noexec" "/dev/shm mount hardened"
 
     # Check /proc hidepid

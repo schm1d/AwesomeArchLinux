@@ -18,7 +18,7 @@
 # Usage:       sudo ./vps-harden.sh [OPTIONS]
 #              sudo ./vps-harden.sh --dry-run
 #              sudo ./vps-harden.sh --skip-var --skip-sw
-#              sudo ./vps-harden.sh -t 4 -v 20 -u myuser -p 2222
+#              sudo ./vps-harden.sh -t 25 -v 20 -u myuser -p 2222
 # =============================================================================
 
 set -euo pipefail
@@ -31,6 +31,10 @@ readonly C_INFO='\033[1;34m'
 readonly C_WARN='\033[1;33m'
 readonly C_ERR='\033[1;31m'
 readonly C_NC='\033[0m'
+readonly LARGE_DISK_THRESHOLD_BYTES=1000000000000
+readonly DEFAULT_TMP_SIZE_GB=10
+readonly LARGE_DISK_TMP_SIZE_GB=25
+readonly SHM_SIZE_GB=2
 
 msg()  { printf "%b[+]%b %s\n" "$C_OK"   "$C_NC" "$1"; }
 info() { printf "%b[*]%b %s\n" "$C_INFO"  "$C_NC" "$1"; }
@@ -46,7 +50,8 @@ log_action() {
 }
 
 # --- Defaults ---
-TMP_SIZE=2                  # tmpfs /tmp size in GB
+TMP_SIZE="$DEFAULT_TMP_SIZE_GB" # tmpfs /tmp ceiling in GB
+TMP_SIZE_EXPLICIT=false
 VAR_LOOP_SIZE=10            # /var loop image size in GB
 USERNAME=""                 # interactive or -u flag
 NEW_HOSTNAME=""             # interactive or -H flag
@@ -54,6 +59,8 @@ SSH_PORT=22
 SKIP_VAR=false
 SKIP_SW=false
 DRY_RUN=false
+SYSCTL_PROFILE="workstation"
+SYSCTL_DISABLE_IPV6=false
 ROLLBACK_SCRIPT="/root/undo-vps-harden.sh"
 FSTAB_BACKUP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,13 +97,18 @@ Harden filesystem mount points on a live, running Arch Linux VPS.
 Unlike vps-install.sh, this does NOT reformat or repartition the disk.
 
 Options:
-  -t SIZE     tmpfs size for /tmp in GB (default: $TMP_SIZE)
+  -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
+              or 25 when the root disk is at least 1 TB)
   -v SIZE     /var loop image size in GB, if using loop device (default: $VAR_LOOP_SIZE)
   -u USER     Username for vps-chroot.sh (prompted if not given)
   -H HOST     Hostname to set (prompted if not given)
   -p PORT     SSH port for vps-chroot.sh (default: $SSH_PORT)
   --skip-var  Skip /var separation (only harden virtual mounts)
   --skip-sw   Skip software hardening (only do filesystem mounts)
+  --sysctl-profile PROFILE
+              Select workstation, strict, or performance (default: workstation)
+  --disable-ipv6
+              Install the explicit IPv6-disable sysctl overlay
   --dry-run   Show planned changes without executing
   -h          Show this help
 
@@ -117,10 +129,12 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -t)
+                [[ $# -ge 2 ]] || err "-t requires a size in GB"
                 TMP_SIZE="$2"
-                if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || [[ "$TMP_SIZE" -lt 1 ]]; then
-                    err "Invalid tmpfs size: $TMP_SIZE (must be a positive integer)"
+                if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || [[ "$TMP_SIZE" -lt "$DEFAULT_TMP_SIZE_GB" ]]; then
+                    err "Invalid tmpfs size: $TMP_SIZE (minimum ${DEFAULT_TMP_SIZE_GB} GB)"
                 fi
+                TMP_SIZE_EXPLICIT=true
                 shift 2
                 ;;
             -v)
@@ -147,6 +161,16 @@ parse_args() {
                 ;;
             --skip-var) SKIP_VAR=true; shift ;;
             --skip-sw)  SKIP_SW=true; shift ;;
+            --sysctl-profile)
+                [[ $# -ge 2 ]] || err "--sysctl-profile requires a value"
+                SYSCTL_PROFILE="$2"
+                case "$SYSCTL_PROFILE" in
+                    workstation|strict|performance) ;;
+                    *) err "Invalid sysctl profile: $SYSCTL_PROFILE" ;;
+                esac
+                shift 2
+                ;;
+            --disable-ipv6) SYSCTL_DISABLE_IPV6=true; shift ;;
             --dry-run)  DRY_RUN=true; shift ;;
             -h|--help)  usage ;;
             *)          err "Unknown option: $1 (see $0 -h)" ;;
@@ -216,6 +240,18 @@ detect_disk_layout() {
         warn "Could not determine parent disk from $ROOT_DEVICE"
     fi
     info "Parent disk: $PARENT_DISK"
+
+    if [[ "$TMP_SIZE_EXPLICIT" == false ]]; then
+        local disk_size_bytes
+        disk_size_bytes=$(lsblk -b -d -n -o SIZE "$PARENT_DISK" 2>/dev/null || true)
+        if [[ "$disk_size_bytes" =~ ^[0-9]+$ ]] &&
+           ((disk_size_bytes >= LARGE_DISK_THRESHOLD_BYTES)); then
+            TMP_SIZE="$LARGE_DISK_TMP_SIZE_GB"
+        else
+            TMP_SIZE="$DEFAULT_TMP_SIZE_GB"
+        fi
+        info "Automatic /tmp tmpfs ceiling: ${TMP_SIZE}G"
+    fi
 
     # Show current layout
     echo
@@ -296,6 +332,8 @@ show_plan() {
         echo "  Will run vps-chroot.sh (SSH, nftables, sysctl, PAM, etc.)"
         echo "  Username and hostname will be prompted before running"
         echo "  SSH port: $SSH_PORT"
+        echo "  Sysctl profile: $SYSCTL_PROFILE"
+        echo "  IPv6 disabled: $SYSCTL_DISABLE_IPV6"
     else
         echo
         echo -e "${C_WARN}Software hardening:${C_NC} SKIPPED"
@@ -540,7 +578,7 @@ harden_dev_shm() {
     sed -i '\|^[^#].*[[:space:]]/dev/shm[[:space:]]|d' /etc/fstab
 
     # Add hardened entry
-    echo "tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=${TMP_SIZE}G 0 0" >> /etc/fstab
+    echo "tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=${SHM_SIZE_GB}G 0 0" >> /etc/fstab
 
     # Remount with hardened options
     mount -o remount,nosuid,nodev,noexec /dev/shm 2>/dev/null || \
@@ -1043,6 +1081,8 @@ export INSTALL_DATE="$(date)"
 export INSTALL_TYPE="vps-harden"
 export INSTALL_SSH_PORT="$SSH_PORT"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export INSTALL_DISABLE_IPV6="$SYSCTL_DISABLE_IPV6"
 EOF
     chmod 600 /root/.install-env
     msg "Created /root/.install-env (INSTALL_TYPE=vps-harden)"
@@ -1084,20 +1124,42 @@ run_software_hardening() {
 
     chmod +x "$chroot_script"
 
-    # Also fetch helper scripts if needed
-    for helper in sysctl.sh ssh.sh; do
-        local helper_dest="/${helper}"
-        if [[ -f "$SCRIPT_DIR/../hardening/sysctl/$helper" ]] && [[ "$helper" == "sysctl.sh" ]]; then
-            cp "$SCRIPT_DIR/../hardening/sysctl/$helper" "$helper_dest"
-        elif [[ -f "$SCRIPT_DIR/../hardening/ssh/$helper" ]] && [[ "$helper" == "ssh.sh" ]]; then
-            cp "$SCRIPT_DIR/../hardening/ssh/$helper" "$helper_dest"
+    # Stage the complete sysctl bundle. vps-chroot.sh applies it immediately on
+    # this live system, unlike the install-from-ISO paths which use --no-apply.
+    local sysctl_stage="/sysctl-profile"
+    local -a sysctl_files=(
+        sysctl.sh
+        60-awesome-security-core.conf
+        70-awesome-workstation-network.conf
+        80-awesome-performance.conf
+        80-awesome-bbr.modules
+        90-awesome-strict.conf
+        90-awesome-ipv6-disabled.conf
+    )
+    local sysctl_file
+    install -d -m 0755 "$sysctl_stage"
+    for sysctl_file in "${sysctl_files[@]}"; do
+        if [[ -f "$SCRIPT_DIR/../hardening/sysctl/$sysctl_file" ]]; then
+            install -m 0644 \
+                "$SCRIPT_DIR/../hardening/sysctl/$sysctl_file" \
+                "$sysctl_stage/$sysctl_file"
         else
             curl -fsSL \
-                "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/${helper%.*}/$helper" \
-                -o "$helper_dest" 2>/dev/null || warn "Could not fetch $helper"
+                "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/sysctl/$sysctl_file" \
+                -o "$sysctl_stage/$sysctl_file" || err "Could not fetch sysctl bundle file: $sysctl_file"
+            chmod 0644 "$sysctl_stage/$sysctl_file"
         fi
-        [[ -f "$helper_dest" ]] && chmod +x "$helper_dest"
     done
+    chmod 0755 "$sysctl_stage/sysctl.sh"
+
+    if [[ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]]; then
+        cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /ssh.sh
+    else
+        curl -fsSL \
+            "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/ssh/ssh.sh" \
+            -o /ssh.sh || warn "Could not fetch ssh.sh"
+    fi
+    [[ -f /ssh.sh ]] && chmod +x /ssh.sh
 
     # Set up environment variables and run
     export _INSTALL_DISK="$PARENT_DISK"
@@ -1105,6 +1167,8 @@ run_software_hardening() {
     export _INSTALL_HOST="$NEW_HOSTNAME"
     export _INSTALL_SSH_PORT="$SSH_PORT"
     export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+    export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+    export _INSTALL_DISABLE_IPV6="$SYSCTL_DISABLE_IPV6"
     export _INSTALL_TYPE="vps-harden"
 
     info "Executing vps-chroot.sh (this will take several minutes)..."
@@ -1114,6 +1178,7 @@ run_software_hardening() {
     [[ "$chroot_script" == /tmp/* ]] && shred -zu "$chroot_script" 2>/dev/null || true
     shred -zu /sysctl.sh 2>/dev/null || true
     shred -zu /ssh.sh 2>/dev/null || true
+    rm -rf -- /sysctl-profile
 
     msg "Software hardening complete"
     log_action "Software hardening via vps-chroot.sh completed"

@@ -38,6 +38,7 @@ unmount_all() {
     # Unmount in reverse order
     umount /mnt/efi 2>/dev/null || true
     umount /mnt/var 2>/dev/null || true
+    umount /mnt/tmp 2>/dev/null || true
     umount /mnt/home 2>/dev/null || true
     umount /mnt/boot 2>/dev/null || true
     umount /mnt 2>/dev/null || true
@@ -112,6 +113,12 @@ remount_all() {
     if [ -b /dev/mapper/${VG_NAME}-var ]; then
         mkdir -p /mnt/var
         mount /dev/mapper/${VG_NAME}-var /mnt/var
+    fi
+
+    # Newer installations use a dedicated encrypted /tmp logical volume.
+    if [ -b /dev/mapper/${VG_NAME}-tmp ]; then
+        mkdir -p /mnt/tmp
+        mount -o rw,nosuid,nodev,noexec /dev/mapper/${VG_NAME}-tmp /mnt/tmp
     fi
 
     # Mount EFI

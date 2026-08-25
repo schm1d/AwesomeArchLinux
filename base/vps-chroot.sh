@@ -37,7 +37,16 @@ TIMEZONE="${_INSTALL_TIMEZONE:-UTC}"
 LOCALE="${_INSTALL_LOCALE:-en_US.UTF-8}"
 # shellcheck disable=SC2034
 KEYMAP="${_INSTALL_KEYMAP:-us}"
-SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-security}}"
+SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
+SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
+
+case "$SYSCTL_DISABLE_IPV6" in
+    true|false) ;;
+    *)
+        echo "Invalid IPv6 policy value: $SYSCTL_DISABLE_IPV6" >&2
+        exit 1
+        ;;
+esac
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -55,14 +64,14 @@ CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}'
 pacman-key --init
 pacman-key --populate archlinux
 
-# Tell GnuPG dirmngr to skip IPv6 — we disable IPv6 in sysctl, and the
-# default IPv6-first keyserver lookup logs "Network is unreachable"
-# noise on every key fetch before falling back to IPv4.
+# Keep dirmngr aligned with the selected IPv6 policy.
 mkdir -p /etc/gnupg
-cat > /etc/gnupg/dirmngr.conf <<'EOF'
-disable-ipv6
-honor-http-proxy
-EOF
+{
+  if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+    printf '%s\n' 'disable-ipv6'
+  fi
+  printf '%s\n' 'honor-http-proxy'
+} > /etc/gnupg/dirmngr.conf
 
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 groupdel games 2>/dev/null || true
@@ -1402,6 +1411,21 @@ sleep 2
 harden_sysctl() {
   echo -e "${BBlue}Applying sysctl profile: ${SYSCTL_PROFILE}...${NC}"
 
+  if [ -x "/sysctl-profile/sysctl.sh" ]; then
+    local -a sysctl_args=("$SYSCTL_PROFILE")
+    if [[ "${_INSTALL_TYPE:-${INSTALL_TYPE:-}}" != "vps-harden" ]]; then
+      sysctl_args+=("--no-apply")
+    fi
+    if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+      sysctl_args+=("--disable-ipv6")
+    fi
+    /sysctl-profile/sysctl.sh "${sysctl_args[@]}"
+    rm -rf -- /sysctl-profile
+    sleep 2
+    return
+  fi
+
+  # Compatibility with installers from before the composable profile bundle.
   if [ -f "/sysctl-profile.conf" ]; then
     install -m 0644 /sysctl-profile.conf /etc/sysctl.d/99-sysctl.conf
     sysctl --load=/etc/sysctl.d/99-sysctl.conf

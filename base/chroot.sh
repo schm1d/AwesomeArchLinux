@@ -40,7 +40,8 @@ CRYPT_NAME="${_INSTALL_CRYPT:-crypt_lvm}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 LVM_NAME="${_INSTALL_LVM:-lvm_arch}"
 INSTALL_TPM="${INSTALL_TPM:-false}"
-SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-security}}"
+SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
+SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
 INSTALL_BOOTLOADER="${_INSTALL_BOOTLOADER:?Missing explicit bootloader profile}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 TPM_PCRS="${_INSTALL_TPM_PCRS:-7}"
@@ -50,6 +51,14 @@ case "$INSTALL_BOOTLOADER" in
     grub|uki) ;;
     *)
         echo "Invalid bootloader profile: $INSTALL_BOOTLOADER" >&2
+        exit 1
+        ;;
+esac
+
+case "$SYSCTL_DISABLE_IPV6" in
+    true|false) ;;
+    *)
+        echo "Invalid IPv6 policy value: $SYSCTL_DISABLE_IPV6" >&2
         exit 1
         ;;
 esac
@@ -81,14 +90,14 @@ CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}'
 pacman-key --init
 pacman-key --populate archlinux
 
-# Tell GnuPG dirmngr to skip IPv6 — we disable IPv6 in sysctl, and the
-# default IPv6-first keyserver lookup logs "Network is unreachable"
-# noise on every key fetch before falling back to IPv4.
+# Keep dirmngr aligned with the selected IPv6 policy.
 mkdir -p /etc/gnupg
-cat > /etc/gnupg/dirmngr.conf <<'EOF'
-disable-ipv6
-honor-http-proxy
-EOF
+{
+  if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+    printf '%s\n' 'disable-ipv6'
+  fi
+  printf '%s\n' 'honor-http-proxy'
+} > /etc/gnupg/dirmngr.conf
 
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 # games is a group on Arch, not a user — userdel not needed
@@ -1791,6 +1800,18 @@ harden_sysctl() {
 
   echo -e "${BBlue}Applying sysctl profile: ${SYSCTL_PROFILE}...${NC}"
 
+  if [ -x "/sysctl-profile/sysctl.sh" ]; then
+    local -a sysctl_args=("$SYSCTL_PROFILE" "--no-apply")
+    if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+      sysctl_args+=("--disable-ipv6")
+    fi
+    /sysctl-profile/sysctl.sh "${sysctl_args[@]}"
+    rm -rf -- /sysctl-profile
+    sleep 2
+    return
+  fi
+
+  # Compatibility with installers from before the composable profile bundle.
   if [ -f "/sysctl-profile.conf" ]; then
     install -m 0644 /sysctl-profile.conf /etc/sysctl.d/99-sysctl.conf
     sysctl --load=/etc/sysctl.d/99-sysctl.conf

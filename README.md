@@ -85,9 +85,12 @@ AwesomeArchLinux/
 |   |   +-- ssh_client.sh    # SSH client configuration & key generation
 |   |   +-- README.md
 |   +-- sysctl/
-|   |   +-- sysctl.sh        # Security sysctl baseline (installer profile: security)
-|   |   +-- 99-workstation-net.conf  # Installer profile: security+performance
-|   |   +-- 99-full-performance.conf # Installer profile: full-performance
+|   |   +-- sysctl.sh        # Composable sysctl profile installer
+|   |   +-- 60-awesome-security-core.conf       # Shared compatible hardening
+|   |   +-- 70-awesome-workstation-network.conf # IPv4/IPv6 host policy
+|   |   +-- 80-awesome-performance.conf         # Optional fq + BBR overlay
+|   |   +-- 90-awesome-strict.conf              # Compatibility-breaking overlay
+|   |   +-- 90-awesome-ipv6-disabled.conf       # Explicit IPv6-disable overlay
 |   |   +-- WORKSTATION.md   # Companion checklist for non-sysctl workstation tuning
 |   +-- totp/
 |   |   +-- totp.sh          # TOTP two-factor authentication for SSH
@@ -133,7 +136,7 @@ AwesomeArchLinux/
 
 #### Encryption & Key Management (bare-metal)
 
-- LUKS1 container with passphrase, boot key file, and recovery key (3 key slots)
+- LUKS2 container with passphrase, boot key file, and recovery key (3 key slots)
 - LUKS header backup with secure external storage prompt
 - Secure cleanup: `shred` of all key material after installation
 - Swap on the LUKS-encrypted LVM volume (no double-crypt wrapper — avoids the systemd-cryptsetup-generator + LVM activation race that triggered `dev-mapper-swap.device` dependency failures on first boot)
@@ -144,7 +147,7 @@ AwesomeArchLinux/
 - **nftables** &mdash; Default deny policy, SSH rate limiting (2/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
 - **FireHOL** &mdash; Optional advanced firewall with IP blocklist integration from FireHOL's blocklist-ipsets repository. Configurable blocklist levels, automated daily updates via cron.
 - **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
-- **Workstation sysctl profile** &mdash; Example `fq + bbr` desktop/workstation profile plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
+- **Composable sysctl profiles** &mdash; Compatible workstation hardening by default, with explicit strict, fq + BBR performance, and IPv6-disable overlays plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
 
 #### Mandatory Access Control (AppArmor)
 
@@ -271,18 +274,17 @@ AwesomeArchLinux/
 
 #### Kernel Hardening (sysctl)
 
-The installers now offer three sysctl profiles:
+The installers offer three composable sysctl profiles:
 
-- **`security`** &mdash; the full hardening baseline applied by [`hardening/sysctl/sysctl.sh`](hardening/sysctl/sysctl.sh)
-- **`security+performance`** &mdash; the hardened high-throughput profile in [`hardening/sysctl/99-workstation-net.conf`](hardening/sysctl/99-workstation-net.conf)
-- **`full-performance`** &mdash; the throughput-first profile in [`hardening/sysctl/99-full-performance.conf`](hardening/sysctl/99-full-performance.conf)
+- **`workstation`** &mdash; the default, compatibility-oriented security and non-router network baseline
+- **`strict`** &mdash; adds compatibility-breaking restrictions for user namespaces, io_uring, BPF, kexec, debugging, SysRq, and panic behavior
+- **`performance`** &mdash; adds only fq + BBR and MTU black-hole probing to the workstation baseline
 
-The default `security` profile configures over 100 kernel parameters via `/etc/sysctl.d/99-sysctl.conf`:
+IPv6 remains enabled and hardened by default so SLAAC works. The installer offers a separate, explicit IPv6-disable overlay for networks that forbid it. Managed settings are split into numbered `/etc/sysctl.d/` layers so precedence and local overrides remain visible:
 
-- **Memory** &mdash; ASLR maximized (`vm.mmap_rnd_bits=32`), protected symlinks/hardlinks/FIFOs, restricted core dumps, `mmap_min_addr=65536`, and heuristic overcommit.
-- **Network** &mdash; SYN flood protection (syncookies), source validation (reverse path filtering), disabled IP forwarding, disabled ICMP redirects, martian packet logging, TCP Fast Open, BBR congestion control, `challenge_ack_limit` CVE mitigation, keepalive tuning, and large buffer sizes for performance.
-- **IPv6** &mdash; Disabled by default with all RA/redirect/source-route acceptance blocked.
-- **Kernel** &mdash; Restricted `dmesg`, `kptr`, `ptrace` (scope 2), BPF JIT hardened, `perf_event_paranoid=3`, panic on oops, kexec disabled, and limited SysRq.
+- **Core** &mdash; protected symlinks/hardlinks/FIFOs, restricted core dumps, ASLR, low-address protection, restricted `dmesg`, BPF, pointers, tracing, and performance events.
+- **Network** &mdash; disabled forwarding and redirects, source-route rejection, loose reverse-path filtering for VPN compatibility, normal ping diagnostics, SYN cookies, IPv6 privacy addresses, and working router advertisements.
+- **Strict overlay** &mdash; the one-way and compatibility-sensitive controls are opt-in and documented as such. `kernel.modules_disabled=1` is not applied automatically; a separately confirmed late-lock helper is provided for fixed-purpose systems.
 
 #### Kernel Boot Parameters
 
@@ -442,7 +444,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 #### Hardening Compliance Checker
 
 - **audit-check.sh** &mdash; Validates that all AwesomeArchLinux hardening has been correctly applied.
-- **47 checks** across 8 categories: kernel hardening (sysctl), filesystem security, authentication, SSH, network, services, boot security, and disabled modules.
+- **Profile-aware checks** across 8 categories: kernel hardening (sysctl), filesystem security, authentication, SSH, network, services, boot security, and disabled modules.
 - **Output modes** &mdash; Color-coded terminal output (`[PASS]`/`[FAIL]`/`[WARN]`), `--verbose` for actual values, `--json` for machine-readable output.
 - **Scoring** &mdash; Final pass/fail score with percentage.
 
@@ -454,7 +456,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 
 #### File System Security
 
-- **Mount hardening** &mdash; `/tmp` and `/dev/shm` mounted with `nosuid,nodev,noexec`. `/proc` mounted with `hidepid=2`.
+- **Mount hardening** &mdash; Bare-metal installs use a dedicated encrypted `/tmp` LV (10 GiB, or 25 GiB on disks of at least 1 TB); VPS paths use a tmpfs ceiling with the same sizing policy. `/tmp` and `/dev/shm` use `nosuid,nodev,noexec` where workload compatibility allows it, and `/proc` uses `hidepid=2`.
 - **TRIM deliberately disabled** &mdash; discards are not passed through LUKS (no `--allow-discards`, no LVM `issue_discards`, no `fstrim.timer`). Forwarding discards would leak filesystem usage patterns into the ciphertext. This costs SSD wear levelling and is an intentional trade, not an oversight.
 - **Permissions** &mdash; `/boot` (700), `/etc/shadow` (600), `/etc/gshadow` (600), `sshd_config` (600), `grub.cfg` (no world access), `sudoers` (440), `login.defs` (644).
 - **`/home` is traversable but not listable** &mdash; `chmod 0711 /home` lets users `cd ~` but `ls /home` reveals no usernames to non-root observers. Per-user dirs stay 700 via `HOME_MODE 0700` in `/etc/login.defs` and explicit `chmod 700` at user creation.
@@ -663,7 +665,7 @@ sudo ./hardening/docker/docker.sh --compose docker-compose.yml        # Compose 
 sudo ./hardening/docker/docker.sh --network                           # Container network hardening
 
 # --- System ---
-sudo ./hardening/sysctl/sysctl.sh              # Kernel parameter hardening
+sudo ./hardening/sysctl/sysctl.sh workstation  # Compatible kernel hardening baseline
 sudo ./hardening/chrony/chrony.sh              # Chrony NTS (authenticated NTP)
 sudo ./hardening/postfix/postfix.sh -r smtp.gmail.com -u user@gmail.com -p 'pass'  # Mail relay
 

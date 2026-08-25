@@ -45,6 +45,9 @@ USE_TPM_LUKS=false
 # shellcheck disable=SC2034  # Used by TPM enrollment commands
 TPM_PCR_BANK="sha256"
 TPM_PCRS="7"
+readonly LARGE_DISK_THRESHOLD_BYTES=1000000000000
+readonly DEFAULT_TMP_SIZE_GB=10
+readonly LARGE_DISK_TMP_SIZE_GB=25
 
 # --- Logging setup ---
 INSTALL_LOG="/tmp/installation-audit-$(date +%Y%m%d-%H%M%S).log"
@@ -91,6 +94,19 @@ ask_yes_no() {
             *) echo -e "${BRed}Invalid choice. Please type 'y' or 'n'.\n${NC}" >&2 ;;
         esac
     done
+}
+
+recommended_tmp_size_gb() {
+    local disk="$1"
+    local disk_size_bytes
+
+    disk_size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || true)
+    if [[ "$disk_size_bytes" =~ ^[0-9]+$ ]] &&
+       ((disk_size_bytes >= LARGE_DISK_THRESHOLD_BYTES)); then
+        printf '%s\n' "$LARGE_DISK_TMP_SIZE_GB"
+    else
+        printf '%s\n' "$DEFAULT_TMP_SIZE_GB"
+    fi
 }
 
 # Prompt user for a valid block device
@@ -154,16 +170,32 @@ ask_for_sysctl_profile() {
     local choice
     while true; do
         echo -e "${BBlue}Select sysctl profile:${NC}" >&2
-        echo "1) security" >&2
-        echo "2) security+performance" >&2
-        echo "3) full-performance" >&2
+        echo "1) workstation - compatible security baseline (recommended)" >&2
+        echo "2) strict      - disables unprivileged user namespaces, io_uring, kexec, and debugging" >&2
+        echo "3) performance - workstation baseline plus fq + BBR" >&2
         read -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
-            1) echo "security"; return 0 ;;
-            2) echo "security-performance"; return 0 ;;
-            3) echo "full-performance"; return 0 ;;
+            1) echo "workstation"; return 0 ;;
+            2) echo "strict"; return 0 ;;
+            3) echo "performance"; return 0 ;;
             *) echo -e "${BRed}Invalid choice. Please enter 1, 2, or 3.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+ask_for_ipv6_policy() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select IPv6 policy:${NC}" >&2
+        echo "1) enabled and hardened (recommended; preserves SLAAC)" >&2
+        echo "2) disabled by explicit sysctl overlay" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "false"; return 0 ;;
+            2) echo "true"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
         esac
     done
 }
@@ -185,9 +217,9 @@ ask_for_bootloader_profile() {
 
 describe_sysctl_profile() {
     case "$1" in
-        security) echo "security" ;;
-        security-performance) echo "security+performance" ;;
-        full-performance) echo "full-performance" ;;
+        workstation) echo "workstation (compatible security baseline)" ;;
+        strict) echo "strict (compatibility-breaking hardening)" ;;
+        performance) echo "performance (workstation + fq/BBR)" ;;
         *) echo "$1" ;;
     esac
 }
@@ -324,10 +356,11 @@ validate_disk_space() {
     local swap="$2"
     local root="$3"
     local var="${4:-0}"
+    local tmp="${5:-$DEFAULT_TMP_SIZE_GB}"
     
     local disk_size
     disk_size=$(lsblk -b -d -o SIZE -n "$disk" 2>/dev/null || echo 0)
-    local required=$((($swap + $root + $var + 10) * 1073741824))
+    local required=$(((swap + root + var + tmp + 10) * 1073741824))
     
     if [[ $disk_size -lt $required ]]; then
         echo -e "${BRed}Error: Insufficient disk space. Need at least $(($required / 1073741824))GB${NC}" >&2
@@ -545,6 +578,10 @@ DEVICE_TYPE=$(detect_device_type "$DISK")
 echo -e "${BGreen}Selected: $DISK (Type: $DEVICE_TYPE)${NC}\n"
 log_action "Selected disk: $DISK (Type: $DEVICE_TYPE)"
 
+SIZE_OF_TMP=$(recommended_tmp_size_gb "$DISK")
+echo -e "${BGreen}/tmp allocation: ${SIZE_OF_TMP} GiB encrypted LVM volume${NC}\n"
+log_action "Selected /tmp size: ${SIZE_OF_TMP} GiB"
+
 # Partition sizes
 echo -e "${BBlue}Partition sizes:\n${NC}"
 SIZE_OF_SWAP=$(ask_for_numeric "SWAP size in GB:")
@@ -560,7 +597,7 @@ if [[ "$CREATE_VAR_PART" == "y" ]]; then
 fi
 
 # Validate disk space
-if ! validate_disk_space "$DISK" "$SIZE_OF_SWAP" "$SIZE_OF_ROOT" "$SIZE_OF_VAR"; then
+if ! validate_disk_space "$DISK" "$SIZE_OF_SWAP" "$SIZE_OF_ROOT" "$SIZE_OF_VAR" "$SIZE_OF_TMP"; then
     exit 1
 fi
 
@@ -613,6 +650,7 @@ fi
 echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
 SYSCTL_PROFILE=$(ask_for_sysctl_profile)
 SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
+DISABLE_IPV6=$(ask_for_ipv6_policy)
 
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
@@ -620,13 +658,16 @@ echo -e "Timezone: $TIMEZONE"
 echo -e "Locale: $LOCALE"
 echo -e "Keymap: $KEYMAP"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+echo -e "IPv6: $([[ "$DISABLE_IPV6" == true ]] && echo disabled || echo 'enabled and hardened')"
 echo -e "Boot Profile: $INSTALL_BOOTLOADER"
+echo -e "/tmp: ${SIZE_OF_TMP} GiB encrypted LVM volume"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Boot Profile: $INSTALL_BOOTLOADER"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Disable IPv6: $DISABLE_IPV6, Boot Profile: $INSTALL_BOOTLOADER"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
+TMP_SIZE="${SIZE_OF_TMP}G"
 CRYPT_NAME='crypt_lvm'
 LVM_NAME='lvm_arch'
 LUKS_KEYS='/etc/luksKeys'
@@ -772,6 +813,7 @@ vgcreate --verbose "$LVM_NAME" "/dev/mapper/$CRYPT_NAME"
 
 lvcreate --verbose -L "$ROOT_SIZE" "$LVM_NAME" -n root
 lvcreate --verbose -L "$SWAP_SIZE" "$LVM_NAME" -n swap
+lvcreate --verbose -L "$TMP_SIZE" "$LVM_NAME" -n tmp
 
 if [[ -n "$VAR_SIZE" ]]; then
     lvcreate --verbose -L "$VAR_SIZE" "$LVM_NAME" -n var
@@ -787,6 +829,7 @@ log_action "Formatting filesystems"
 
 mkfs.ext4 -m 1 -E lazy_itable_init=0,lazy_journal_init=0 "/dev/mapper/${LVM_NAME}-root"
 mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 "/dev/mapper/${LVM_NAME}-home"
+mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 "/dev/mapper/${LVM_NAME}-tmp"
 
 if [[ -n "$VAR_SIZE" ]]; then
     mkfs.ext4 -m 5 -E lazy_itable_init=0,lazy_journal_init=0 "/dev/mapper/${LVM_NAME}-var"
@@ -799,8 +842,10 @@ swapon "/dev/mapper/${LVM_NAME}-swap"
 echo -e "${BBlue}Optimizing filesystems...${NC}"
 tune2fs -O has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_index "/dev/mapper/${LVM_NAME}-root"
 tune2fs -O has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_index "/dev/mapper/${LVM_NAME}-home"
+tune2fs -O has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_index "/dev/mapper/${LVM_NAME}-tmp"
 tune2fs -c 30 -i 180d "/dev/mapper/${LVM_NAME}-root"
 tune2fs -c 30 -i 180d "/dev/mapper/${LVM_NAME}-home"
+tune2fs -c 30 -i 180d "/dev/mapper/${LVM_NAME}-tmp"
 
 # Mount filesystems
 echo -e "${BBlue}Mounting filesystems...${NC}"
@@ -814,6 +859,9 @@ if [[ -n "$VAR_SIZE" ]]; then
 fi
 
 mkdir --verbose -p /mnt/tmp
+mount --verbose -o rw,nosuid,nodev,noexec,relatime \
+    "/dev/mapper/${LVM_NAME}-tmp" /mnt/tmp
+chmod 1777 /mnt/tmp
 
 # Prepare EFI
 echo -e "${BBlue}Preparing EFI partition...${NC}"
@@ -876,17 +924,26 @@ fi
 echo -e "${BBlue}Generating fstab...${NC}"
 genfstab -U /mnt > /mnt/etc/fstab
 
+# Write the dedicated /tmp entry explicitly so its capacity and security flags
+# do not depend on which mount options a particular genfstab version emits.
+TMP_UUID=$(blkid -s UUID -o value "/dev/mapper/${LVM_NAME}-tmp")
+if [[ -z "$TMP_UUID" ]]; then
+    echo -e "${BRed}Could not determine the /tmp filesystem UUID.${NC}" >&2
+    exit 1
+fi
+sed -i '\|[[:space:]]/tmp[[:space:]]|d' /mnt/etc/fstab
+echo "UUID=$TMP_UUID /tmp ext4 rw,nosuid,nodev,noexec,relatime 0 2" >> /mnt/etc/fstab
+
 # Add security mount options
 cat >> /mnt/etc/fstab <<EOF
 
 # Security-hardened mount options
-tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
 proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0
 EOF
 
 # Configure swap
-# The swap LV already lives inside the LUKS1-encrypted LVM container, so it
+# The swap LV already lives inside the LUKS2-encrypted LVM container, so it
 # is encrypted end-to-end at rest. An additional plain dm-crypt wrapper with
 # a random key only adds erase-on-reboot semantics (useful for hibernation
 # attack resistance, which we don't use) at the cost of a fragile systemd
@@ -929,10 +986,12 @@ export INSTALL_HOST="$HOSTNAME"
 export INSTALL_CRYPT="$CRYPT_NAME"
 export INSTALL_LVM="$LVM_NAME"
 export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
+export INSTALL_TMP_SIZE="$TMP_SIZE"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export _INSTALL_TPM_PCRS="$TPM_PCRS"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
 export INSTALL_TIMEZONE="$TIMEZONE"
 export INSTALL_LOCALE="$LOCALE"
 export INSTALL_KEYMAP="$KEYMAP"
@@ -947,10 +1006,12 @@ export _INSTALL_USER="$USERNAME"
 export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_CRYPT="$CRYPT_NAME"
 export _INSTALL_LVM="$LVM_NAME"
+export _INSTALL_TMP_SIZE="$TMP_SIZE"
 export INSTALL_TPM="$USE_TPM_LUKS"
 export _INSTALL_TPM_PCRS="$TPM_PCRS"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export _INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
 export _INSTALL_TIMEZONE="$TIMEZONE"
 export _INSTALL_LOCALE="$LOCALE"
 export _INSTALL_KEYMAP="$KEYMAP"
@@ -963,40 +1024,28 @@ chmod +x /mnt/chroot.sh
 cp ./bootloader.sh /mnt/
 chmod +x /mnt/bootloader.sh
 
-# Copy hardening scripts
-case "$SYSCTL_PROFILE" in
-    security)
-        if [ -f ../hardening/sysctl/sysctl.sh ]; then
-            cp ../hardening/sysctl/sysctl.sh /mnt/
-            chmod +x /mnt/sysctl.sh
-        else
-            echo -e "${BRed}Missing security sysctl baseline: ../hardening/sysctl/sysctl.sh${NC}" >&2
-            exit 1
-        fi
-        ;;
-    security-performance)
-        if [ -f ../hardening/sysctl/99-workstation-net.conf ]; then
-            cp ../hardening/sysctl/99-workstation-net.conf /mnt/sysctl-profile.conf
-            chmod 644 /mnt/sysctl-profile.conf
-        else
-            echo -e "${BRed}Missing security+performance sysctl profile: ../hardening/sysctl/99-workstation-net.conf${NC}" >&2
-            exit 1
-        fi
-        ;;
-    full-performance)
-        if [ -f ../hardening/sysctl/99-full-performance.conf ]; then
-            cp ../hardening/sysctl/99-full-performance.conf /mnt/sysctl-profile.conf
-            chmod 644 /mnt/sysctl-profile.conf
-        else
-            echo -e "${BRed}Missing full-performance sysctl profile: ../hardening/sysctl/99-full-performance.conf${NC}" >&2
-            exit 1
-        fi
-        ;;
-    *)
-        echo -e "${BRed}Unknown sysctl profile: $SYSCTL_PROFILE${NC}" >&2
+# Stage the complete sysctl bundle. The chroot helper selects and installs the
+# requested layers without applying them to the live ISO kernel.
+SYSCTL_SOURCE_DIR="../hardening/sysctl"
+SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
+SYSCTL_BUNDLE_FILES=(
+    sysctl.sh
+    60-awesome-security-core.conf
+    70-awesome-workstation-network.conf
+    80-awesome-performance.conf
+    80-awesome-bbr.modules
+    90-awesome-strict.conf
+    90-awesome-ipv6-disabled.conf
+)
+install -d -m 0755 "$SYSCTL_STAGING_DIR"
+for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
+    if [[ ! -f "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
+        echo -e "${BRed}Missing sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
         exit 1
-        ;;
-esac
+    fi
+    install -m 0644 "$SYSCTL_SOURCE_DIR/$sysctl_file" "$SYSCTL_STAGING_DIR/$sysctl_file"
+done
+chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
 if [ -f ../hardening/ssh/ssh.sh ]; then
     cp ../hardening/ssh/ssh.sh /mnt/
@@ -1075,8 +1124,10 @@ Installation Date: $(date)
 Hostname: $HOSTNAME
 Username: $USERNAME
 Disk: $DISK (Type: $DEVICE_TYPE)
+/tmp: ${SIZE_OF_TMP} GiB encrypted LVM volume
 TPM2 Enabled: $USE_TPM_LUKS
 Sysctl Profile: $SYSCTL_PROFILE_LABEL
+IPv6 Disabled: $DISABLE_IPV6
 Boot Profile: $INSTALL_BOOTLOADER
 
 CRITICAL POST-INSTALLATION STEPS:
@@ -1176,6 +1227,7 @@ shred -vzu /mnt/bootloader.sh 2>/dev/null || true
 shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl-profile.conf 2>/dev/null || true
+rm -rf -- /mnt/sysctl-profile
 shred -vzu /mnt/ssh.sh 2>/dev/null || true
 
 # Clear pacman cache
