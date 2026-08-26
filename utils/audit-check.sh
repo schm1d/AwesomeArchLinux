@@ -624,6 +624,74 @@ check_network_security() {
 check_service_security() {
     category_header "Service Security"
 
+    # Validate the merged upstream units and local drop-ins. Exposure scores are
+    # intentionally not treated as a pass/fail target: session brokers such as
+    # sshd must retain facilities that leaf daemons can safely lose.
+    local failed_units verify_output unit
+    local -a hardened_units=(
+        sshd.service
+        NetworkManager.service
+        auditd.service
+        clamav-daemon.service
+        fail2ban.service
+        chronyd.service
+        usbguard.service
+        bluetooth.service
+    )
+
+    failed_units=$(systemctl --failed --no-legend --plain 2>/dev/null || true)
+    if [[ -z "$failed_units" ]]; then
+        result_pass "No failed systemd units"
+    else
+        result_fail "One or more systemd units are failed" "$failed_units"
+    fi
+
+    for unit in "${hardened_units[@]}"; do
+        if ! systemctl cat "$unit" >/dev/null 2>&1; then
+            continue
+        fi
+        if verify_output=$(systemd-analyze verify "$unit" 2>&1); then
+            result_pass "Merged systemd unit is valid ($unit)"
+        else
+            result_fail "Merged systemd unit is invalid ($unit)" "$verify_output"
+        fi
+    done
+
+    # A syntactically valid sandbox can still cripple its daemon. Probe the
+    # interfaces administrators actually depend on, without changing state.
+    probe_active_service() {
+        local service="$1"
+        local description="$2"
+        shift 2
+        local probe_output
+
+        if ! systemctl cat "$service" >/dev/null 2>&1; then
+            return
+        fi
+        if ! systemctl is-active --quiet "$service" 2>/dev/null; then
+            result_warn "$description was not tested because $service is inactive" \
+                "$(systemctl is-active "$service" 2>/dev/null || echo unknown)"
+            return
+        fi
+        if ! command -v "$1" >/dev/null 2>&1; then
+            result_fail "$description could not be tested" "missing command: $1"
+            return
+        fi
+        if probe_output=$("$@" 2>&1); then
+            result_pass "$description"
+        else
+            result_fail "$description failed" "${probe_output:0:500}"
+        fi
+    }
+
+    probe_active_service sshd.service "sshd accepts its installed configuration" sshd -t
+    probe_active_service NetworkManager.service "NetworkManager responds over its control interface" nmcli general status
+    probe_active_service auditd.service "auditd reports kernel audit status" auditctl -s
+    probe_active_service clamav-daemon.service "ClamAV daemon answers a ping" clamdscan --ping 5
+    probe_active_service fail2ban.service "fail2ban daemon answers a ping" fail2ban-client ping
+    probe_active_service chronyd.service "chronyd answers a tracking query" chronyc tracking
+    probe_active_service usbguard.service "USBGuard IPC policy permits root device listing" usbguard list-devices
+
     # AppArmor
     if systemctl is-enabled --quiet apparmor 2>/dev/null; then
         result_pass "AppArmor is enabled"

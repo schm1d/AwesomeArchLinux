@@ -396,7 +396,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 
 | Service | Key Settings | Notes |
 |---------|-------------|-------|
-| **sshd** | `ProtectSystem=strict`, `ProtectHome=read-only`, `NoNewPrivileges=no`, `PrivateDevices=no` | sshd spawns user shells — must allow sudo, PTY allocation, and privilege escalation. No syscall filter (too restrictive for user sessions). |
+| **sshd** | `ProtectSystem=no`, `ProtectHome=no`, `NoNewPrivileges=no`, `PrivateDevices=no` | sshd spawns user shells — its children need normal filesystem access, sudo, PTYs, and privilege escalation. No syscall filter (too restrictive for user sessions). |
 | **NetworkManager** | `ProtectSystem=strict`, `ReadWritePaths=...`, `ProtectKernelTunables=no`, `ProtectKernelModules=no`, `NoNewPrivileges=no` | Needs to load modules, write tunables, manage devices. No `MemoryDenyWriteExecute` (GLib/libffi). |
 | **auditd** | `ProtectSystem=full`, `ReadWritePaths=/var/log/audit /run`, `AF_UNIX AF_NETLINK` | Manages kernel audit subsystem. Needs netlink for audit interface. Cannot use `strict` or `ProtectKernelTunables`. |
 | **ClamAV** | `ProtectSystem=strict`, `ProtectHome=read-only`, `TasksMax=16` | Needs to read home dirs for scanning. No `MemoryDenyWriteExecute` (bytecode JIT). |
@@ -407,6 +407,31 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | **systemd-resolved** | No custom drop-in — upstream is already hardened | Custom drop-ins replace (not extend) upstream's tuned syscall filter, breaking resolved. |
 | **systemd-journald** | No custom drop-in — upstream is already hardened | Needs `/dev/kmsg`, capabilities, full proc access. Generic templates break all logging. |
 | **rngd** | No custom drop-in — needs `/dev/hwrng` and `CAP_SYS_ADMIN` | Generic templates block device access and drop capabilities, making it useless. |
+
+##### Validation and SHH
+
+The installers run `systemd-analyze verify` against every managed unit after
+the upstream unit and local drop-ins have been composed. A malformed unit stops
+the installation before first boot. `utils/audit-check.sh` repeats that check on
+the running host, reports failed units, and exercises the control interfaces for
+sshd, NetworkManager, auditd, ClamAV, fail2ban, chronyd, and USBGuard. This
+checks service function as well as unit syntax.
+
+`systemd-analyze security` is useful for reviewing the remaining attack surface,
+but its exposure score is not an acceptance target. For example, forcing sshd's
+score down by hiding devices, homes, namespaces, or privilege transitions also
+applies those restrictions to every interactive SSH session.
+
+[SHH](https://github.com/synacktiv/shh) can supplement this review by tracing a
+daemon and suggesting service-specific directives. Its output is tied to the
+exact kernel, systemd, libraries, distribution, configuration, and code paths
+observed during profiling, so generated fragments are never copied into the
+installer or applied automatically. Use standard mode on a disposable snapshot
+of the actual target, exercise representative startup, reload, failure, and
+upgrade paths, review the output manually, and repeat the functional probes and
+a reboot before keeping a change. Avoid generic profiles for session and host
+management services such as sshd, NetworkManager, auditd, and core systemd
+units; hardware daemons also require representative hot-plug coverage.
 
 #### Anti-Malware & Intrusion Detection
 
@@ -514,7 +539,7 @@ recovery-aware migration.
 | Script | Description |
 |--------|-------------|
 | `utils/aide-config.sh` | AIDE file integrity monitoring with custom rules and daily systemd timer |
-| `utils/audit-check.sh` | Hardening compliance checker (47 tests, 8 categories, JSON output) |
+| `utils/audit-check.sh` | Profile-aware hardening compliance checker (dynamic service validation, 8 categories, JSON output) |
 | `utils/backup.sh` | Encrypted borg backups with configurable retention and systemd timer |
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |

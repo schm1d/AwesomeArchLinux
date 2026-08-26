@@ -1578,68 +1578,6 @@ sleep 2
 # --- Systemd Services Hardening ---
 echo -e "${BBlue}Hardening systemd services...${NC}"
 
-# Create a function to apply hardening to services
-harden_systemd_service() {
-    local service=$1
-    local override_dir="/etc/systemd/system/${service}.d"
-    
-    # Skip if service doesn't exist
-    if ! systemctl list-unit-files | grep -q "^${service}"; then
-        return
-    fi
-    
-    mkdir -p "$override_dir"
-    
-    cat > "${override_dir}/hardening.conf" <<EOF
-[Service]
-# Process isolation
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-NoNewPrivileges=yes
-
-# Kernel protection
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-
-# Filesystem restrictions
-PrivateDevices=yes
-DevicePolicy=closed
-ProtectProc=invisible
-ProcSubset=pid
-
-# Capabilities
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-# System calls
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-SystemCallArchitectures=native
-
-# Network
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-IPAddressDeny=any
-
-# Misc security
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RemoveIPC=yes
-RestrictNamespaces=yes
-UMask=0077
-
-# Resource limits
-LimitNOFILE=1024
-LimitNPROC=512
-EOF
-}
-
 # SSH Service - Already partially done, but let's enhance it
 echo -e "${BBlue}Hardening SSH service...${NC}"
 mkdir -p /etc/systemd/system/sshd.service.d/
@@ -1825,6 +1763,35 @@ EOF
 # Reload systemd to apply all changes
 echo -e "${BBlue}Reloading systemd daemon to apply hardening...${NC}"
 systemctl daemon-reload
+
+# Parse the complete units after composing upstream files and local drop-ins.
+# This works inside arch-chroot without a running systemd and catches unknown
+# directives, malformed values, and broken dependencies before first boot.
+SYSTEMD_HARDENING_CANDIDATES=(
+    sshd.service
+    NetworkManager.service
+    auditd.service
+    clamav-daemon.service
+    fail2ban.service
+    chronyd.service
+    usbguard.service
+    bluetooth.service
+    arch-audit.service
+    rkhunter-check.service
+    pacman-autoupdate.service
+)
+SYSTEMD_HARDENED_UNITS=()
+for unit in "${SYSTEMD_HARDENING_CANDIDATES[@]}"; do
+    if [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ||
+          -e "/usr/local/lib/systemd/system/$unit" || -L "/usr/local/lib/systemd/system/$unit" ||
+          -e "/usr/lib/systemd/system/$unit" || -L "/usr/lib/systemd/system/$unit" ]]; then
+        SYSTEMD_HARDENED_UNITS+=("$unit")
+    fi
+done
+if ! systemd-analyze verify "${SYSTEMD_HARDENED_UNITS[@]}"; then
+    echo -e "${BRed}Systemd unit verification failed; refusing to leave broken service configuration.${NC}" >&2
+    exit 1
+fi
 
 echo -e "${BGreen}Systemd services hardening completed!${NC}"
 

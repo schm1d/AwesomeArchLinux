@@ -1174,51 +1174,6 @@ sleep 2
 
 echo -e "${BBlue}Hardening systemd services...${NC}"
 
-harden_systemd_service() {
-    local service=$1
-    local override_dir="/etc/systemd/system/${service}.d"
-
-    if ! systemctl list-unit-files | grep -q "^${service}"; then
-        return
-    fi
-
-    mkdir -p "$override_dir"
-
-    cat > "${override_dir}/hardening.conf" <<EOF
-[Service]
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-PrivateDevices=yes
-DevicePolicy=closed
-ProtectProc=invisible
-ProcSubset=pid
-CapabilityBoundingSet=
-AmbientCapabilities=
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
-SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-IPAddressDeny=any
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RemoveIPC=yes
-RestrictNamespaces=yes
-UMask=0077
-LimitNOFILE=1024
-LimitNPROC=512
-EOF
-}
-
 # SSH Service
 echo -e "${BBlue}Hardening SSH service...${NC}"
 mkdir -p /etc/systemd/system/sshd.service.d/
@@ -1399,6 +1354,33 @@ EOF
 # Reload systemd
 echo -e "${BBlue}Reloading systemd daemon to apply hardening...${NC}"
 systemctl daemon-reload
+
+# Validate the merged upstream units and local drop-ins before first boot.
+# systemd-analyze verify does not require systemd to be PID 1, so this also
+# works in the arch-chroot installer path.
+SYSTEMD_HARDENING_CANDIDATES=(
+    sshd.service
+    NetworkManager.service
+    auditd.service
+    clamav-daemon.service
+    fail2ban.service
+    chronyd.service
+    arch-audit.service
+    rkhunter-check.service
+    pacman-autoupdate.service
+)
+SYSTEMD_HARDENED_UNITS=()
+for unit in "${SYSTEMD_HARDENING_CANDIDATES[@]}"; do
+    if [[ -e "/etc/systemd/system/$unit" || -L "/etc/systemd/system/$unit" ||
+          -e "/usr/local/lib/systemd/system/$unit" || -L "/usr/local/lib/systemd/system/$unit" ||
+          -e "/usr/lib/systemd/system/$unit" || -L "/usr/lib/systemd/system/$unit" ]]; then
+        SYSTEMD_HARDENED_UNITS+=("$unit")
+    fi
+done
+if ! systemd-analyze verify "${SYSTEMD_HARDENED_UNITS[@]}"; then
+    echo -e "${BRed}Systemd unit verification failed; refusing to leave broken service configuration.${NC}" >&2
+    exit 1
+fi
 
 echo -e "${BGreen}Systemd services hardening completed!${NC}"
 
