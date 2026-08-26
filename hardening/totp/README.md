@@ -7,6 +7,7 @@ Hardens SSH access on Arch Linux by requiring both a public key **and** a time-b
 ```bash
 sudo ./totp.sh              # Configure TOTP for current user
 sudo ./totp.sh -u alice     # Configure TOTP for a specific user
+sudo ./totp.sh -u alice --allow-missing-totp  # Explicit staged rollout
 sudo ./totp.sh -h           # Show help
 ```
 
@@ -62,27 +63,11 @@ If you cannot scan the QR code, the script also outputs a secret key (base32 str
 
 The `AuthenticationMethods publickey,keyboard-interactive` directive requires **both** factors to succeed. A valid key alone is not sufficient; a valid TOTP code alone is not sufficient.
 
-## Enabling Mandatory 2FA
+## Mandatory 2FA and staged rollouts
 
-By default, the script uses the `nullok` option, which allows users who have **not** yet set up TOTP to still log in with just their public key. This gives you time to onboard all users.
+Mandatory TOTP is the default. The script creates and verifies the target user's secret before changing PAM, installs a rule without `nullok`, validates sshd, and reloads it without terminating existing sessions.
 
-To enforce mandatory 2FA for all users:
-
-```bash
-# Edit the PAM configuration
-sudo nano /etc/pam.d/sshd
-
-# Find this line:
-auth required pam_google_authenticator.so nullok secret=${HOME}/.google_authenticator
-
-# Remove 'nullok':
-auth required pam_google_authenticator.so secret=${HOME}/.google_authenticator
-
-# Restart sshd
-sudo systemctl restart sshd
-```
-
-**WARNING**: Before removing `nullok`, ensure every user who needs SSH access has run `google-authenticator` and configured their app. Otherwise they will be locked out.
+For a deliberate multi-user rollout, pass `--allow-missing-totp`. This retains `nullok`, so users without a secret can still authenticate with their key. After provisioning every SSH user, rerun the script without that flag to remove `nullok` and restore fail-closed enforcement.
 
 ## Adding TOTP for Additional Users
 

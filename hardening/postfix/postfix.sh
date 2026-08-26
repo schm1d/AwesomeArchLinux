@@ -50,6 +50,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -1171,21 +1175,20 @@ msg "Adding firewall rules for mail ports..."
 
 MAIL_PORTS=(25 465 587 993)
 
-if command -v nft &>/dev/null && nft list table inet filter &>/dev/null; then
-    for port in "${MAIL_PORTS[@]}"; do
-        # Skip if an identical accept rule already exists (handle):
-        if ! nft -a list chain inet filter input 2>/dev/null \
-                | grep -Eq "tcp dport ${port}[[:space:]]+accept"; then
-            nft add rule inet filter input tcp dport "$port" accept || true
-        fi
-    done
-    # Persist: dump with a flush header so `nft -f` is idempotent on reload.
+if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
     {
-        printf '#!/usr/bin/nft -f\nflush ruleset\n\n'
-        nft list ruleset
-    } > /etc/nftables.conf
-    chmod 0644 /etc/nftables.conf
-    msg "nftables rules added for ports ${MAIL_PORTS[*]}"
+        for port in "${MAIL_PORTS[@]}"; do
+            printf 'insert rule inet filter input ct state new tcp dport %s accept comment "awesome-postfix-%s"\n' \
+                "$port" "$port"
+        done
+    } | aal_nft_persist_block "postfix"
+
+    for port in "${MAIL_PORTS[@]}"; do
+        aal_nft_remove_live_rules inet filter input "awesome-postfix-$port"
+        nft insert rule inet filter input ct state new tcp dport "$port" accept \
+            comment "awesome-postfix-$port"
+    done
+    msg "nftables rules added for ports ${MAIL_PORTS[*]} without replacing the live ruleset"
 elif command -v iptables &>/dev/null; then
     for port in "${MAIL_PORTS[@]}"; do
         # Only insert if the rule isn't already present, avoiding duplicates on rerun.

@@ -9,7 +9,7 @@
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
-# Usage:       sudo ./totp.sh [-u USERNAME] [-h]
+# Usage:       sudo ./totp.sh [-u USERNAME] [--allow-missing-totp] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -19,11 +19,11 @@
 #
 # What this script does:
 #   1. Installs libpam_google_authenticator and qrencode
-#   2. Configures PAM for SSH TOTP authentication
-#   3. Configures sshd for challenge-response (publickey + TOTP)
-#   4. Runs google-authenticator for the target user
-#   5. Sets proper file permissions on TOTP secrets
-#   6. Restarts sshd
+#   2. Creates and verifies the target user's TOTP secret
+#   3. Configures fail-closed PAM authentication (unless explicitly staged)
+#   4. Configures sshd for challenge-response (publickey + TOTP)
+#   5. Validates the complete SSH configuration
+#   6. Reloads sshd without dropping existing sessions
 #   7. Prints emergency scratch codes and instructions
 # =============================================================================
 
@@ -43,6 +43,7 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 
 # --- Defaults ---
 USERNAME=""
+ALLOW_MISSING_TOTP=false
 SSHD_CONFIG="/etc/ssh/sshd_config"
 PAM_SSHD="/etc/pam.d/sshd"
 LOGFILE=""
@@ -55,11 +56,14 @@ Usage: sudo $0 [options]
 Options:
   -u USERNAME   Target user to configure TOTP for
                 (default: \$SUDO_USER, or first non-root user)
+  --allow-missing-totp
+                Staged rollout: permit SSH users without a TOTP secret
   -h            Show this help
 
 Examples:
   sudo $0                    # Configure TOTP for current sudo user
   sudo $0 -u alice           # Configure TOTP for user 'alice'
+  sudo $0 -u alice --allow-missing-totp  # Explicit staged rollout
 EOF
     exit 0
 }
@@ -67,9 +71,10 @@ EOF
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -u)          USERNAME="$2"; shift 2 ;;
-        -h|--help)   usage ;;
-        *)           err "Unknown option: $1" ;;
+        -u)                    USERNAME="${2:-}"; [[ -n "$USERNAME" ]] || err "-u requires a username"; shift 2 ;;
+        --allow-missing-totp)  ALLOW_MISSING_TOTP=true; shift ;;
+        -h|--help)             usage ;;
+        *)                     err "Unknown option: $1" ;;
     esac
 done
 
@@ -119,15 +124,40 @@ pacman -Syu --noconfirm --needed libpam_google_authenticator qrencode
 
 info "google-authenticator version: $(google-authenticator --version 2>&1 || echo 'unknown')"
 
+# Create and verify the user's secret before changing PAM or sshd. A failed
+# enrollment therefore cannot leave SSH in either a fail-open or lockout state.
+msg "Running google-authenticator for user '$USERNAME'..."
+info "A QR code will be displayed below. Scan it with your authenticator app."
+echo
+
+# -t time-based, -d no token reuse, -r/-R rate limit, -w clock-skew window,
+# -f force-write, and -Q UTF8 for terminal QR rendering.
+su - "$USERNAME" -c "google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8" >&3 2>&3
+echo
+
+msg "Setting permissions on TOTP secret file..."
+if [[ -f "$TOTP_SECRET" && -s "$TOTP_SECRET" ]]; then
+    chmod 600 "$TOTP_SECRET"
+    chown "$USERNAME:$USERNAME" "$TOTP_SECRET"
+    info "$TOTP_SECRET — mode 600, owned by $USERNAME"
+else
+    err "TOTP secret file was not created at $TOTP_SECRET"
+fi
+
 # =============================================================================
-# 2. CONFIGURE PAM FOR SSH TOTP
+# 3. CONFIGURE PAM FOR SSH TOTP
 # =============================================================================
 
 msg "Configuring PAM for SSH TOTP..."
 
-PAM_LINE="auth required pam_google_authenticator.so nullok secret=\${HOME}/.google_authenticator"
+PAM_LINE="auth required pam_google_authenticator.so secret=\${HOME}/.google_authenticator"
+if [[ "$ALLOW_MISSING_TOTP" == true ]]; then
+    PAM_LINE="auth required pam_google_authenticator.so nullok secret=\${HOME}/.google_authenticator"
+fi
+PAM_MODULE_RE='^[[:space:]]*auth[[:space:]]+.*pam_google_authenticator\.so'
+PAM_NULLOK_RE='^[[:space:]]*auth[[:space:]]+.*pam_google_authenticator\.so.*[[:space:]]nullok([[:space:]]|$)'
 
-if grep -qF "pam_google_authenticator.so" "$PAM_SSHD" 2>/dev/null; then
+if grep -Eq "$PAM_MODULE_RE" "$PAM_SSHD" 2>/dev/null; then
     warn "PAM is already configured for google-authenticator in $PAM_SSHD"
     info "Existing line:"
     grep "pam_google_authenticator" "$PAM_SSHD" | while IFS= read -r line; do
@@ -144,12 +174,10 @@ else
     echo "$PAM_LINE" >> "$PAM_SSHD"
 
     msg "Added pam_google_authenticator to $PAM_SSHD"
-    info "Using 'nullok' — users without TOTP configured can still log in."
-    info "Remove 'nullok' later to enforce mandatory 2FA for all users."
 fi
 
 # =============================================================================
-# 3. CONFIGURE SSHD FOR CHALLENGE-RESPONSE
+# 4. CONFIGURE SSHD FOR CHALLENGE-RESPONSE
 # =============================================================================
 
 msg "Configuring sshd for challenge-response authentication..."
@@ -195,47 +223,33 @@ else
     err "sshd configuration test failed! Check $SSHD_CONFIG and restore from backup."
 fi
 
-# =============================================================================
-# 4. RUN GOOGLE-AUTHENTICATOR FOR TARGET USER
-# =============================================================================
-
-msg "Running google-authenticator for user '$USERNAME'..."
-info "A QR code will be displayed below. Scan it with your authenticator app."
-echo
-
-# Run google-authenticator as the target user
-#   -t  Time-based (TOTP)
-#   -d  Disallow reuse of tokens
-#   -r 3 -R 30  Rate limit: 3 attempts per 30 seconds
-#   -w 3  Window size 3 (allows +/- 1 time step for clock skew)
-#   -f  Force write to file (no confirmation prompt)
-#   -Q UTF8  Display QR code using UTF-8 characters in terminal
-su - "$USERNAME" -c "google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8" >&3 2>&3
-
-echo
-
-# =============================================================================
-# 5. SET PROPER PERMISSIONS
-# =============================================================================
-
-msg "Setting permissions on TOTP secret file..."
-
-if [[ -f "$TOTP_SECRET" ]]; then
-    chmod 600 "$TOTP_SECRET"
-    chown "$USERNAME:$USERNAME" "$TOTP_SECRET"
-    info "$TOTP_SECRET — mode 600, owned by $USERNAME"
+if [[ "$ALLOW_MISSING_TOTP" == false ]]; then
+    # Default to fail closed. Preserve other PAM options while removing nullok
+    # from active google-authenticator auth lines.
+    sed -i -E '/^[[:space:]]*auth[[:space:]]+.*pam_google_authenticator\.so/ s/[[:space:]]+nullok([[:space:]]|$)/\1/g' "$PAM_SSHD"
+    if grep -Eq "$PAM_NULLOK_RE" "$PAM_SSHD"; then
+        err "Could not remove nullok from the active TOTP PAM rule"
+    fi
+    grep -Eq "$PAM_MODULE_RE" "$PAM_SSHD" || err "No active TOTP PAM rule was installed"
+    TOTP_ENFORCEMENT="mandatory"
+    msg "TOTP is mandatory for SSH users (fail-closed PAM policy)"
+elif grep -Eq "$PAM_NULLOK_RE" "$PAM_SSHD"; then
+    TOTP_ENFORCEMENT="staged"
+    warn "Staged rollout enabled: SSH users without TOTP secrets remain exempt via nullok"
 else
-    err "TOTP secret file was not created at $TOTP_SECRET"
+    TOTP_ENFORCEMENT="mandatory"
+    info "Existing PAM policy is already mandatory; it was not weakened with nullok"
 fi
 
 # =============================================================================
-# 6. RESTART SSHD
+# 6. RELOAD SSHD
 # =============================================================================
 
-msg "Restarting sshd..."
+msg "Reloading sshd without dropping existing sessions..."
 
-systemctl restart sshd
-systemctl is-active --quiet sshd && msg "sshd is running" || err "sshd failed to start! Restore config from backup."
+sshd -t || err "sshd configuration test failed before reload"
+systemctl reload sshd
+systemctl is-active --quiet sshd && msg "sshd is running" || err "sshd is not active; restore the saved configuration from console"
 
 # =============================================================================
 # 7. PRINT EMERGENCY SCRATCH CODES AND INSTRUCTIONS
@@ -277,10 +291,14 @@ echo "  - Use one of the emergency scratch codes above"
 echo "  - Or access the server via console/physical access and restore:"
 echo "    ${SSHD_CONFIG}.bak.* and ${PAM_SSHD}.bak.*"
 echo
-echo -e "${C_BLUE}To enforce mandatory 2FA (remove nullok):${C_NC}"
-echo "  Edit $PAM_SSHD and remove 'nullok' from the pam_google_authenticator line."
-echo "  All users will then MUST have TOTP configured to log in via SSH."
-echo
+if [[ "$TOTP_ENFORCEMENT" == "staged" ]]; then
+    echo -e "${C_BLUE}To end the staged rollout and require TOTP:${C_NC}"
+    echo "  Re-run without --allow-missing-totp after provisioning every SSH user."
+    echo
+else
+    echo -e "${C_BLUE}TOTP enforcement:${C_NC} mandatory (nullok is absent)"
+    echo
+fi
 echo -e "${C_BLUE}To add TOTP for another user:${C_NC}"
 echo "  sudo $0 -u <username>"
 echo

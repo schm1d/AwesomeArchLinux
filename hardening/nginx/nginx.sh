@@ -32,6 +32,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -272,26 +276,27 @@ systemctl restart nginx
 # 4b. OPEN FIREWALL PORTS (80/443)
 # =============================================================================
 
-msg "Opening firewall ports 80 (HTTP) and 443 (HTTPS)..."
-if command -v nft &>/dev/null && nft list table inet filter &>/dev/null 2>&1; then
-    # Insert (not add) so rules land before the final drop rule
-    nft insert rule inet filter input tcp dport 80 accept 2>/dev/null || true
-    nft insert rule inet filter input tcp dport 443 accept 2>/dev/null || true
-    # Persist to nftables.conf if it exists
-    if [[ -f /etc/nftables.conf ]]; then
-        nft list ruleset > /etc/nftables.conf
-    fi
-    msg "nftables: ports 80/443 opened."
+msg "Opening firewall ports 80 (HTTP) and $HTTPS_PORT (HTTPS)..."
+if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null 2>&1; then
+    aal_nft_persist_block "nginx" <<EOF
+insert rule inet filter input ct state new tcp dport 80 accept comment "awesome-nginx-http"
+insert rule inet filter input ct state new tcp dport $HTTPS_PORT accept comment "awesome-nginx-https"
+EOF
+    aal_nft_remove_live_rules inet filter input "awesome-nginx-http"
+    aal_nft_remove_live_rules inet filter input "awesome-nginx-https"
+    nft insert rule inet filter input ct state new tcp dport 80 accept comment "awesome-nginx-http"
+    nft insert rule inet filter input ct state new tcp dport "$HTTPS_PORT" accept comment "awesome-nginx-https"
+    msg "nftables: ports 80/$HTTPS_PORT opened without replacing the live ruleset."
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null 2>&1; then
     iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport "$HTTPS_PORT" -j ACCEPT 2>/dev/null || true
     if command -v iptables-save &>/dev/null; then
         mkdir -p /etc/iptables
         iptables-save > /etc/iptables/iptables.rules
     fi
-    msg "iptables: ports 80/443 opened."
+    msg "iptables: ports 80/$HTTPS_PORT opened."
 else
-    warn "No firewall detected — ensure ports 80/443 are reachable."
+    warn "No supported firewall detected — ensure ports 80/$HTTPS_PORT are reachable."
 fi
 
 # =============================================================================

@@ -36,6 +36,8 @@ AwesomeArchLinux/
 |   +-- secureBoot.sh        # UEFI Secure Boot key generation & enrollment
 |   +-- README.md            # Base installation documentation
 +-- hardening/
+|   +-- lib/
+|   |   +-- nftables.sh      # Shared validated, ownership-scoped nftables persistence
 |   +-- apparmor/
 |   |   +-- apparmor.sh      # AppArmor profiles for 7 services (enforce mode)
 |   |   +-- README.md
@@ -160,7 +162,7 @@ AwesomeArchLinux/
 #### VPN (WireGuard)
 
 - **WireGuard server** &mdash; One-command VPN setup with automatic key generation, pre-shared keys (quantum resistance), and client config files.
-- **nftables integration** &mdash; NAT masquerade, port forwarding, and wg0 interface rules.
+- **nftables integration** &mdash; Managed rules are inserted into the installer-owned default-deny chains, with one persistent NAT table and no duplicate `PostUp` rules.
 - **Client provisioning** &mdash; QR codes generated for each client config (mobile-friendly via `qrencode`).
 - **Multi-client support** &mdash; Generate any number of clients with unique IPs.
 - See [`hardening/wireguard/README.md`](hardening/wireguard/README.md) for usage and client management.
@@ -218,7 +220,7 @@ AwesomeArchLinux/
 - **Trivy image scanning** (`--scan`) &mdash; Vulnerability scanning for container images with weekly systemd timer for automated re-scans.
 - **Compose hardening** (`--compose PATH`) &mdash; Audits Docker Compose files for 11 security issues (privileged mode, host networking, writable root filesystem, missing resource limits, etc.).
 - **Network hardening** (`--network`) &mdash; nftables rules for container traffic, inter-container communication restrictions.
-- **Security profiles** &mdash; Hardened AppArmor profile (`docker-default-hardened`) and seccomp profile (`seccomp-hardened.json`) with blocked syscalls.
+- **Security profiles** &mdash; Keeps Docker's maintained built-in `docker-default` AppArmor and default seccomp profiles; the former static profiles were weaker than current Docker defaults.
 - See [`hardening/docker/README.md`](hardening/docker/README.md) for container security best practices.
 
 #### AI Agent Hardening (OpenClaw/ClawdBot)
@@ -231,7 +233,7 @@ AwesomeArchLinux/
 - **Secure logging** &mdash; 9 API key redaction patterns (Anthropic, OpenAI, bearer tokens, PEM keys), log rotation, `redactSensitive: tools`.
 - **systemd user service** &mdash; Hardened drop-in with `ProtectSystem=strict`, `NoNewPrivileges`, `IPAddressAllow=localhost`, syscall filtering, `MemoryDenyWriteExecute=no` (V8 JIT).
 - **AppArmor confinement** (optional) &mdash; Enforce mode profile denying mount/ptrace/raw, restricting file access to `~/.openclaw/` only.
-- **nftables firewall** (optional) &mdash; Block all inbound except loopback, rate limit WebSocket connections, allow outbound HTTPS for API calls.
+- **nftables firewall** (optional) &mdash; Blocks every non-loopback packet to the gateway port and rate-limits denial logging. Outbound traffic remains governed by the host firewall and service sandbox.
 - **Secret scanning** &mdash; `detect-secrets` with baseline and pre-commit hook, workspace git init for rollback.
 - **27 hardening steps** across 15 phases with weekly automated security audit via systemd timer.
 - See [`hardening/openclaw/README.md`](hardening/openclaw/README.md) for the complete deep-dive security reference.
@@ -247,7 +249,7 @@ AwesomeArchLinux/
 
 - **SSH 2FA** (`totp.sh`) &mdash; Google Authenticator/TOTP for SSH with `pam_google_authenticator`.
 - **Multi-factor enforcement** &mdash; Configures `AuthenticationMethods publickey,keyboard-interactive` (SSH key + TOTP required).
-- **Gradual rollout** &mdash; `nullok` option allows users without TOTP to still log in during setup phase; remove for mandatory 2FA.
+- **Fail-closed by default** &mdash; TOTP enrollment completes before PAM changes and `nullok` is absent by default. `--allow-missing-totp` is the explicit staged-rollout escape hatch.
 - **Emergency scratch codes** &mdash; Backup codes generated for account recovery.
 - See [`hardening/totp/README.md`](hardening/totp/README.md) for compatible apps and setup guide.
 

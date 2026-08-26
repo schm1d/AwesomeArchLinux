@@ -32,14 +32,14 @@ sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d 
 
 ## What the Script Does
 
-1. **Installs packages** -- `wireguard-tools`, `qrencode` via pacman
-2. **Enables IP forwarding** -- writes `/etc/sysctl.d/99-wireguard.conf` with `net.ipv4.ip_forward=1` and `net.ipv6.conf.all.forwarding=1`
+1. **Installs packages** -- `wireguard-tools`, `qrencode`, and `nftables` via pacman
+2. **Enables IPv4 forwarding** -- writes `/etc/sysctl.d/99-wireguard.conf` with `net.ipv4.ip_forward=1`
 3. **Generates server keys** -- private and public keys in `/etc/wireguard/`
-4. **Creates server config** -- `/etc/wireguard/wg0.conf` with nftables PostUp/PostDown rules
+4. **Creates server config** -- `/etc/wireguard/wg0.conf` without lifecycle firewall side effects
 5. **Generates client configs** -- each with its own private key, public key, and pre-shared key
 6. **Adds clients as peers** -- `[Peer]` sections appended to `wg0.conf`
 7. **Sets strict permissions** -- `600` on all keys and configs, `root:root` ownership
-8. **Creates nftables include** -- `/etc/nftables.d/wireguard.conf` with firewall and NAT rules
+8. **Integrates nftables rules** -- inserts a marked block into `/etc/nftables.conf`, validates it, and updates only WireGuard-owned live rules
 9. **Enables the service** -- `wg-quick@wg0` enabled and started via systemd
 10. **Displays QR codes** -- scannable from the WireGuard mobile app
 
@@ -57,9 +57,6 @@ sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d 
     client.conf              # Client tunnel config (ready to import)
     client2.conf
     ...
-
-/etc/nftables.d/
-  wireguard.conf             # nftables rules (include in main config)
 
 /etc/sysctl.d/
   99-wireguard.conf          # IP forwarding settings
@@ -106,7 +103,7 @@ DNS = 9.9.9.9,149.112.112.112
 PublicKey = $SERVER_PUBKEY
 PresharedKey = $PSK
 Endpoint = YOUR_SERVER_IP:51820
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
@@ -145,51 +142,25 @@ wg show wg0
 
 ## nftables Integration
 
-The script creates `/etc/nftables.d/wireguard.conf` with three rule sets:
+The script updates one marked `wireguard` block in `/etc/nftables.conf`, validates the complete candidate ruleset, and then applies the equivalent live changes without flushing unrelated state. Input and forwarding accepts are inserted into the installer's existing default-deny chains, so a second policy-accept base chain cannot be overruled by the original drop chain. NAT exists once in the dedicated `ip wireguard_nat` table; `wg0.conf` contains no duplicate `PostUp`/`PostDown` rules.
 
-- **Input filter** -- allows UDP traffic on the WireGuard port
-- **Forward filter** -- allows packet forwarding through the `wg0` interface
-- **NAT masquerade** -- rewrites source addresses for VPN traffic leaving the default interface
-
-### Including in Your Main Config
-
-Add this line to `/etc/nftables.conf`:
-
-```
-include "/etc/nftables.d/wireguard.conf"
-```
-
-Then reload:
-
-```bash
-nft -f /etc/nftables.conf
-```
-
-### Standalone nftables (if not using includes)
+### Equivalent rules for a custom nftables manager
 
 If you manage nftables differently, here are the equivalent manual rules (replace `eth0` with your interface and `51820` with your port):
 
 ```bash
 # Allow WireGuard UDP port
-nft add rule inet filter input udp dport 51820 accept
+nft insert rule inet filter input ct state new udp dport 51820 accept
 
 # Allow forwarding for wg0
-nft add rule inet filter forward iifname "wg0" accept
-nft add rule inet filter forward oifname "wg0" accept
+nft insert rule inet filter forward iifname "wg0" accept
+nft insert rule inet filter forward oifname "wg0" ct state established,related accept
 
 # NAT masquerade
 nft add table ip nat
 nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
-nft add rule ip nat postrouting oifname "eth0" masquerade
+nft add rule ip nat postrouting ip saddr 10.0.0.0/24 oifname "eth0" masquerade
 ```
-
-### Coexistence with the PostUp/PostDown Rules
-
-The server config (`wg0.conf`) includes its own `PostUp`/`PostDown` nftables rules that create a separate `ip wireguard` table for NAT. This is independent from the include file in `/etc/nftables.d/`. You have two options:
-
-1. **Use both** -- the `PostUp` rules handle NAT dynamically when WireGuard starts/stops, while the include file provides persistent firewall rules for input and forwarding. This is the recommended approach.
-
-2. **Use only the include file** -- remove the `PostUp`/`PostDown` lines from `wg0.conf` and rely entirely on the persistent nftables config. Make sure to reload nftables when the system boots.
 
 ## Mobile Setup (iOS / Android)
 
@@ -229,7 +200,7 @@ On the client device, visit [https://www.dnsleaktest.com](https://www.dnsleaktes
 
 ## Split Tunnel Configuration
 
-The default client config routes **all traffic** through the VPN (`AllowedIPs = 0.0.0.0/0, ::/0`). To only route specific subnets (split tunnel), edit the client config:
+The generated tunnel is IPv4-only, and the default client config routes **all IPv4 traffic** through it (`AllowedIPs = 0.0.0.0/0`). IPv6 is not advertised, so clients do not send IPv6 into a tunnel the server has not configured. To route only specific subnets, edit the client config:
 
 ```ini
 [Peer]
@@ -255,5 +226,5 @@ This is useful when you only need access to resources on the VPN network without
 - **Pre-shared keys** are generated for every client, providing an additional layer of symmetric encryption on top of the Curve25519 key exchange. This offers defense-in-depth against potential future quantum computing attacks on elliptic curve cryptography.
 - All key files and configs are set to mode `600` (owner read/write only) with `root:root` ownership.
 - `SaveConfig = false` prevents WireGuard from overwriting your carefully crafted config on shutdown.
-- The server's `PostDown` rule automatically cleans up NAT rules when WireGuard stops.
+- Firewall and NAT rules are persistent and owned by the marked WireGuard block in `/etc/nftables.conf`.
 - **Never transmit private keys or config files over unencrypted channels.** Use QR codes, `scp`, or another encrypted method.

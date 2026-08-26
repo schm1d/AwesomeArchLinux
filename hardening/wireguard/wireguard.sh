@@ -36,6 +36,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -84,11 +88,11 @@ EOF
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -p) WG_PORT="$2"; shift 2 ;;
-        -s) WG_SUBNET="$2"; shift 2 ;;
-        -c) CLIENT_NAME="$2"; shift 2 ;;
-        -n) NUM_CLIENTS="$2"; shift 2 ;;
-        -d) DNS="$2"; shift 2 ;;
+        -p) WG_PORT="${2:-}"; [[ -n "$WG_PORT" ]] || err "-p requires a port"; shift 2 ;;
+        -s) WG_SUBNET="${2:-}"; [[ -n "$WG_SUBNET" ]] || err "-s requires a subnet"; shift 2 ;;
+        -c) CLIENT_NAME="${2:-}"; [[ -n "$CLIENT_NAME" ]] || err "-c requires a client name"; shift 2 ;;
+        -n) NUM_CLIENTS="${2:-}"; [[ -n "$NUM_CLIENTS" ]] || err "-n requires a count"; shift 2 ;;
+        -d) DNS="${2:-}"; [[ -n "$DNS" ]] || err "-d requires a server list"; shift 2 ;;
         -h|--help) usage ;;
         *)  err "Unknown option: $1" ;;
     esac
@@ -98,21 +102,40 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ "$NUM_CLIENTS" =~ ^[1-9][0-9]*$ ]] || err "NUM_CLIENTS must be a positive integer"
 [[ "$WG_PORT" =~ ^[0-9]+$ ]] && (( WG_PORT >= 1 && WG_PORT <= 65535 )) || err "PORT must be 1-65535"
+[[ "$CLIENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || err "CLIENT_NAME may contain only letters, digits, '_' and '-'"
+[[ "$DNS" =~ ^[A-Fa-f0-9:.,]+$ ]] || err "DNS must be a comma-separated IP address list"
 
 # --- Derive subnet values ---
-# Extract base address and prefix length
 SUBNET_BASE="${WG_SUBNET%/*}"
 SUBNET_PREFIX="${WG_SUBNET#*/}"
+[[ "$WG_SUBNET" == */* && "$SUBNET_PREFIX" =~ ^[0-9]+$ ]] || err "Invalid IPv4 CIDR: $WG_SUBNET"
+(( SUBNET_PREFIX >= 1 && SUBNET_PREFIX <= 30 )) || err "WireGuard subnet prefix must be /1 through /30"
 
-# Split base address into octets
 IFS='.' read -r OCT1 OCT2 OCT3 OCT4 <<< "$SUBNET_BASE"
+for octet in "$OCT1" "$OCT2" "$OCT3" "$OCT4"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || err "Invalid IPv4 CIDR: $WG_SUBNET"
+done
 
-# Server gets the first usable IP (e.g. 10.0.0.1)
-SERVER_IP="${OCT1}.${OCT2}.${OCT3}.$(( OCT4 + 1 ))"
+ipv4_to_int() {
+    printf '%u\n' "$(( (10#$1 << 24) | (10#$2 << 16) | (10#$3 << 8) | 10#$4 ))"
+}
+
+ipv4_from_int() {
+    local value="$1"
+    printf '%d.%d.%d.%d\n' \
+        "$(( (value >> 24) & 255 ))" "$(( (value >> 16) & 255 ))" \
+        "$(( (value >> 8) & 255 ))" "$(( value & 255 ))"
+}
+
+SUBNET_INT=$(ipv4_to_int "$OCT1" "$OCT2" "$OCT3" "$OCT4")
+HOST_COUNT=$(( 1 << (32 - SUBNET_PREFIX) ))
+NETMASK=$(( (0xFFFFFFFF << (32 - SUBNET_PREFIX)) & 0xFFFFFFFF ))
+(( (SUBNET_INT & NETMASK) == SUBNET_INT )) || err "$WG_SUBNET is not a network address"
+
+SERVER_IP=$(ipv4_from_int "$(( SUBNET_INT + 1 ))")
 SERVER_ADDR="${SERVER_IP}/${SUBNET_PREFIX}"
 
-# Validate we can fit all clients
-MAX_CLIENTS=$(( 254 - OCT4 - 1 ))
+MAX_CLIENTS=$(( HOST_COUNT - 3 ))
 (( NUM_CLIENTS <= MAX_CLIENTS )) || err "Subnet too small for $NUM_CLIENTS clients (max $MAX_CLIENTS)"
 
 # Auto-detect default network interface and public IP
@@ -145,8 +168,8 @@ echo
 # 1. INSTALL PACKAGES
 # =============================================================================
 
-msg "Installing wireguard-tools and qrencode..."
-pacman -Syu --noconfirm --needed wireguard-tools qrencode
+msg "Installing wireguard-tools, qrencode, and nftables..."
+pacman -Syu --noconfirm --needed wireguard-tools qrencode nftables
 
 # =============================================================================
 # 2. ENABLE IP FORWARDING
@@ -155,9 +178,8 @@ pacman -Syu --noconfirm --needed wireguard-tools qrencode
 msg "Enabling IP forwarding..."
 
 cat > /etc/sysctl.d/99-wireguard.conf <<'EOF'
-# WireGuard VPN — enable packet forwarding
+# WireGuard VPN — this installer provisions an IPv4-only tunnel.
 net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
 EOF
 
 sysctl --system > /dev/null 2>&1
@@ -167,7 +189,6 @@ if [[ "$(sysctl -n net.ipv4.ip_forward)" != "1" ]]; then
     err "Failed to enable IPv4 forwarding"
 fi
 info "IPv4 forwarding: enabled"
-info "IPv6 forwarding: enabled"
 
 # =============================================================================
 # 3. GENERATE SERVER KEYS
@@ -209,10 +230,6 @@ Address = $SERVER_ADDR
 ListenPort = $WG_PORT
 PrivateKey = $SERVER_PRIVATE_KEY
 SaveConfig = false
-
-# nftables NAT masquerade rules
-PostUp  = nft add table ip wireguard; nft add chain ip wireguard postrouting { type nat hook postrouting priority 100 \; }; nft add rule ip wireguard postrouting oifname "$DEFAULT_IF" masquerade
-PostDown = nft delete table ip wireguard
 EOF
 
 chmod 600 "$WG_CONF"
@@ -237,8 +254,7 @@ for i in $(seq 1 "$NUM_CLIENTS"); do
     fi
 
     # Client IP: server is .1, clients start at .2
-    CLIENT_OCTET=$(( OCT4 + 1 + i ))
-    CLIENT_IP="${OCT1}.${OCT2}.${OCT3}.${CLIENT_OCTET}"
+    CLIENT_IP=$(ipv4_from_int "$(( SUBNET_INT + 1 + i ))")
     CLIENT_ADDR="${CLIENT_IP}/32"
     CLIENT_CONF="$CLIENT_DIR/${CNAME}.conf"
 
@@ -275,7 +291,7 @@ DNS = $DNS
 PublicKey = $SERVER_PUBLIC_KEY
 PresharedKey = $PRESHARED_KEY
 Endpoint = ${SERVER_PUBLIC_IP}:${WG_PORT}
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
@@ -311,53 +327,56 @@ find "$CLIENT_DIR" -name "*.conf" -exec chmod 600 {} \;
 find "$CLIENT_DIR" -name "*.conf" -exec chown root:root {} \;
 
 # =============================================================================
-# 8. CREATE NFTABLES INCLUDE FILE
+# 8. INTEGRATE WITH THE INSTALLER-OWNED NFTABLES RULESET
 # =============================================================================
 
-msg "Creating nftables include file..."
+msg "Integrating WireGuard with nftables..."
 
-mkdir -p "$NFTABLES_DIR"
-
-cat > "$NFTABLES_DIR/wireguard.conf" <<EOF
-# =============================================================================
-# nftables rules for WireGuard VPN
-# Generated by AwesomeArchLinux/hardening/wireguard/wireguard.sh
-#
-# Include this from your main nftables.conf:
-#   include "/etc/nftables.d/wireguard.conf"
-# =============================================================================
-
-table inet wireguard_filter {
-    chain input {
-        type filter hook input priority filter; policy accept;
-
-        # Allow WireGuard UDP traffic
-        udp dport $WG_PORT accept comment "WireGuard VPN"
-    }
-
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-
-        # Allow forwarding for WireGuard interface
-        iifname "wg0" accept comment "WireGuard forward in"
-        oifname "wg0" accept comment "WireGuard forward out"
-    }
-}
+WIREGUARD_NFT_BLOCK=$(cat <<EOF
+insert rule inet filter input ct state new udp dport $WG_PORT accept comment "awesome-wireguard-input"
+insert rule inet filter forward iifname "wg0" accept comment "awesome-wireguard-forward-in"
+insert rule inet filter forward oifname "wg0" ct state established,related accept comment "awesome-wireguard-forward-out"
 
 table ip wireguard_nat {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-
-        # NAT masquerade for WireGuard traffic
-        oifname "$DEFAULT_IF" ip saddr $WG_SUBNET masquerade comment "WireGuard NAT"
+        oifname "$DEFAULT_IF" ip saddr $WG_SUBNET masquerade comment "awesome-wireguard-nat"
     }
 }
 EOF
+)
 
-chmod 644 "$NFTABLES_DIR/wireguard.conf"
+# Older releases asked operators to include this file. Leave it syntactically
+# harmless so an existing include cannot recreate the obsolete base chains.
+mkdir -p "$NFTABLES_DIR"
+cat > "$NFTABLES_DIR/wireguard.conf" <<'EOF'
+# WireGuard rules are managed as a marked block in /etc/nftables.conf.
+EOF
 chown root:root "$NFTABLES_DIR/wireguard.conf"
+chmod 644 "$NFTABLES_DIR/wireguard.conf"
 
-info "nftables include file: $NFTABLES_DIR/wireguard.conf"
+aal_nft_persist_block wireguard <<< "$WIREGUARD_NFT_BLOCK"
+
+if ! nft list chain inet filter input &>/dev/null || ! nft list chain inet filter forward &>/dev/null; then
+    err "Required nftables chains inet filter input/forward do not exist"
+fi
+
+# Remove the two exact tables created by older versions, then replace only this
+# script's marked rules and NAT table in the live ruleset.
+nft delete table inet wireguard_filter 2>/dev/null || true
+nft delete table ip wireguard 2>/dev/null || true
+nft delete table ip wireguard_nat 2>/dev/null || true
+aal_nft_remove_live_rules inet filter input awesome-wireguard-input
+aal_nft_remove_live_rules inet filter forward awesome-wireguard-forward-in
+aal_nft_remove_live_rules inet filter forward awesome-wireguard-forward-out
+nft insert rule inet filter input ct state new udp dport "$WG_PORT" accept comment "awesome-wireguard-input"
+nft insert rule inet filter forward iifname "wg0" accept comment "awesome-wireguard-forward-in"
+nft insert rule inet filter forward oifname "wg0" ct state established,related accept comment "awesome-wireguard-forward-out"
+nft add table ip wireguard_nat
+nft add chain ip wireguard_nat postrouting "{ type nat hook postrouting priority srcnat; policy accept; }"
+nft add rule ip wireguard_nat postrouting oifname "$DEFAULT_IF" ip saddr "$WG_SUBNET" masquerade comment "awesome-wireguard-nat"
+
+info "nftables rules are active and persisted in /etc/nftables.conf"
 
 # =============================================================================
 # 9. ENABLE AND START WIREGUARD
@@ -425,15 +444,14 @@ for conf in "${CLIENT_CONFIGS[@]}"; do
 done
 echo
 echo -e "${C_BLUE}Key Files:${C_NC}         $WG_DIR/*.key"
-echo -e "${C_BLUE}nftables Include:${C_NC}  $NFTABLES_DIR/wireguard.conf"
+echo -e "${C_BLUE}nftables Rules:${C_NC}    managed block in /etc/nftables.conf"
 echo -e "${C_BLUE}Log:${C_NC}              $LOGFILE"
 echo
 echo -e "${C_YELLOW}IMPORTANT next steps:${C_NC}"
 echo "  1. If behind NAT, forward UDP port $WG_PORT to this server."
 echo "  2. Update the Endpoint in client configs if your public IP differs"
 echo "     from the detected IP ($SERVER_PUBLIC_IP)."
-echo "  3. Include the nftables rules in your main config:"
-echo "     echo 'include \"$NFTABLES_DIR/wireguard.conf\"' >> /etc/nftables.conf"
+echo "  3. The nftables rules are already active and persistent."
 echo "  4. Transfer client configs securely (QR code, scp, etc.)."
 echo "     NEVER send private keys over unencrypted channels."
 echo "  5. To add more clients later, see: $WG_DIR/clients/README"

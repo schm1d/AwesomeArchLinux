@@ -34,9 +34,9 @@ sudo ./docker.sh
 | `--scan` | Scan all local images with Trivy (HIGH/CRITICAL) |
 | `--compose PATH` | Audit a docker-compose.yml for security issues |
 | `--network` | Create isolated networks and generate nftables rules |
-| (no flags) | Generate hardened AppArmor and seccomp profiles |
+| (no flags) | Preserve Docker's built-in AppArmor and seccomp defaults |
 
-Running with no flags always generates the AppArmor and seccomp profiles. Flags can be combined.
+Running with no flags leaves the runtime security defaults intact and reports that policy. Flags can be combined.
 
 ## CIS Docker Benchmark
 
@@ -198,56 +198,11 @@ include "/etc/nftables.d/docker-hardening.nft"
 
 Edit the rules to allow additional ports as needed for your workloads.
 
-## Seccomp for Containers
+## Seccomp and AppArmor for Containers
 
-The script generates a hardened seccomp profile at `/etc/docker/seccomp-hardened.json` that blocks dangerous syscalls beyond the Docker default:
+The script relies on Docker's maintained built-in seccomp profile and the `docker-default` AppArmor profile. The retired static profiles allowed several syscalls that current Docker blocks by default, including `clone3`, and could drift as the runtime evolved.
 
-| Blocked Syscall | Reason |
-|-----------------|--------|
-| `keyctl`, `add_key`, `request_key` | Kernel keyring manipulation |
-| `ptrace` | Process tracing, container escape vector |
-| `userfaultfd` | Use-after-free attack surface |
-| `personality` | Change execution domain |
-| `bpf` | eBPF program loading |
-| `init_module`, `finit_module`, `delete_module` | Kernel module operations |
-| `kexec_file_load`, `kexec_load` | Load new kernel for execution |
-| `reboot` | System reboot from container |
-| `setns` | Join namespaces (container escape) |
-
-### Usage
-
-```bash
-# Per container
-docker run --security-opt seccomp=/etc/docker/seccomp-hardened.json myapp:1.0
-
-# As daemon default (in /etc/docker/daemon.json)
-{
-    "seccomp-profile": "/etc/docker/seccomp-hardened.json"
-}
-```
-
-## AppArmor for Containers
-
-The script generates a hardened AppArmor profile at `/etc/apparmor.d/docker-default-hardened` that extends the default Docker profile with:
-
-- **Deny mount** -- No mount operations inside containers.
-- **Deny ptrace** -- Prevents container escape via process tracing.
-- **Restrict /proc** -- Blocks access to `/proc/*/mem`, `/proc/kcore`, `/proc/sysrq-trigger`, `/proc/acpi/`.
-- **Restrict /sys** -- Blocks access to `/sys/firmware/`, `/sys/kernel/security/`, `/sys/kernel/debug/`, `/sys/fs/`.
-
-### Usage
-
-```bash
-# Per container
-docker run --security-opt apparmor=docker-default-hardened myapp:1.0
-
-# Verify profile is loaded
-aa-status | grep docker-default-hardened
-```
-
-### Prerequisite
-
-AppArmor must be enabled at boot. See `hardening/apparmor/apparmor.sh` for kernel parameter configuration.
+Do not pass `seccomp=unconfined` or `apparmor=unconfined`. If `/etc/docker/seccomp-hardened.json` or `/etc/apparmor.d/docker-default-hardened` remains from an older run, remove explicit daemon, Compose, or container references before deleting the legacy file. AppArmor still must be enabled at boot; see `hardening/apparmor/apparmor.sh`.
 
 ## Docker Socket Security
 
@@ -428,8 +383,6 @@ docker ps -q | xargs -I {} docker inspect --format '{{.Name}}: AppArmor={{.AppAr
 
 | File | Purpose |
 |------|---------|
-| `/etc/apparmor.d/docker-default-hardened` | Hardened AppArmor profile for containers |
-| `/etc/docker/seccomp-hardened.json` | Tightened seccomp profile blocking dangerous syscalls |
 | `/etc/nftables.d/docker-hardening.nft` | nftables rules for container network isolation (--network) |
 | `/usr/local/bin/docker-image-scan.sh` | Automated image scanning script (--scan) |
 | `/etc/systemd/system/docker-image-scan.timer` | Weekly scan timer (--scan) |

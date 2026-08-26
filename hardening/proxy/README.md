@@ -58,7 +58,7 @@ sudo ./proxy.sh -n 192.168.1.0/24 --dry-run
               │
          Origin Servers
 
-     Anti-loop: nftables skuid exempts proxy user traffic
+     Source scope: only the configured LAN reaches intercept ports
 ```
 
 ## What It Does
@@ -69,11 +69,11 @@ Traffic from the configured network is transparently redirected to Squid via nft
 
 | Component | Detail |
 |-----------|--------|
-| **nftables table** | `ip squid-proxy` with prerouting REDIRECT |
-| **Anti-loop** | `skuid proxy` exempts Squid's own traffic |
+| **nftables table** | `ip squid_proxy` with source-scoped prerouting REDIRECT |
+| **Input filter** | Only the configured LAN CIDR may reach Squid intercept ports |
 | **HTTP** | Port 80 → `$HTTP_PORT` (intercept mode) |
 | **HTTPS** | Port 443 → `$HTTPS_PORT` (if `--ssl-bump`) |
-| **sysctl** | `ip_forward=1` via `/etc/sysctl.d/99-z-squid-proxy.conf` |
+| **sysctl** | `ip_forward=1`, `route_localnet=0` via `/etc/sysctl.d/99-z-squid-proxy.conf` |
 
 ### Security Hardening
 
@@ -94,7 +94,7 @@ Traffic from the configured network is transparently redirected to Squid via nft
 
 - **Ads + tracking**: StevenBlack unified hosts (100K+ domains)
 - **Malware + fakenews**: StevenBlack extended list
-- **Whitelist**: Custom whitelist for overrides
+- **Whitelist**: Custom destination overrides, evaluated only after the client matches the trusted LAN or localhost ACL
 - **Auto-update**: systemd timer runs daily at 03:00
 
 ### SSL Bump (Optional)
@@ -222,10 +222,8 @@ squidclient mgr:info | grep "Hit Ratios"
 
 ```bash
 # View interception rules
-nft list table ip squid-proxy
-
-# Verify anti-loop rule
-nft list chain ip squid-proxy output
+nft list table ip squid_proxy
+nft -a list chain inet filter input | grep awesome-squid
 ```
 
 ### Validate Configuration
@@ -249,14 +247,12 @@ systemctl revert squid
 systemctl restart squid
 ```
 
-### Routing loop (client can't access anything)
+### Client traffic is not intercepted
 
 ```bash
-# Verify anti-loop rule exists
-nft list chain ip squid-proxy output | grep skuid
-
-# If missing, re-add
-nft add rule ip squid-proxy output skuid proxy tcp dport 80 accept
+# Verify the client's source is inside the configured LAN CIDR and inspect rules
+nft list table ip squid_proxy
+nft -a list chain inet filter input | grep awesome-squid
 ```
 
 ### DNS not resolving (with --dns-filter)

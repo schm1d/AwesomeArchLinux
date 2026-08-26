@@ -138,11 +138,12 @@ add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
 
 ### Adding Application Ports to the Firewall
 
-If using the AwesomeArchLinux nftables firewall, add HTTP/HTTPS:
+The script inserts HTTP and the configured HTTPS port into the existing `inet filter input` chain and persists them in an `AwesomeArchLinux: nginx` block in `/etc/nftables.conf`. It replaces only rules bearing its own comments and never snapshots or reloads transient Docker, Fail2Ban, or CrowdSec state.
+
+For an additional application port, add a separate rule before the final drop:
 
 ```bash
-# Edit /etc/nftables.conf, add inside the input chain:
-tcp dport { 80, 443 } ct state new accept
+nft insert rule inet filter input ct state new tcp dport 8443 accept
 ```
 
 ### Reverse Proxy

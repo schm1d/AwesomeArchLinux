@@ -745,53 +745,21 @@ This script creates a user service by default. Pass `--system-service` to create
 
 #### nftables Rules
 
-When `--with-firewall` is specified, this script creates `/etc/nftables.d/openclaw.nft`:
+When `--with-firewall` is specified, this script creates `/etc/nftables.d/openclaw.conf`, persists its include as an AwesomeArchLinux-managed block in `/etc/nftables.conf`, and loads it immediately:
 
 ```nft
 table inet openclaw {
     chain input {
-        type filter hook input priority 0; policy drop;
-
-        # Allow loopback
-        iif lo accept
-
-        # Allow established/related
-        ct state established,related accept
-
-        # Allow OpenClaw gateway from loopback only
-        tcp dport 18789 ip saddr 127.0.0.1 accept
-        tcp dport 18789 ip6 saddr ::1 accept
-
-        # Drop all other gateway connections
-        tcp dport 18789 drop
-
-        # Log dropped packets (rate limited)
-        limit rate 5/minute log prefix "openclaw-dropped: " drop
-    }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-
-        # Allow DNS
-        udp dport 53 accept
-        tcp dport 53 accept
-
-        # Allow HTTPS (API providers, messaging platforms)
-        tcp dport 443 accept
-
-        # Allow HTTP (redirects, some APIs)
-        tcp dport 80 accept
-
-        # Allow loopback
-        oif lo accept
-
-        # Log and drop everything else (enable for strict mode)
-        # limit rate 5/minute log prefix "openclaw-outbound: " drop
+        type filter hook input priority -10; policy accept;
+        iifname != "lo" tcp dport 18789 limit rate 5/minute log prefix "openclaw-blocked: " level warn
+        iifname != "lo" tcp dport 18789 drop
     }
 }
 ```
 
-#### Required Outbound Ports
+The first rule rate-limits logging; it does not rate-limit accepted remote clients. The second rule drops every non-loopback packet to the gateway port. No outbound restriction is claimed: a destination-port allowlist inside a policy-accept chain would not enforce one, while a static policy-drop list would be brittle for dynamic API and messaging endpoints. Outbound control remains the responsibility of the host firewall and service sandbox.
+
+#### Typical Outbound Ports (informational)
 
 | Port | Protocol | Destination | Purpose |
 |------|----------|-------------|---------|
@@ -1446,7 +1414,7 @@ pacman -Syu nodejs
 | `~/.config/systemd/user/openclaw-audit.service` | Security audit service |
 | `~/.config/systemd/user/openclaw-audit.timer` | Weekly audit timer |
 | `/etc/apparmor.d/openclaw-gateway` | AppArmor confinement profile (if `--with-apparmor`) |
-| `/etc/nftables.d/openclaw.nft` | nftables firewall rules (if `--with-firewall`) |
+| `/etc/nftables.d/openclaw.conf` | nftables firewall rules (if `--with-firewall`) |
 | `/etc/logrotate.d/openclaw` | Log rotation configuration |
 
 ## References

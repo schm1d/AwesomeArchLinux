@@ -35,8 +35,8 @@
 #   5.  Writes hardened /etc/squid/squid.conf (transparent intercept mode)
 #   6.  Appends SSL bump configuration (if --ssl-bump)
 #   7.  Configures DNS filtering via dnsmasq (if --dns-filter)
-#   8.  Applies sysctl overrides (ip_forward, route_localnet)
-#   9.  Creates nftables transparent interception rules (REDIRECT + anti-loop)
+#   8.  Applies the required IPv4 forwarding sysctl override
+#   9.  Creates source-scoped nftables REDIRECT and input rules
 #  10.  Initializes Squid cache directory structure
 #  11.  Applies systemd hardening overrides
 #  12.  Creates systemd timer for daily blocklist updates
@@ -46,6 +46,10 @@
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -123,6 +127,18 @@ done
 if ! [[ "$NETWORK" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
     err "Invalid CIDR format: $NETWORK (expected e.g., 192.168.1.0/24)"
 fi
+
+IFS='./' read -r NET_O1 NET_O2 NET_O3 NET_O4 NET_PREFIX <<< "$NETWORK"
+for octet in "$NET_O1" "$NET_O2" "$NET_O3" "$NET_O4"; do
+    (( 10#$octet <= 255 )) || err "Invalid CIDR address: $NETWORK"
+done
+(( 10#$NET_PREFIX <= 32 )) || err "Invalid CIDR prefix: $NETWORK"
+[[ "$HTTP_PORT" =~ ^[0-9]+$ ]] && (( HTTP_PORT >= 1 && HTTP_PORT <= 65535 )) \
+    || err "Invalid HTTP port: $HTTP_PORT"
+[[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) \
+    || err "Invalid HTTPS port: $HTTPS_PORT"
+[[ "$CACHE_SIZE_MB" =~ ^[0-9]+$ ]] && (( CACHE_SIZE_MB >= 1 )) \
+    || err "Invalid cache size: $CACHE_SIZE_MB"
 
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@$(hostname -f 2>/dev/null || echo localhost)}"
 
@@ -335,18 +351,22 @@ acl whitelisted dstdomain "${BLOCKLIST_DIR}/whitelist.txt"
 http_access allow localhost manager
 http_access deny manager
 
-# Whitelist overrides blocklists
-http_access allow whitelisted
+# Block unsafe ports and CONNECT to non-SSL ports
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+
+# Never let a destination whitelist turn this host into an open proxy.
+http_access deny !localnet !localhost
+
+# The whitelist overrides domain blocklists only for trusted clients.
+http_access allow localnet whitelisted
+http_access allow localhost whitelisted
 
 # Block ads, malware, tracking
 http_access deny blocked_ads
 http_access deny blocked_malware
 
-# Block unsafe ports and CONNECT to non-SSL ports
-http_access deny !Safe_ports
-http_access deny CONNECT !SSL_ports
-
-# Allow local network
+# Allow trusted clients
 http_access allow localnet
 http_access allow localhost
 
@@ -605,8 +625,8 @@ cat > /etc/sysctl.d/99-z-squid-proxy.conf <<'EOF'
 # Required for nftables REDIRECT to intercept client traffic
 net.ipv4.ip_forward = 1
 
-# Allow local routing for TPROXY (if needed in future)
-net.ipv4.conf.all.route_localnet = 1
+# REDIRECT does not require routing 127/8 from non-loopback interfaces.
+net.ipv4.conf.all.route_localnet = 0
 EOF
 
 sysctl --system &>/dev/null
@@ -628,42 +648,44 @@ if ! command -v nft &>/dev/null; then
     err "nftables is required for transparent interception"
 fi
 
-# Create dedicated table for proxy NAT rules
-# Flush existing proxy table if present
-nft delete table ip squid-proxy 2>/dev/null || true
-
-nft add table ip squid-proxy
-
-# Prerouting chain: redirect client traffic to Squid
-nft add chain ip squid-proxy prerouting "{ type nat hook prerouting priority dstnat; }"
-
-# Output chain: exempt Squid's own outbound traffic (prevent loops)
-nft add chain ip squid-proxy output "{ type nat hook output priority -100; }"
-
-# Anti-loop: Squid's own traffic (proxy user) bypasses redirection
-nft add rule ip squid-proxy output skuid proxy tcp dport 80 accept
-nft add rule ip squid-proxy output skuid proxy tcp dport 443 accept
-
-# Redirect HTTP traffic from LAN to Squid intercept port
-nft add rule ip squid-proxy prerouting ip saddr "$NETWORK" tcp dport 80 redirect to :"$HTTP_PORT"
-
-# Redirect HTTPS traffic if SSL bump is enabled
+# Persist only the rules owned by this script. Never snapshot the live ruleset:
+# it can contain transient Docker, Fail2Ban, or CrowdSec state.
+SQUID_NFT_BLOCK=$(cat <<EOF
+table ip squid_proxy {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        ip saddr $NETWORK tcp dport 80 redirect to :$HTTP_PORT
+EOF
+)
 if [[ "$SSL_BUMP" == true ]]; then
-    nft add rule ip squid-proxy prerouting ip saddr "$NETWORK" tcp dport 443 redirect to :"$HTTPS_PORT"
+    SQUID_NFT_BLOCK+=$'\n'"        ip saddr $NETWORK tcp dport 443 redirect to :$HTTPS_PORT"
+fi
+SQUID_NFT_BLOCK+=$'\n    }\n}'
+SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTP_PORT accept comment \"awesome-squid-http\""
+if [[ "$SSL_BUMP" == true ]]; then
+    SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTPS_PORT accept comment \"awesome-squid-https\""
+fi
+aal_nft_persist_block squid-proxy <<< "$SQUID_NFT_BLOCK"
+
+# Replace only this script's live objects. The hyphenated table is the legacy
+# table created by older versions of this installer.
+nft delete table ip squid-proxy 2>/dev/null || true
+nft delete table ip squid_proxy 2>/dev/null || true
+nft add table ip squid_proxy
+nft add chain ip squid_proxy prerouting "{ type nat hook prerouting priority dstnat; policy accept; }"
+nft add rule ip squid_proxy prerouting ip saddr "$NETWORK" tcp dport 80 redirect to :"$HTTP_PORT"
+if [[ "$SSL_BUMP" == true ]]; then
+    nft add rule ip squid_proxy prerouting ip saddr "$NETWORK" tcp dport 443 redirect to :"$HTTPS_PORT"
 fi
 
-# Allow traffic to Squid ports in the filter table (if it exists)
-if nft list table inet filter &>/dev/null 2>&1; then
-    nft insert rule inet filter input tcp dport "$HTTP_PORT" accept 2>/dev/null || true
-    if [[ "$SSL_BUMP" == true ]]; then
-        nft insert rule inet filter input tcp dport "$HTTPS_PORT" accept 2>/dev/null || true
-    fi
+if ! nft list chain inet filter input &>/dev/null; then
+    err "Required nftables chain inet filter input does not exist"
 fi
-
-# Persist rules
-if [[ -f /etc/nftables.conf ]]; then
-    nft list ruleset > /etc/nftables.conf
-    msg "nftables rules persisted"
+aal_nft_remove_live_rules inet filter input awesome-squid-http
+aal_nft_remove_live_rules inet filter input awesome-squid-https
+nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport "$HTTP_PORT" accept comment "awesome-squid-http"
+if [[ "$SSL_BUMP" == true ]]; then
+    nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport "$HTTPS_PORT" accept comment "awesome-squid-https"
 fi
 
 msg "nftables transparent interception configured"
@@ -681,7 +703,7 @@ cat > /etc/squid/conf.d/tproxy-alternative.txt <<EOF
 #    ip route add local 0.0.0.0/0 dev lo table 100
 #
 # 2. Replace REDIRECT with TPROXY in nftables:
-#    nft add rule ip squid-proxy prerouting tcp dport 80 meta mark set 1 tproxy to :${HTTP_PORT}
+#    nft add rule ip squid_proxy prerouting tcp dport 80 meta mark set 1 tproxy to :${HTTP_PORT}
 #
 # 3. Change squid.conf port to:
 #    http_port ${HTTP_PORT} tproxy
@@ -871,7 +893,7 @@ echo "  Log rotation:          /etc/logrotate.d/squid"
 echo "  sysctl override:       /etc/sysctl.d/99-z-squid-proxy.conf"
 echo "  systemd hardening:     /etc/systemd/system/squid.service.d/hardening.conf"
 echo "  Blocklist timer:       /etc/systemd/system/squid-blocklist-update.timer"
-echo "  nftables table:        squid-proxy (ip family)"
+echo "  nftables table:        squid_proxy (ip family)"
 if [[ "$SSL_BUMP" == true ]]; then
     echo "  SSL CA cert:           $SQUID_SSL_DIR/squid-ca.pem"
     echo "  SSL CA key:            $SQUID_SSL_DIR/squid-ca.key"
@@ -892,7 +914,7 @@ if [[ "$SSL_BUMP" == true ]]; then
     echo "  HTTPS port:            $HTTPS_PORT (← port 443 redirected)"
     echo "  SSL bump mode:         Peek-and-splice (SNI inspection, no decrypt by default)"
 fi
-echo "  Anti-loop:             skuid proxy exemption"
+echo "  Source restriction:    only $NETWORK may reach Squid intercept ports"
 echo
 
 echo -e "${C_BLUE}Security features:${C_NC}"
@@ -930,7 +952,7 @@ echo "  squid -k parse                                # Validate config"
 echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:info    # Proxy status"
 echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:5min    # 5-minute averages"
 echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:utilization  # Cache utilization"
-echo "  nft list table ip squid-proxy                  # Interception rules"
+echo "  nft list table ip squid_proxy                  # Interception rules"
 echo "  tail -f /var/log/squid/access.log              # Watch traffic"
 echo "  curl -x http://127.0.0.1:$HTTP_PORT http://example.com  # Test proxy"
 echo

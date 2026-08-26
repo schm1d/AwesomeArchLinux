@@ -68,6 +68,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -995,10 +999,8 @@ echo -e "${C_BLUE}--- Phase 10: Firewall Rules ---${C_NC}"
 if [[ "$WITH_FIREWALL" == true ]]; then
     msg "Step 20: Creating nftables firewall rules..."
 
-    # Verify nftables is available
     if ! command -v nft &>/dev/null; then
-        warn "nftables (nft) is not installed. Install: pacman -S nftables"
-        warn "Firewall rules will be written but cannot be loaded"
+        err "nftables (nft) is required for --with-firewall"
     fi
 
     # Create nftables include directory if it doesn't exist
@@ -1011,100 +1013,45 @@ if [[ "$WITH_FIREWALL" == true ]]; then
 #
 # Purpose:
 #   - Block ALL inbound connections to the gateway port except loopback
-#   - Allow outbound HTTPS for AI API calls (Anthropic, OpenAI)
-#   - Allow outbound to messaging platform ports
-#   - Rate limit WebSocket connections
+#   - Rate-limit logging of blocked connection attempts
+#
+# Outbound filtering is deliberately not claimed here. A destination-port
+# allowlist in a policy-accept chain does not restrict traffic, while a static
+# policy-drop allowlist would break dynamic API and messaging endpoints.
 #
 # Load: nft -f /etc/nftables.d/openclaw.conf
 # Or include in /etc/nftables.conf: include "/etc/nftables.d/openclaw.conf"
 # =============================================================================
 
 table inet openclaw {
-    # Rate limiting set: max 10 new connections per source IP per minute
-    set ratelimit_v4 {
-        type ipv4_addr
-        size 65535
-        flags dynamic,timeout
-        timeout 1m
-    }
-
-    set ratelimit_v6 {
-        type ipv6_addr
-        size 65535
-        flags dynamic,timeout
-        timeout 1m
-    }
-
-    # Allowed outbound destination ports
-    # 443 = HTTPS (API calls to Anthropic/OpenAI/messaging webhooks)
-    # 5222 = XMPP (some messaging platforms)
-    # 5223 = XMPP over TLS
-    # 8443 = Telegram Bot API alternative port
-    set allowed_outbound_ports {
-        type inet_service
-        elements = { 443, 5222, 5223, 8443 }
-    }
-
     chain input {
-        type filter hook input priority 0; policy accept;
-
-        # Allow loopback traffic to gateway port
-        iif lo tcp dport $OC_PORT accept
-
-        # Rate limit: max 10 new connections per minute per source IP
-        ip saddr != 127.0.0.0/8 tcp dport $OC_PORT ct state new \\
-            add @ratelimit_v4 { ip saddr limit rate 10/minute burst 5 packets } accept
-        ip6 saddr != ::1 tcp dport $OC_PORT ct state new \\
-            add @ratelimit_v6 { ip6 saddr limit rate 10/minute burst 5 packets } accept
-
-        # Drop all non-loopback traffic to gateway port
-        tcp dport $OC_PORT drop
-
-        # Log dropped gateway connection attempts
-        tcp dport $OC_PORT log prefix "openclaw-blocked: " level warn drop
-    }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-
-        # Allow outbound to approved ports (API calls, messaging)
-        tcp dport @allowed_outbound_ports accept
-
-        # Allow DNS for hostname resolution
-        udp dport 53 accept
-        tcp dport 53 accept
-
-        # Allow loopback
-        oif lo accept
-
-        # Allow established/related connections
-        ct state established,related accept
+        type filter hook input priority -10; policy accept;
+        iifname != "lo" tcp dport $OC_PORT limit rate 5/minute log prefix "openclaw-blocked: " level warn
+        iifname != "lo" tcp dport $OC_PORT drop
     }
 }
 EOF
 
+    chown root:root "/etc/nftables.d/openclaw.conf"
     chmod 644 "/etc/nftables.d/openclaw.conf"
     msg "nftables rules written: /etc/nftables.d/openclaw.conf"
 
-    # Try to load the rules
-    if command -v nft &>/dev/null; then
-        if nft -c -f "/etc/nftables.d/openclaw.conf" 2>/dev/null; then
-            msg "nftables rules validated successfully"
-            info "To load: nft -f /etc/nftables.d/openclaw.conf"
-            info "To persist: add 'include \"/etc/nftables.d/openclaw.conf\"' to /etc/nftables.conf"
-        else
-            warn "nftables rules have syntax issues — review /etc/nftables.d/openclaw.conf"
-        fi
-    fi
+    # The shared helper validates the complete candidate ruleset after its
+    # leading flush, avoiding a false "table already exists" on reruns.
+    aal_nft_persist_block openclaw-firewall <<'EOF'
+include "/etc/nftables.d/openclaw.conf"
+EOF
+    nft delete table inet openclaw 2>/dev/null || true
+    nft -f "/etc/nftables.d/openclaw.conf"
+    msg "nftables rules validated, loaded, and persisted"
 
     info "Firewall policy:"
     info "  - BLOCK all inbound to port $OC_PORT except loopback (127.0.0.1/::1)"
-    info "  - Rate limit: max 10 new connections/minute per source IP"
-    info "  - ALLOW outbound: 443 (HTTPS/APIs), 53 (DNS), 5222-5223 (XMPP), 8443 (Telegram)"
+    info "  - Rate-limit logs to 5 blocked attempts/minute"
+    info "  - Outbound traffic remains governed by the host firewall and service sandbox"
 else
     info "Step 20: Firewall not requested (use --with-firewall to enable)"
-    warn "Without firewall rules, the gateway port is accessible from the network"
-    warn "The gateway.bind='loopback' setting is your primary defense"
+    warn "The gateway remains loopback-bound, but the firewall backstop is not installed"
 fi
 
 echo
@@ -1826,7 +1773,7 @@ echo "    [18] User service: openclaw-gateway.service"
 echo "    [19] Drop-in: ProtectSystem=strict, NoNewPrivileges, syscall filter"
 echo "  Phase 10: Firewall"
 if [[ "$WITH_FIREWALL" == true ]]; then
-echo "    [20] nftables: loopback-only inbound, rate-limited"
+echo "    [20] nftables: loopback-only inbound, rate-limited logging"
 else
 echo "    [20] nftables: not configured (use --with-firewall)"
 fi
