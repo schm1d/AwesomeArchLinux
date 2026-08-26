@@ -22,29 +22,36 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# --- These values MUST be replaced by archinstall.sh ---
-DISK="${_INSTALL_DISK}"       # Example: /dev/sda or /dev/nvme0n1
-USERNAME="${_INSTALL_USER}" # Example: myuser
-HOSTNAME="${_INSTALL_HOST}" # Example: myhostname
+# --- These values MUST be supplied by archinstall.sh ---
+# The persisted install environment uses INSTALL_* while the one-shot chroot
+# handoff historically used _INSTALL_*. Accept both so /root/.install-env is
+# sufficient when recovering or deliberately rerunning this script.
+DISK="${INSTALL_DISK:-${_INSTALL_DISK:-}}"       # Example: /dev/sda or /dev/nvme0n1
+USERNAME="${INSTALL_USER:-${_INSTALL_USER:-}}" # Example: myuser
+HOSTNAME="${INSTALL_HOST:-${_INSTALL_HOST:-}}" # Example: myhostname
+: "${DISK:?Missing INSTALL_DISK/_INSTALL_DISK}"
+: "${USERNAME:?Missing INSTALL_USER/_INSTALL_USER}"
+: "${HOSTNAME:?Missing INSTALL_HOST/_INSTALL_HOST}"
 # shellcheck disable=SC2034  # Cross-script env vars from installer
-TIMEZONE="${_INSTALL_TIMEZONE:-UTC}"
+TIMEZONE="${INSTALL_TIMEZONE:-${_INSTALL_TIMEZONE:-UTC}}"
 # shellcheck disable=SC2034
-LOCALE="${_INSTALL_LOCALE:-en_US.UTF-8}"
+LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-en_US.UTF-8}}"
 # shellcheck disable=SC2034
-KEYMAP="${_INSTALL_KEYMAP:-us}"
-LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
+KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-us}}"
+LUKS_KEYS="${INSTALL_LUKS_KEYS:-${_INSTALL_LUKS_KEYS:-/etc/luksKeys/boot.key}}" # Location of the root partition key
 SSH_PORT=22
-SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
+SSH_PUBKEY="${INSTALL_SSH_PUBKEY:-${_INSTALL_SSH_PUBKEY:-}}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
-CRYPT_NAME="${_INSTALL_CRYPT:-crypt_lvm}"
+CRYPT_NAME="${INSTALL_CRYPT:-${_INSTALL_CRYPT:-crypt_lvm}}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
-LVM_NAME="${_INSTALL_LVM:-lvm_arch}"
-INSTALL_TPM="${INSTALL_TPM:-false}"
+LVM_NAME="${INSTALL_LVM:-${_INSTALL_LVM:-lvm_arch}}"
+INSTALL_TPM="${INSTALL_TPM:-${_INSTALL_TPM:-false}}"
 SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
 SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
-INSTALL_BOOTLOADER="${_INSTALL_BOOTLOADER:?Missing explicit bootloader profile}"
+INSTALL_BOOTLOADER="${INSTALL_BOOTLOADER:-${_INSTALL_BOOTLOADER:-}}"
+: "${INSTALL_BOOTLOADER:?Missing INSTALL_BOOTLOADER/_INSTALL_BOOTLOADER}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
-TPM_PCRS="${_INSTALL_TPM_PCRS:-7}"
+TPM_PCRS="${INSTALL_TPM_PCRS:-${_INSTALL_TPM_PCRS:-7}}"
 BOOT_EXTRA_CMDLINE=()
 
 case "$INSTALL_BOOTLOADER" in
@@ -1238,7 +1245,30 @@ sleep 2
 # --- Variables ---
 NVIDIA_CARD=false
 AMD_CARD=false
-KERNEL="$(uname -r)"
+
+# Select prebuilt NVIDIA modules from the kernels installed in the target,
+# never from uname(1): inside arch-chroot uname reports the live ISO kernel.
+# If neither official kernel is present, use DKMS for a custom kernel; that
+# kernel's matching headers must already be installed for the build to work.
+install_nvidia_driver_for_installed_kernels() {
+    local -a driver_packages=(nvidia-utils)
+    local found_prebuilt_kernel=false
+
+    if pacman -Qq linux &>/dev/null; then
+        driver_packages+=(nvidia)
+        found_prebuilt_kernel=true
+    fi
+    if pacman -Qq linux-lts &>/dev/null; then
+        driver_packages+=(nvidia-lts)
+        found_prebuilt_kernel=true
+    fi
+    if [[ "$found_prebuilt_kernel" == false ]]; then
+        driver_packages+=(dkms nvidia-dkms)
+    fi
+
+    echo "Installing NVIDIA packages for the installed kernel(s): ${driver_packages[*]}"
+    pacman -S --needed --noconfirm "${driver_packages[@]}"
+}
 
 # --- Detect NVIDIA ---
 if lspci | grep -E "VGA|3D" | grep -i nvidia &>/dev/null; then
@@ -1258,7 +1288,6 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
     echo "Detected GPU: $gpu_model"
-    echo "Running Kernel: $KERNEL"
 
     # Choose correct NVIDIA driver package based on model:
     case $gpu_model in
@@ -1273,19 +1302,11 @@ if [[ "$NVIDIA_CARD" == true ]]; then
             ;;
         # Maxwell, Pascal, Turing, Ampere, Ada, etc.:
         *"Maxwell"*|*"NV110"*|*"GA102"*)  # Maxwell fallback: Usually the standard driver works
-            if [[ "$KERNEL" == *"lts"* || "$KERNEL" == *"linux"* ]]; then
-                pacman -S --noconfirm nvidia nvidia-utils
-            else
-                pacman -S --noconfirm nvidia-dkms nvidia-utils
-            fi
+            install_nvidia_driver_for_installed_kernels
             ;;
         *"Pascal"*|*"GTX 10"*|*"GP10"*|*"Turing"*|*"RTX 20"*|*"TU10"*|\
          *"Ampere"*|*"RTX 30"*|*"GA10"*|*"Ada"*|*"RTX 40"*|*"AD10"*|*"RTX 50"* )
-            if [[ "$KERNEL" == *"lts"* || "$KERNEL" == *"linux"* ]]; then
-                pacman -S --noconfirm nvidia nvidia-utils
-            else
-                pacman -S --noconfirm nvidia-dkms nvidia-utils
-            fi
+            install_nvidia_driver_for_installed_kernels
             ;;
         *)
             echo "No matching NVIDIA driver found for: $gpu_model"
