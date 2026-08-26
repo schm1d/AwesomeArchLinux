@@ -949,8 +949,10 @@ EOF
 # attack resistance, which we don't use) at the cost of a fragile systemd
 # unit dependency chain — systemd-cryptsetup-generator races against LVM
 # activation and frequently fails with "dev-mapper-swap.device dependency
-# failed" on first boot. Point fstab at the LVM mapper directly.
-sed -i '/[[:space:]]none[[:space:]]swap[[:space:]]/d' /mnt/etc/fstab
+# failed" on first boot. Point fstab at the LVM mapper directly. Match the
+# filesystem type as the third fstab field because genfstab aligns columns
+# with a variable mixture of tabs and spaces.
+sed -Ei '/^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]|$)/d' /mnt/etc/fstab
 echo "/dev/mapper/${LVM_NAME}-swap none swap defaults 0 0" >> /mnt/etc/fstab
 
 # Setup systemd for hidepid
