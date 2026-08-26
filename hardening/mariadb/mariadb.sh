@@ -120,6 +120,7 @@ else
     pacman -S --noconfirm --needed mariadb
     msg "mariadb installed successfully"
 fi
+pacman -S --noconfirm --needed logrotate
 
 # =============================================================================
 # 2. INITIALIZE DATABASE
@@ -134,21 +135,83 @@ else
 fi
 
 # =============================================================================
-# 3. START MARIADB TEMPORARILY
+# 3. START AN ISOLATED MARIADB BOOTSTRAP INSTANCE
 # =============================================================================
 
-msg "Starting MariaDB temporarily for security hardening..."
+msg "Starting an isolated MariaDB instance for security hardening..."
 
-# Start with skip-grant-tables so we can set root password
-# Use skip-networking to prevent any external access during setup
-mysqld_safe --skip-grant-tables --skip-networking &
-MYSQLD_PID=$!
+# Never run a skip-grant-tables process beside a production server. Apart from
+# the risk of sharing the data directory, an unqualified client could connect
+# to the production socket and the cleanup path could stop the wrong process.
+if systemctl is-active --quiet mariadb.service; then
+    err "MariaDB is already running. Stop mariadb.service before running this hardening script."
+fi
 
-# Wait for MariaDB to be ready
+for server_name in mariadbd mysqld mysqld_safe; do
+    if pgrep -x "$server_name" &>/dev/null; then
+        err "A '$server_name' process is already running. Refusing to start an isolated bootstrap instance."
+    fi
+done
+
+MARIADB_SERVER=$(command -v mariadbd || command -v mysqld || true)
+[[ -n "$MARIADB_SERVER" ]] || err "Neither mariadbd nor mysqld was found"
+
+MARIADB_RUNTIME=$(mktemp -d /run/mariadb-hardening.XXXXXX)
+MARIADB_SOCKET="$MARIADB_RUNTIME/mariadb.sock"
+MARIADB_PID_FILE="$MARIADB_RUNTIME/mariadb.pid"
+MARIADB_ERROR_LOG="$MARIADB_RUNTIME/mariadb-error.log"
+MARIADB_PID=""
+chown mysql:mysql "$MARIADB_RUNTIME"
+chmod 0700 "$MARIADB_RUNTIME"
+
+cleanup_bootstrap_instance() {
+    local retries=15
+
+    set +e
+    if [[ -n "$MARIADB_PID" ]] && kill -0 "$MARIADB_PID" 2>/dev/null; then
+        kill -TERM "$MARIADB_PID" 2>/dev/null
+        while kill -0 "$MARIADB_PID" 2>/dev/null && (( retries > 0 )); do
+            sleep 1
+            retries=$((retries - 1))
+        done
+        if kill -0 "$MARIADB_PID" 2>/dev/null; then
+            warn "Bootstrap MariaDB did not stop cleanly; killing only PID $MARIADB_PID"
+            kill -KILL "$MARIADB_PID" 2>/dev/null
+        fi
+        wait "$MARIADB_PID" 2>/dev/null
+    fi
+
+    rm -f -- "$MARIADB_SOCKET" "$MARIADB_PID_FILE" "$MARIADB_ERROR_LOG"
+    rmdir -- "$MARIADB_RUNTIME" 2>/dev/null
+    set -e
+}
+trap cleanup_bootstrap_instance EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A unique socket and PID file make every client and cleanup operation target
+# only the process launched here. Networking remains disabled during bootstrap.
+"$MARIADB_SERVER" \
+    --user=mysql \
+    --basedir=/usr \
+    --datadir=/var/lib/mysql \
+    --socket="$MARIADB_SOCKET" \
+    --pid-file="$MARIADB_PID_FILE" \
+    --log-error="$MARIADB_ERROR_LOG" \
+    --skip-grant-tables \
+    --skip-networking &
+MARIADB_PID=$!
+
+# Wait for this exact socket rather than the system-wide default socket.
 RETRIES=30
-until mariadb -u root -e "SELECT 1" &>/dev/null; do
+until mariadb --protocol=socket --socket="$MARIADB_SOCKET" -u root -e "SELECT 1" &>/dev/null; do
+    if ! kill -0 "$MARIADB_PID" 2>/dev/null; then
+        [[ -f "$MARIADB_ERROR_LOG" ]] && tail -n 50 "$MARIADB_ERROR_LOG"
+        err "Isolated MariaDB bootstrap process exited before becoming ready"
+    fi
     RETRIES=$((RETRIES - 1))
     if (( RETRIES <= 0 )); then
+        [[ -f "$MARIADB_ERROR_LOG" ]] && tail -n 50 "$MARIADB_ERROR_LOG"
         err "MariaDB failed to start within 30 seconds"
     fi
     sleep 1
@@ -165,7 +228,7 @@ msg "Running security hardening..."
 # Generate a strong random root password
 ROOT_PASS="$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)"
 
-mariadb -u root <<EOSQL
+mariadb --protocol=socket --socket="$MARIADB_SOCKET" -u root <<EOSQL
 -- Flush privileges first to enable grant tables
 FLUSH PRIVILEGES;
 
@@ -201,24 +264,10 @@ chown root:root "$ROOT_PASS_FILE"
 
 msg "Root password saved to $ROOT_PASS_FILE (mode 600)"
 
-# Stop the temporary MariaDB instance
-kill "$MYSQLD_PID" 2>/dev/null || true
-wait "$MYSQLD_PID" 2>/dev/null || true
-
-# Wait for shutdown
-RETRIES=15
-while pgrep -x mysqld &>/dev/null; do
-    RETRIES=$((RETRIES - 1))
-    if (( RETRIES <= 0 )); then
-        warn "MariaDB did not stop cleanly, sending SIGKILL"
-        pkill -9 -x mysqld || true
-        sleep 2
-        break
-    fi
-    sleep 1
-done
-
-info "Temporary MariaDB instance stopped"
+# Stop and clean up only the bootstrap process launched above.
+cleanup_bootstrap_instance
+trap - EXIT INT TERM
+info "Isolated MariaDB bootstrap instance stopped"
 
 # =============================================================================
 # 5. CREATE LOG AND SECURITY DIRECTORIES
@@ -465,6 +514,7 @@ msg "systemd hardening override applied"
 
 msg "Configuring logrotate for MariaDB logs..."
 
+mkdir -p /etc/logrotate.d
 cat > /etc/logrotate.d/mariadb <<'EOF'
 /var/log/mysql/*.log {
     weekly

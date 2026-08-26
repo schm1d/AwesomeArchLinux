@@ -45,7 +45,7 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 USERNAME=""
 SSHD_CONFIG="/etc/ssh/sshd_config"
 PAM_SSHD="/etc/pam.d/sshd"
-LOGFILE="/var/log/totp-setup-$(date +%Y%m%d-%H%M%S).log"
+LOGFILE=""
 
 # --- Usage ---
 usage() {
@@ -96,7 +96,12 @@ USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
 
 TOTP_SECRET="$USER_HOME/.google_authenticator"
 
-# Redirect output to logfile as well
+# Create the log without a predictable filename or permissive caller umask.
+# File descriptor 3 remains terminal-only for QR codes and recovery codes.
+umask 077
+LOGFILE=$(mktemp "/var/log/totp-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
+chmod 0600 "$LOGFILE"
+exec 3>&1
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "Target user: $USERNAME"
@@ -205,7 +210,7 @@ echo
 #   -w 3  Window size 3 (allows +/- 1 time step for clock skew)
 #   -f  Force write to file (no confirmation prompt)
 #   -Q UTF8  Display QR code using UTF-8 characters in terminal
-su - "$USERNAME" -c "google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8"
+su - "$USERNAME" -c "google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8" >&3 2>&3
 
 echo
 
@@ -258,7 +263,7 @@ if [[ -f "$TOTP_SECRET" ]]; then
         echo -e "  ${C_RED}$code${C_NC}"
     done
     echo
-fi
+fi >&3
 
 echo -e "${C_YELLOW}IMPORTANT — Test before closing this session:${C_NC}"
 echo "  1. Open a NEW terminal window"

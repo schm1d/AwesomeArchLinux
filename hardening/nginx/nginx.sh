@@ -99,6 +99,17 @@ done
 # --- Validate ---
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ ${#DOMAINS[@]} -gt 0 ]] || err "At least one domain is required (-d example.com)"
+[[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || \
+    err "HTTPS port must be between 1 and 65535"
+
+# This path is used as the target of recursive chown/chmod operations. Resolve
+# existing symlinks and constrain it to dedicated web-content hierarchies so a
+# typo such as '-w /' cannot alter the operating system tree.
+WEBROOT=$(realpath -m -- "$WEBROOT") || err "Could not resolve webroot: $WEBROOT"
+case "$WEBROOT" in
+    /var/www/*|/srv/http/*) ;;
+    *) err "Unsafe webroot '$WEBROOT'. Use a dedicated directory below /var/www/ or /srv/http/." ;;
+esac
 
 PRIMARY_DOMAIN="${DOMAINS[0]}"
 EMAIL="${EMAIL:-webmaster@$PRIMARY_DOMAIN}"
@@ -146,9 +157,13 @@ fi
 
 msg "Preparing web directories..."
 mkdir -p "$WEBROOT/.well-known/acme-challenge"
-# /var/www must be traversable (755) so the http user and certbot can reach
-# the webroot. chown only the webroot itself, not the parent.
-chmod 755 /var/www
+# The selected content hierarchy must be traversable so http and certbot can
+# reach the webroot. Ownership changes remain confined to the resolved root.
+if [[ "$WEBROOT" == /var/www/* ]]; then
+    chmod 755 /var/www
+else
+    chmod 755 /srv /srv/http
+fi
 chown -R http:http "$WEBROOT"
 chmod -R o+rX "$WEBROOT"
 

@@ -58,7 +58,7 @@ WG_DIR="/etc/wireguard"
 WG_CONF="$WG_DIR/wg0.conf"
 CLIENT_DIR="$WG_DIR/clients"
 NFTABLES_DIR="/etc/nftables.d"
-LOGFILE="/var/log/wireguard-setup-$(date +%Y%m%d-%H%M%S).log"
+LOGFILE=""
 
 # --- Usage ---
 usage() {
@@ -122,7 +122,12 @@ DEFAULT_IF=$(ip -4 route show default | awk '{print $5; exit}')
 SERVER_PUBLIC_IP=$(ip -4 addr show "$DEFAULT_IF" | grep -oP 'inet \K[\d.]+' | head -1)
 [[ -n "$SERVER_PUBLIC_IP" ]] || err "Could not detect server public IP"
 
-# Redirect output to logfile as well
+# Create a root-only log. Descriptor 3 bypasses tee for credential-bearing QR
+# codes so the client private and preshared keys never enter the log file.
+umask 077
+LOGFILE=$(mktemp "/var/log/wireguard-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
+chmod 0600 "$LOGFILE"
+exec 3>&1
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "WireGuard port:    $WG_PORT"
@@ -389,7 +394,7 @@ for conf in "${CLIENT_CONFIGS[@]}"; do
     echo -e "${C_BLUE}--- $CNAME ---${C_NC}"
     qrencode -t ansiutf8 < "$conf"
     echo
-done
+done >&3
 
 # =============================================================================
 # 11. SUMMARY

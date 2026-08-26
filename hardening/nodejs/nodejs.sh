@@ -96,9 +96,23 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$APP_PATH" ]] || err "Application path is required (-a /path/to/app)"
 [[ -d "$APP_PATH" ]] || err "Application directory does not exist: $APP_PATH"
+[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || \
+    err "Application port must be between 1 and 65535"
+[[ "$APP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || \
+    err "Invalid service user '$APP_USER'"
+[[ "$APP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]*$ ]] || \
+    err "Invalid application name '$APP_NAME'"
 
-# Resolve to absolute path
-APP_PATH=$(realpath "$APP_PATH")
+# This path is passed to recursive ownership changes. Resolve symlinks and
+# constrain it to application-content hierarchies so '-a /' and similar input
+# cannot transfer ownership of operating-system files.
+APP_PATH=$(realpath -- "$APP_PATH") || err "Could not resolve application path"
+case "$APP_PATH" in
+    /opt/*|/srv/*|/var/www/*) ;;
+    *) err "Unsafe application path '$APP_PATH'. Use a dedicated directory below /opt/, /srv/, or /var/www/." ;;
+esac
+[[ "$APP_PATH" != *"'"* && "$APP_PATH" != *$'\n'* && "$APP_PATH" != *$'\r'* ]] || \
+    err "Application path contains unsupported characters"
 
 # Redirect output to logfile as well
 exec > >(tee -a "$LOGFILE") 2>&1
@@ -224,14 +238,18 @@ msg "Creating hardened systemd service..."
 ENTRY_POINT="$APP_PATH/index.js"
 if [[ -f "$APP_PATH/package.json" ]]; then
     # Check if there is a "start" script defined
-    START_SCRIPT=$(node -e "
-        try {
-            const pkg = require('$APP_PATH/package.json');
-            if (pkg.scripts && pkg.scripts.start) {
-                console.log(pkg.scripts.start);
-            }
-        } catch(e) {}
-    " 2>/dev/null || true)
+    START_SCRIPT=$(node - "$APP_PATH/package.json" <<'NODE_SCRIPT' 2>/dev/null || true
+const fs = require("node:fs");
+try {
+    const pkg = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+    if (pkg.scripts && pkg.scripts.start) {
+        console.log(pkg.scripts.start);
+    }
+} catch (error) {
+    // Invalid package metadata is handled by falling back to index.js.
+}
+NODE_SCRIPT
+    )
 
     if [[ -n "$START_SCRIPT" ]]; then
         info "Detected package.json start script: $START_SCRIPT"
@@ -294,7 +312,6 @@ Environment=PORT=$PORT
 # --- Restart policy ---
 Restart=always
 RestartSec=10
-WatchdogSec=30
 
 # --- Filesystem sandboxing ---
 ProtectSystem=strict

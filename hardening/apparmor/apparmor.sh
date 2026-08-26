@@ -57,7 +57,8 @@ usage() {
 Usage: sudo $0 [options]
 
 Options:
-  --dry-run    Write profiles to /tmp/apparmor-preview/ instead of $APPARMOR_DIR
+  --dry-run    Write profiles to a unique /tmp/apparmor-preview.XXXXXX/
+               directory; do not install packages, enable services, or load profiles
   -h, --help   Show this help
 
 Examples:
@@ -80,12 +81,16 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 
 if [[ "$DRY_RUN" == true ]]; then
-    APPARMOR_DIR="/tmp/apparmor-preview"
-    mkdir -p "$APPARMOR_DIR"
+    # A unique root-owned directory prevents an unprivileged user from
+    # pre-planting symlinks that a root dry-run would follow.
+    APPARMOR_DIR=$(mktemp -d /tmp/apparmor-preview.XXXXXX)
+    chmod 0700 "$APPARMOR_DIR"
+    LOGFILE="$APPARMOR_DIR/apparmor-hardening.log"
     warn "DRY-RUN mode: profiles will be written to $APPARMOR_DIR (not loaded)"
 fi
 
 # Redirect output to logfile as well
+umask 077
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "AppArmor hardening script started"
@@ -97,17 +102,21 @@ info "Log: $LOGFILE"
 
 msg "Installing AppArmor packages..."
 
-pacman -Syu --noconfirm --needed apparmor
+if [[ "$DRY_RUN" == false ]]; then
+    pacman -Syu --noconfirm --needed apparmor
 
-# apparmor-utils (aa-enforce, aa-complain, aa-status) is part of the apparmor
-# package on Arch Linux. Verify the tools are available.
-for tool in aa-enforce aa-complain aa-status apparmor_parser; do
-    if ! command -v "$tool" &>/dev/null; then
-        err "$tool not found after installing apparmor. Check your installation."
-    fi
-done
+    # apparmor-utils (aa-enforce, aa-complain, aa-status) is part of the
+    # apparmor package on Arch Linux. Verify the runtime tools are available.
+    for tool in aa-enforce aa-complain aa-status apparmor_parser; do
+        if ! command -v "$tool" &>/dev/null; then
+            err "$tool not found after installing apparmor. Check your installation."
+        fi
+    done
 
-msg "AppArmor packages installed successfully"
+    msg "AppArmor packages installed successfully"
+else
+    info "DRY-RUN: package installation and upgrades skipped"
+fi
 
 # =============================================================================
 # 2. ENABLE APPARMOR SERVICE
@@ -115,9 +124,11 @@ msg "AppArmor packages installed successfully"
 
 msg "Enabling AppArmor systemd service..."
 
-systemctl enable apparmor.service
 if [[ "$DRY_RUN" == false ]]; then
+    systemctl enable apparmor.service
     systemctl start apparmor.service 2>/dev/null || warn "AppArmor service may require a reboot to start (kernel parameters needed)"
+else
+    info "DRY-RUN: service enable/start skipped"
 fi
 
 # =============================================================================
