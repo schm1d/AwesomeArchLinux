@@ -268,12 +268,12 @@ AwesomeArchLinux/
 - **Hardened systemd service** &mdash; `CAP_SYS_TIME` only, strict filesystem protection, clock syscall filter.
 - See [`hardening/chrony/README.md`](hardening/chrony/README.md) for NTS verification and troubleshooting.
 
-#### Send-Only Mail Relay (Postfix)
+#### Full Mail Server (Postfix)
 
-- **System notifications** &mdash; Send-only Postfix relay through any SMTP provider (Gmail, SendGrid, Mailgun, SES).
-- **Security** &mdash; `loopback-only` (no external listening), TLS 1.2+ with STARTTLS, SASL authentication, VRFY disabled, internal header stripping.
-- **Integration** &mdash; fail2ban notifications, cron job alerts, SMART monitoring, logwatch reports.
-- See [`hardening/postfix/README.md`](hardening/postfix/README.md) for relay provider setup examples.
+- **Inbound and outbound mail** &mdash; Full MX with Postfix, Dovecot IMAP/LMTP, OpenDKIM, rspamd, Valkey, and ClamAV.
+- **Security** &mdash; TLS 1.2+, DANE guidance, DKIM/SPF/DMARC/ARC, authenticated submission, TLS-only IMAP, and fail-closed milter availability.
+- **Optional relay** &mdash; Supports an outbound SMTP provider; credentials are read from a private file rather than command-line arguments.
+- See [`hardening/postfix/README.md`](hardening/postfix/README.md) for DNS, mailbox, and relay setup.
 
 #### Kernel Hardening (sysctl)
 
@@ -720,7 +720,7 @@ sudo ./hardening/docker/docker.sh --network                           # Containe
 # --- System ---
 sudo ./hardening/sysctl/sysctl.sh workstation  # Compatible kernel hardening baseline
 sudo ./hardening/chrony/chrony.sh              # Chrony NTS (authenticated NTP)
-sudo ./hardening/postfix/postfix.sh -r smtp.gmail.com -u user@gmail.com -p 'pass'  # Mail relay
+sudo ./hardening/postfix/postfix.sh -d example.com                               # Full mail server
 
 # --- Detection ---
 sudo ./hardening/crowdsec/crowdsec.sh --with-nginx --with-nftables    # CrowdSec IDS

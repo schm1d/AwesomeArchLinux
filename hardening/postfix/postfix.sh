@@ -2,7 +2,7 @@
 
 # =============================================================================
 # Script:      postfix.sh
-# Description: Installs and configures a ProtonMail-grade hardened mail server
+# Description: Installs and configures a hardened mail server
 #              on Arch Linux with full inbound/outbound capability:
 #                - Postfix MX with postscreen, DANE, SMTP smuggling protection
 #                - Dovecot IMAP with LMTP, encryption at rest, Sieve filtering
@@ -18,20 +18,22 @@
 #
 # Usage:       sudo ./postfix.sh -d DOMAIN [-H HOSTNAME] [-s DKIM_SELECTOR]
 #                                [-r RELAY_HOST] [-R RELAY_PORT] [-u RELAY_USER]
-#                                [-p RELAY_PASS] [-e ADMIN_EMAIL] [--dry-run] [-h]
+#                                [--relay-password-file FILE]
+#                                [--relay-spf-include DOMAIN] [-e ADMIN_EMAIL]
+#                                [--dry-run] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
 #   - Root privileges
 #   - TLS certificate at /etc/letsencrypt/live/<hostname>/ (or --dry-run)
 #   - DNSSEC-validating resolver for DANE (systemd-resolved or unbound)
-#   - yay or paru for AUR packages (opendkim)
+#   - Official Arch repositories enabled and current
 #
 # What this script does:
-#   1.  Installs postfix, dovecot, opendkim, rspamd, redis, clamav, s-nail
+#   1.  Installs postfix, dovecot, opendkim, rspamd, Valkey, clamav, s-nail
 #   2.  Stops and masks competing MTAs (sendmail, exim)
 #   3.  Creates vmail user/group and mailbox directories
-#   4.  Generates DH parameters for Postfix and Dovecot
+#   4.  Creates and validates Dovecot's global mail-encryption keypair
 #   5.  Configures Postfix main.cf as a full MX with DANE, postscreen, milters
 #   6.  Configures Postfix master.cf with submission (587), SMTPS (465), postscreen
 #   7.  Creates header privacy rules for submission ports
@@ -74,10 +76,12 @@ RELAY_HOST=""
 RELAY_PORT=587
 RELAY_USER=""
 RELAY_PASS=""
+RELAY_PASSWORD_FILE=""
+RELAY_SPF_INCLUDE=""
 ADMIN_EMAIL=""
 DRY_RUN=false
 
-# --- Cipher list (ProtonMail-grade: ECDHE + AEAD only) ---
+# --- Cipher list (ECDHE + AEAD only) ---
 readonly TLS_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
 
 # --- Usage ---
@@ -94,7 +98,10 @@ Optional:
   -r HOST         SMTP relay hostname for outbound (hybrid relay setup)
   -R PORT         SMTP relay port (default: 587)
   -u USER         SMTP relay username
-  -p PASS         SMTP relay password
+  --relay-password-file FILE
+                  Read the SMTP relay password from a private file
+  --relay-spf-include DOMAIN
+                  Provider-published SPF include domain (for example, sendgrid.net)
   -e EMAIL        Admin email address (default: postmaster@\$DOMAIN)
   --dry-run       Write configs but do not start services or require certs
   -h              Show this help
@@ -102,7 +109,9 @@ Optional:
 Examples:
   sudo $0 -d example.com
   sudo $0 -d example.com -H mx1.example.com -s dkim2024
-  sudo $0 -d example.com -r smtp.sendgrid.net -u apikey -p 'SG.xxxx'
+  sudo $0 -d example.com -r smtp.sendgrid.net -u apikey \
+    --relay-password-file /root/.smtp-relay-password \
+    --relay-spf-include sendgrid.net
   sudo $0 -d example.com --dry-run
 EOF
     exit 0
@@ -118,7 +127,11 @@ while [[ $# -gt 0 ]]; do
         -r)         need_arg "$@"; RELAY_HOST="$2"; shift 2 ;;
         -R)         need_arg "$@"; RELAY_PORT="$2"; shift 2 ;;
         -u)         need_arg "$@"; RELAY_USER="$2"; shift 2 ;;
-        -p)         need_arg "$@"; RELAY_PASS="$2"; shift 2 ;;
+        --relay-password-file)
+                    need_arg "$@"; RELAY_PASSWORD_FILE="$2"; shift 2 ;;
+        --relay-spf-include)
+                    need_arg "$@"; RELAY_SPF_INCLUDE="$2"; shift 2 ;;
+        -p)         err "-p is unsafe because it exposes the password in process listings and shell history; use --relay-password-file" ;;
         -e)         need_arg "$@"; ADMIN_EMAIL="$2"; shift 2 ;;
         --dry-run)  DRY_RUN=true; shift ;;
         -h|--help)  usage ;;
@@ -130,27 +143,113 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$DOMAIN" ]] || err "Domain is required (-d). Use -h for help."
 
-if [[ -n "$RELAY_HOST" ]]; then
-    if ! [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] || (( RELAY_PORT < 1 || RELAY_PORT > 65535 )); then
-        err "Invalid relay port: $RELAY_PORT (must be 1-65535)"
-    fi
-fi
+valid_dns_name() {
+    local name="$1" label
+    local -a labels
+
+    (( ${#name} <= 253 )) || return 1
+    [[ "$name" != .* && "$name" != *. && "$name" == *.* ]] || return 1
+    IFS='.' read -r -a labels <<< "$name"
+    for label in "${labels[@]}"; do
+        (( ${#label} >= 1 && ${#label} <= 63 )) || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+valid_email() {
+    local address="$1" local_part domain_part
+
+    [[ "$address" == *@* && "$address" != *@*@* ]] || return 1
+    local_part="${address%@*}"
+    domain_part="${address##*@}"
+    (( ${#local_part} >= 1 && ${#local_part} <= 64 )) || return 1
+    [[ "$local_part" =~ ^[A-Za-z0-9_%+-]+([.][A-Za-z0-9_%+-]+)*$ ]] || return 1
+    valid_dns_name "$domain_part"
+}
+
+valid_dns_name "$DOMAIN" || err "Invalid mail domain: $DOMAIN"
+[[ "$DKIM_SELECTOR" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || \
+    err "Invalid DKIM selector: $DKIM_SELECTOR"
 
 # Derive defaults
 MAIL_HOSTNAME="${MAIL_HOSTNAME:-mail.$DOMAIN}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-postmaster@$DOMAIN}"
 
+valid_dns_name "$MAIL_HOSTNAME" || err "Invalid mail hostname: $MAIL_HOSTNAME"
+valid_email "$ADMIN_EMAIL" || err "Invalid admin email address: $ADMIN_EMAIL"
+
+if [[ -n "$RELAY_HOST" ]]; then
+    valid_dns_name "$RELAY_HOST" || err "Invalid relay hostname: $RELAY_HOST"
+    [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] && (( RELAY_PORT >= 1 && RELAY_PORT <= 65535 )) || \
+        err "Invalid relay port: $RELAY_PORT (must be 1-65535)"
+fi
+
+if [[ -n "$RELAY_SPF_INCLUDE" ]]; then
+    [[ -n "$RELAY_HOST" ]] || err "An SPF include domain requires -r HOST"
+    valid_dns_name "$RELAY_SPF_INCLUDE" || \
+        err "Invalid relay SPF include domain: $RELAY_SPF_INCLUDE"
+fi
+
+if [[ -n "$RELAY_USER" ]]; then
+    [[ -n "$RELAY_HOST" ]] || err "A relay username requires -r HOST"
+    [[ "$RELAY_USER" != *:* && "$RELAY_USER" != *[[:space:]]* ]] || \
+        err "Relay username must not contain a colon or whitespace"
+fi
+
+if [[ -n "$RELAY_PASSWORD_FILE" ]]; then
+    [[ -n "$RELAY_HOST" ]] || err "A relay password file requires -r HOST"
+    [[ -f "$RELAY_PASSWORD_FILE" && ! -L "$RELAY_PASSWORD_FILE" && -r "$RELAY_PASSWORD_FILE" ]] || \
+        err "Relay password file must be a readable regular file, not a symlink: $RELAY_PASSWORD_FILE"
+    PASSWORD_FILE_MODE=$(stat -c '%a' -- "$RELAY_PASSWORD_FILE") || \
+        err "Could not read relay password file mode"
+    (( (8#$PASSWORD_FILE_MODE & 8#077) == 0 )) || \
+        err "Relay password file must not be accessible by group or others: $RELAY_PASSWORD_FILE"
+    mapfile -t RELAY_PASSWORD_LINES < "$RELAY_PASSWORD_FILE"
+    (( ${#RELAY_PASSWORD_LINES[@]} == 1 )) && [[ -n "${RELAY_PASSWORD_LINES[0]}" ]] || \
+        err "Relay password file must contain exactly one non-empty line"
+    RELAY_PASS="${RELAY_PASSWORD_LINES[0]}"
+    [[ "$RELAY_PASS" =~ ^[[:graph:]]+$ ]] || \
+        err "Relay password must contain printable non-whitespace characters only"
+    unset RELAY_PASSWORD_LINES PASSWORD_FILE_MODE
+fi
+
+if [[ -n "$RELAY_USER" || -n "$RELAY_PASS" ]]; then
+    [[ -n "$RELAY_USER" && -n "$RELAY_PASS" ]] || \
+        err "Authenticated relay mode requires both -u USER and --relay-password-file FILE"
+fi
+
 readonly DOMAIN MAIL_HOSTNAME DKIM_SELECTOR ADMIN_EMAIL DRY_RUN
+readonly RELAY_HOST RELAY_PORT RELAY_USER RELAY_PASSWORD_FILE RELAY_SPF_INCLUDE
 readonly CERT_DIR="/etc/letsencrypt/live/$MAIL_HOSTNAME"
 readonly VMAIL_UID=5000
 readonly VMAIL_GID=5000
 readonly MAIL_DIR="/var/mail/vdomains"
 
-# Check TLS certificate
+# Check the certificate identity and key before changing mail services. Merely
+# checking for path existence can accept a certificate for the wrong host or a
+# mismatched private key, leaving submission/IMAP unavailable after restart.
 if [[ "$DRY_RUN" == false ]]; then
     if [[ ! -f "$CERT_DIR/fullchain.pem" || ! -f "$CERT_DIR/privkey.pem" ]]; then
         err "TLS certificate not found at $CERT_DIR/. Run certbot first or use --dry-run."
     fi
+    command -v openssl &>/dev/null || err "openssl is required to validate the TLS certificate"
+    openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkhost "$MAIL_HOSTNAME" &>/dev/null || \
+        err "TLS certificate does not cover $MAIL_HOSTNAME"
+    CERT_PUBLIC_KEY=$(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -pubkey | \
+        openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}') || \
+        err "Could not read the TLS certificate public key"
+    PRIVATE_PUBLIC_KEY=$(openssl pkey -in "$CERT_DIR/privkey.pem" -pubout -outform DER 2>/dev/null | \
+        sha256sum | awk '{print $1}') || err "Could not read the TLS private key"
+    [[ -n "$CERT_PUBLIC_KEY" && "$CERT_PUBLIC_KEY" == "$PRIVATE_PUBLIC_KEY" ]] || \
+        err "TLS certificate and private key do not match"
+    PRIVATE_KEY_MODE=$(stat -Lc '%a' -- "$CERT_DIR/privkey.pem") || \
+        err "Could not inspect TLS private key permissions"
+    (( (8#$PRIVATE_KEY_MODE & 8#077) == 0 )) || \
+        err "TLS private key must not be accessible by group or others"
+    PRIVATE_KEY_OWNER=$(stat -Lc '%u' -- "$CERT_DIR/privkey.pem") || \
+        err "Could not inspect TLS private key ownership"
+    [[ "$PRIVATE_KEY_OWNER" == 0 ]] || err "TLS private key must be owned by root"
+    unset CERT_PUBLIC_KEY PRIVATE_PUBLIC_KEY PRIVATE_KEY_MODE PRIVATE_KEY_OWNER
 else
     warn "Dry-run mode: skipping certificate checks and service starts"
 fi
@@ -172,70 +271,29 @@ backup_file() {
     fi
 }
 
-# --- Helper: build an AUR package from source under a throwaway user ---
-# $1 = package name
-# Clones the AUR repo, runs makepkg -si as _makepkg (never as root, never
-# relying on SUDO_USER/NOPASSWD), then cleans up the build user.
-install_from_aur() {
-    local pkg="$1"
-    local tmpdir builddir build_user="_makepkg"
-    tmpdir="$(mktemp -d)"
-    builddir="$tmpdir/$pkg"
-
-    git clone --depth=1 "https://aur.archlinux.org/${pkg}.git" "$builddir"
-
-    useradd -r -M -d /var/empty -s /usr/bin/nologin "$build_user" 2>/dev/null || true
-    chown -R "$build_user":"$build_user" "$tmpdir"
-
-    # Grant passwordless pacman -U/-S for the duration of this build
-    local sudoers="/etc/sudoers.d/99-${build_user}-postfix-sh"
-    printf '%s ALL=(root) NOPASSWD: /usr/bin/pacman\n' "$build_user" > "$sudoers"
-    chmod 440 "$sudoers"
-
-    ( cd "$builddir" && sudo -u "$build_user" makepkg -si --noconfirm )
-    local rc=$?
-
-    rm -f "$sudoers"
-    userdel "$build_user" 2>/dev/null || true
-    rm -rf "$tmpdir"
-
-    return $rc
-}
-
 # =============================================================================
 # 1. INSTALL PACKAGES
 # =============================================================================
 
 msg "Installing packages..."
 
-# Official repo packages
-for pkg in postfix dovecot redis clamav s-nail pigeonhole; do
-    if pacman -Qi "$pkg" &>/dev/null; then
-        info "$pkg is already installed"
-    else
-        pacman -S --noconfirm --needed "$pkg"
-        msg "$pkg installed"
-    fi
-done
+# All dependencies are signed packages from the official Arch repositories.
+# Do not reintroduce an AUR fallback here: a mail installer must not execute
+# third-party PKGBUILDs with a path to host-root package management. Refresh
+# and upgrade together because Arch does not support partial upgrades.
+pacman -Syu --noconfirm --needed \
+    postfix postfix-lmdb dovecot valkey clamav s-nail pigeonhole rspamd opendkim perl
 
-# rspamd (community, with AUR fallback)
-if pacman -Qi rspamd &>/dev/null; then
-    info "rspamd is already installed"
-elif pacman -Si rspamd &>/dev/null; then
-    pacman -S --noconfirm --needed rspamd
-    msg "rspamd installed"
-else
-    install_from_aur rspamd && msg "rspamd installed from AUR" \
-        || warn "Failed to install rspamd from AUR; install manually."
-fi
-
-# opendkim (AUR)
-if pacman -Qi opendkim &>/dev/null; then
-    info "opendkim is already installed"
-else
-    install_from_aur opendkim && msg "opendkim installed from AUR" \
-        || warn "Failed to install opendkim from AUR; install manually."
-fi
+command -v opendkim-genkey &>/dev/null || \
+    err "The signed opendkim package did not provide opendkim-genkey"
+command -v rspamd &>/dev/null || err "The signed rspamd package did not provide rspamd"
+postconf -m | grep -qxF lmdb || err "Postfix LMDB map support is unavailable"
+POSTFIX_VERSION=$(postconf -d -h mail_version)
+[[ "$POSTFIX_VERSION" =~ ^([0-9]+[.][0-9]+) ]] || \
+    err "Could not determine the packaged Postfix version"
+POSTFIX_COMPATIBILITY_LEVEL="${BASH_REMATCH[1]}"
+readonly POSTFIX_COMPATIBILITY_LEVEL
+unset POSTFIX_VERSION
 
 # =============================================================================
 # 2. STOP AND MASK COMPETING MTAs
@@ -288,6 +346,10 @@ find "$MAIL_DIR" -type d -exec chmod 0770 {} +
 # OpenDKIM directories
 mkdir -p /etc/opendkim/keys/"$DOMAIN"
 mkdir -p /run/opendkim
+# Keep the milter socket inside Postfix's private queue directory. The
+# opendkim service runs with postfix as its primary group, so it can create a
+# group-restricted socket without exposing a signing endpoint to other users.
+install -d -o postfix -g postfix -m 0770 /var/spool/postfix/private
 
 # Ensure postfix can access opendkim socket
 if getent group opendkim &>/dev/null; then
@@ -303,20 +365,65 @@ EOF
 msg "Mail directories created"
 
 # =============================================================================
-# 4. GENERATE DH PARAMETERS
+# 4. DOVECOT MAIL-ENCRYPTION KEYS
 # =============================================================================
 
-msg "Generating DH parameters..."
+msg "Configuring Dovecot mail-encryption keys..."
 
-# Postfix 3.6+ supplies its own 2048-bit FFDHE group by default, so no
-# smtpd_tls_dh*_param_file is needed. Dovecot still wants its own dh.pem.
-if [[ -f /etc/dovecot/dh.pem ]]; then
-    info "Dovecot DH params already exist, skipping"
+readonly MAIL_CRYPT_PRIVATE_KEY="/etc/dovecot/mail-crypt.key"
+readonly MAIL_CRYPT_PUBLIC_KEY="/etc/dovecot/mail-crypt.pub"
+
+if [[ -f "$MAIL_CRYPT_PRIVATE_KEY" ]]; then
+    openssl pkey -in "$MAIL_CRYPT_PRIVATE_KEY" -check -noout &>/dev/null || \
+        err "Existing Dovecot mail-encryption private key is invalid"
+    if [[ -f "$MAIL_CRYPT_PUBLIC_KEY" ]]; then
+        MAIL_CRYPT_PRIVATE_HASH=$(openssl pkey -in "$MAIL_CRYPT_PRIVATE_KEY" -pubout -outform DER 2>/dev/null | \
+            sha256sum | awk '{print $1}')
+        MAIL_CRYPT_PUBLIC_HASH=$(openssl pkey -pubin -in "$MAIL_CRYPT_PUBLIC_KEY" -outform DER 2>/dev/null | \
+            sha256sum | awk '{print $1}')
+        [[ -n "$MAIL_CRYPT_PRIVATE_HASH" && "$MAIL_CRYPT_PRIVATE_HASH" == "$MAIL_CRYPT_PUBLIC_HASH" ]] || \
+            err "Existing Dovecot mail-encryption public and private keys do not match"
+        unset MAIL_CRYPT_PRIVATE_HASH MAIL_CRYPT_PUBLIC_HASH
+    else
+        if ! (
+            umask 077 &&
+            mail_crypt_public_tmp=$(mktemp /etc/dovecot/.mail-crypt.pub.XXXXXX) &&
+            trap 'rm -f -- "$mail_crypt_public_tmp"' EXIT &&
+            openssl pkey -in "$MAIL_CRYPT_PRIVATE_KEY" -pubout -out "$mail_crypt_public_tmp" &&
+            install -o root -g root -m 0644 "$mail_crypt_public_tmp" "$MAIL_CRYPT_PUBLIC_KEY"
+        ); then
+            err "Could not derive the Dovecot mail-encryption public key"
+        fi
+    fi
+    chown root:vmail "$MAIL_CRYPT_PRIVATE_KEY"
+    chmod 0640 "$MAIL_CRYPT_PRIVATE_KEY"
+    chown root:root "$MAIL_CRYPT_PUBLIC_KEY"
+    chmod 0644 "$MAIL_CRYPT_PUBLIC_KEY"
+elif [[ -e "$MAIL_CRYPT_PUBLIC_KEY" ]]; then
+    err "Dovecot mail-encryption public key exists without its private key; restore the private key from backup"
 else
-    openssl dhparam -out /etc/dovecot/dh.pem 2048
-    chmod 644 /etc/dovecot/dh.pem
-    msg "Dovecot DH params generated (2048-bit)"
+    EXISTING_MAIL=$(find "$MAIL_DIR" -type f \( -path '*/cur/*' -o -path '*/new/*' \) -print -quit)
+    if [[ -n "$EXISTING_MAIL" ]]; then
+        err "Existing mail was found without a managed encryption key; migrate or back it up before enabling global mail encryption"
+    fi
+    unset EXISTING_MAIL
+    if ! (
+        umask 077 &&
+        mail_crypt_private_tmp=$(mktemp /etc/dovecot/.mail-crypt.key.XXXXXX) &&
+        trap 'rm -f -- "$mail_crypt_private_tmp"; if [[ -n "${mail_crypt_public_tmp:-}" ]]; then rm -f -- "$mail_crypt_public_tmp"; fi' EXIT &&
+        mail_crypt_public_tmp=$(mktemp /etc/dovecot/.mail-crypt.pub.XXXXXX) &&
+        openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:secp384r1 \
+            -out "$mail_crypt_private_tmp" &&
+        openssl pkey -in "$mail_crypt_private_tmp" -pubout -out "$mail_crypt_public_tmp" &&
+        install -o root -g vmail -m 0640 "$mail_crypt_private_tmp" "$MAIL_CRYPT_PRIVATE_KEY" &&
+        install -o root -g root -m 0644 "$mail_crypt_public_tmp" "$MAIL_CRYPT_PUBLIC_KEY"
+    ); then
+        err "Could not generate Dovecot mail-encryption keys"
+    fi
+    warn "Back up $MAIL_CRYPT_PRIVATE_KEY now; losing it makes encrypted mail unrecoverable."
 fi
+
+msg "Dovecot global EC mail encryption is ready"
 
 # =============================================================================
 # 5. POSTFIX main.cf
@@ -327,7 +434,7 @@ backup_file /etc/postfix/main.cf
 
 cat > /etc/postfix/main.cf <<EOF
 # =============================================================================
-# Postfix main.cf — ProtonMail-grade hardened MX server
+# Postfix main.cf — hardened MX server
 # Generated by AwesomeArchLinux/hardening/postfix/postfix.sh
 # =============================================================================
 
@@ -347,7 +454,7 @@ mynetworks = 127.0.0.0/8 [::1]/128
 # --- Virtual mailbox ---
 virtual_mailbox_domains = ${DOMAIN}
 virtual_mailbox_base = ${MAIL_DIR}
-virtual_mailbox_maps = hash:/etc/postfix/vmailbox
+virtual_mailbox_maps = lmdb:/etc/postfix/vmailbox
 virtual_minimum_uid = 1000
 virtual_uid_maps = static:${VMAIL_UID}
 virtual_gid_maps = static:${VMAIL_GID}
@@ -364,10 +471,9 @@ smtpd_tls_mandatory_ciphers = high
 smtpd_tls_mandatory_exclude_ciphers = aNULL, MD5, DES, 3DES, RC4, eNULL
 smtpd_tls_exclude_ciphers = aNULL, MD5, DES, 3DES, RC4, eNULL
 tls_high_cipherlist = ${TLS_CIPHERS}
-smtpd_tls_eecdh_grade = ultra
 smtpd_tls_loglevel = 1
 
-# --- TLS outbound (smtp) — DANE with fallback ---
+# --- TLS outbound (smtp) — DANE when usable TLSA records exist ---
 smtp_tls_security_level = dane
 smtp_dns_support_level = dnssec
 smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
@@ -391,10 +497,12 @@ postscreen_non_smtp_command_enable = yes
 postscreen_bare_newline_enable = yes
 
 # --- Milter integration (OpenDKIM + rspamd) ---
-milter_default_action = accept
+# Temporary failure keeps mail queued/retriable if a security filter is down;
+# accepting would silently bypass DKIM signing and spam/virus inspection.
+milter_default_action = tempfail
 milter_protocol = 6
-smtpd_milters = unix:/run/opendkim/opendkim.sock, inet:127.0.0.1:11332
-non_smtpd_milters = unix:/run/opendkim/opendkim.sock, inet:127.0.0.1:11332
+smtpd_milters = unix:private/opendkim.sock, inet:127.0.0.1:11332
+non_smtpd_milters = unix:private/opendkim.sock, inet:127.0.0.1:11332
 
 # --- SASL authentication (via Dovecot) ---
 smtpd_sasl_type = dovecot
@@ -416,7 +524,7 @@ smtpd_client_recipient_rate_limit = 50
 anvil_rate_time_unit = 60s
 
 # --- Misc ---
-compatibility_level = 3.9
+compatibility_level = ${POSTFIX_COMPATIBILITY_LEVEL}
 smtpd_banner = \$myhostname ESMTP
 disable_vrfy_command = yes
 message_size_limit = 26214400
@@ -426,8 +534,8 @@ biff = no
 append_dot_mydomain = no
 
 # --- Aliases ---
-alias_maps = hash:/etc/postfix/aliases
-alias_database = hash:/etc/postfix/aliases
+alias_maps = lmdb:/etc/postfix/aliases
+alias_database = lmdb:/etc/postfix/aliases
 EOF
 
 # Append relay config if specified
@@ -436,11 +544,15 @@ if [[ -n "$RELAY_HOST" ]]; then
 
 # --- Outbound relay (hybrid setup) ---
 relayhost = [${RELAY_HOST}]:${RELAY_PORT}
+EOF
+    if [[ -n "$RELAY_USER" && -n "$RELAY_PASS" ]]; then
+        cat >> /etc/postfix/main.cf <<'EOF'
 smtp_sasl_auth_enable = yes
-smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_password_maps = lmdb:/etc/postfix/sasl_passwd
 smtp_sasl_security_options = noanonymous
 smtp_sasl_tls_security_options = noanonymous
 EOF
+    fi
 fi
 
 msg "main.cf written"
@@ -454,7 +566,7 @@ backup_file /etc/postfix/master.cf
 
 cat > /etc/postfix/master.cf <<'EOF'
 # =============================================================================
-# Postfix master.cf — ProtonMail-grade service definitions
+# Postfix master.cf — hardened service definitions
 # Generated by AwesomeArchLinux/hardening/postfix/postfix.sh
 # =============================================================================
 
@@ -560,11 +672,17 @@ msg "Writing /etc/postfix/vmailbox..."
 # Create initial mailboxes
 cat > /etc/postfix/vmailbox <<EOF
 postmaster@${DOMAIN}    ${DOMAIN}/postmaster/Maildir/
-${ADMIN_EMAIL}          ${DOMAIN}/$(echo "$ADMIN_EMAIL" | cut -d@ -f1)/Maildir/
 EOF
+ADMIN_EMAIL_DOMAIN="${ADMIN_EMAIL##*@}"
+if [[ "$ADMIN_EMAIL_DOMAIN" == "$DOMAIN" && "$ADMIN_EMAIL" != "postmaster@$DOMAIN" ]]; then
+    printf '%s    %s/%s/Maildir/\n' \
+        "$ADMIN_EMAIL" "$DOMAIN" "${ADMIN_EMAIL%@*}" >> /etc/postfix/vmailbox
+fi
+unset ADMIN_EMAIL_DOMAIN
 
-postmap /etc/postfix/vmailbox
-chmod 644 /etc/postfix/vmailbox
+postmap lmdb:/etc/postfix/vmailbox
+chown root:root /etc/postfix/vmailbox /etc/postfix/vmailbox.lmdb
+chmod 0644 /etc/postfix/vmailbox /etc/postfix/vmailbox.lmdb
 
 msg "Virtual mailbox map created"
 
@@ -575,15 +693,42 @@ msg "Virtual mailbox map created"
 if [[ -n "$RELAY_HOST" && -n "$RELAY_USER" && -n "$RELAY_PASS" ]]; then
     msg "Writing SASL relay credentials..."
 
-    cat > /etc/postfix/sasl_passwd <<EOF
-[${RELAY_HOST}]:${RELAY_PORT} ${RELAY_USER}:${RELAY_PASS}
-EOF
-    postmap /etc/postfix/sasl_passwd
-    chmod 600 /etc/postfix/sasl_passwd
-    chmod 600 /etc/postfix/sasl_passwd.db
+    sasl_password_tmp=$(umask 077; mktemp /etc/postfix/.sasl_passwd.XXXXXX) || \
+        err "Could not create a temporary Postfix relay credential file"
+    cleanup_sasl_password_tmp() {
+        rm -f -- "$sasl_password_tmp" "${sasl_password_tmp}.lmdb"
+    }
+    trap cleanup_sasl_password_tmp EXIT
+    if ! printf '[%s]:%s %s:%s\n' \
+        "$RELAY_HOST" "$RELAY_PORT" "$RELAY_USER" "$RELAY_PASS" > "$sasl_password_tmp"; then
+        err "Could not write the temporary Postfix relay credential file"
+    fi
+    postmap "lmdb:$sasl_password_tmp" || err "Could not compile the Postfix relay credential map"
+    # Install the runtime database first so a failure never pairs a new
+    # plaintext source file with stale compiled credentials.
+    install -o root -g root -m 0600 \
+        "${sasl_password_tmp}.lmdb" /etc/postfix/sasl_passwd.lmdb || \
+        err "Could not install the Postfix relay credential database"
+    install -o root -g root -m 0600 \
+        "$sasl_password_tmp" /etc/postfix/sasl_passwd || \
+        err "Could not install the Postfix relay credential source"
+    # Remove the legacy hash map if this host was configured by an older
+    # version of the installer; Postfix now reads only the LMDB map.
+    rm -f /etc/postfix/sasl_passwd.db
+    cleanup_sasl_password_tmp
+    trap - EXIT
+    unset -f cleanup_sasl_password_tmp
+    unset sasl_password_tmp
+    unset RELAY_PASS
     msg "SASL relay credentials configured"
-elif [[ -n "$RELAY_HOST" ]]; then
-    warn "Relay host set but no credentials provided (-u/-p). Relay may reject mail."
+else
+    # The generated main.cf no longer references a credential map. Do not
+    # retain a password from an earlier authenticated-relay configuration.
+    rm -f /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.lmdb \
+        /etc/postfix/sasl_passwd.db
+    if [[ -n "$RELAY_HOST" ]]; then
+        warn "Relay host set without credentials; this is valid only for an IP-authorized relay."
+    fi
 fi
 
 # =============================================================================
@@ -600,7 +745,9 @@ postmaster: root
 root: ${ADMIN_EMAIL}
 EOF
 
-postalias /etc/postfix/aliases
+postalias lmdb:/etc/postfix/aliases
+chown root:root /etc/postfix/aliases /etc/postfix/aliases.lmdb
+chmod 0644 /etc/postfix/aliases /etc/postfix/aliases.lmdb
 msg "Aliases configured (root → $ADMIN_EMAIL)"
 
 # =============================================================================
@@ -610,9 +757,7 @@ msg "Aliases configured (root → $ADMIN_EMAIL)"
 msg "Configuring OpenDKIM..."
 
 if ! command -v opendkim-genkey &>/dev/null; then
-    warn "opendkim not installed — skipping DKIM configuration"
-    warn "Install from AUR (yay -S opendkim), then re-run this script"
-    DKIM_CONFIGURED=false
+    err "The signed opendkim package installed without opendkim-genkey; refusing a mail setup without DKIM"
 else
     DKIM_CONFIGURED=true
 
@@ -650,10 +795,12 @@ SigningTable        refile:/etc/opendkim/SigningTable
 ExternalIgnoreList  /etc/opendkim/TrustedHosts
 InternalHosts       /etc/opendkim/TrustedHosts
 
-Socket              local:/run/opendkim/opendkim.sock
+Socket              local:/var/spool/postfix/private/opendkim.sock
 PidFile             /run/opendkim/opendkim.pid
 UMask               007
-UserID              opendkim:opendkim
+# Match the systemd service's primary group so the 0660 milter socket is
+# reachable by Postfix without making it world-accessible.
+UserID              opendkim:postfix
 
 # Prevent header injection attacks (ProtonMail oversigns From)
 OversignHeaders     From
@@ -679,6 +826,8 @@ EOF
 
     chown -R opendkim:opendkim /etc/opendkim
     chmod 600 "$DKIM_KEY_DIR/$DKIM_SELECTOR.private"
+    opendkim -n -x /etc/opendkim/opendkim.conf || \
+        err "Generated OpenDKIM configuration is invalid"
 
     msg "OpenDKIM configured"
 fi
@@ -689,80 +838,77 @@ fi
 
 msg "Configuring Dovecot..."
 
-# Main config
+# Dovecot 2.4 deliberately rejects 2.3-era settings. Keep a single complete
+# configuration so package-provided snippets cannot silently re-enable a
+# plaintext listener or a different authentication backend.
 backup_file /etc/dovecot/dovecot.conf
-cat > /etc/dovecot/dovecot.conf <<'EOF'
+cat > /etc/dovecot/dovecot.conf <<EOF
 # =============================================================================
-# Dovecot configuration — ProtonMail-grade IMAP
+# Dovecot 2.4 configuration — TLS-only IMAP, LMTP, Sieve, mail encryption
 # Generated by AwesomeArchLinux/hardening/postfix/postfix.sh
 # =============================================================================
 
-protocols = imap lmtp sieve
+dovecot_config_version = 2.4.0
+dovecot_storage_version = 2.4.0
+
+protocols {
+  imap = yes
+  lmtp = yes
+}
 listen = *, ::
 login_greeting = Dovecot ready.
 
-# Disable plaintext auth on non-TLS connections
-disable_plaintext_auth = yes
+# PLAIN/LOGIN are permitted only inside TLS.
+auth_allow_cleartext = no
+auth_mechanisms = plain login
 
-# Include conf.d configs
-!include conf.d/*.conf
-EOF
-
-mkdir -p /etc/dovecot/conf.d
-
-# 10-ssl.conf — TLS hardening
-cat > /etc/dovecot/conf.d/10-ssl.conf <<EOF
-ssl = required
-ssl_cert = <${CERT_DIR}/fullchain.pem
-ssl_key = <${CERT_DIR}/privkey.pem
-ssl_min_protocol = TLSv1.2
-ssl_cipher_list = ${TLS_CIPHERS}
-ssl_prefer_server_ciphers = yes
-ssl_dh = </etc/dovecot/dh.pem
-EOF
-
-# 10-mail.conf — Mail storage
-#
-# NOTE on encryption-at-rest:
-#   mail_crypt only encrypts when per-user keypairs exist. Loading the plugin
-#   alone is a no-op. After creating a Dovecot user, run:
-#     doveadm -o plugin/mail_crypt_private_password=<pw> \\
-#             mailbox cryptokey generate -u user@${DOMAIN} -U
-#   (Or set mail_crypt_global_private_key / _public_key below to sign all
-#   mail with one shared keypair — simpler, weaker isolation.)
-cat > /etc/dovecot/conf.d/10-mail.conf <<EOF
-mail_location = maildir:${MAIL_DIR}/%d/%n/Maildir
+# Maildir storage under a single unprivileged vmail account.
+mail_home = ${MAIL_DIR}/%{user | domain}/%{user | username}
+mail_driver = maildir
+mail_path = ~/Maildir
 mail_uid = ${VMAIL_UID}
 mail_gid = ${VMAIL_GID}
-mail_privileged_group = vmail
 first_valid_uid = ${VMAIL_UID}
 last_valid_uid = ${VMAIL_UID}
 
-# Encryption at rest — requires per-user key generation to actually encrypt.
-mail_plugins = \$mail_plugins mail_crypt
-plugin {
-  mail_crypt_curve = secp521r1
-  mail_crypt_save_version = 2
+namespace inbox {
+  inbox = yes
+  separator = /
 }
-EOF
 
-# 10-auth.conf — Authentication
-cat > /etc/dovecot/conf.d/10-auth.conf <<'EOF'
-auth_mechanisms = plain login
-disable_plaintext_auth = yes
-
-passdb {
-  driver = passwd-file
-  args = scheme=BLF-CRYPT /etc/dovecot/users
+# Encrypt every newly written message with the managed global EC keypair.
+mail_plugins {
+  mail_crypt = yes
 }
-userdb {
-  driver = static
-  args = uid=vmail gid=vmail home=/var/mail/vdomains/%d/%n
+crypt_global_public_key_file = ${MAIL_CRYPT_PUBLIC_KEY}
+crypt_global_private_key main {
+  crypt_private_key_file = ${MAIL_CRYPT_PRIVATE_KEY}
 }
-EOF
 
-# 10-master.conf — Service sockets
-cat > /etc/dovecot/conf.d/10-master.conf <<'EOF'
+# TLS-only IMAP. TLS 1.3 suites remain restricted to AEAD algorithms.
+ssl = required
+ssl_min_protocol = TLSv1.2
+ssl_cipher_list = ${TLS_CIPHERS}
+ssl_cipher_suites = TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
+ssl_server {
+  cert_file = ${CERT_DIR}/fullchain.pem
+  key_file = ${CERT_DIR}/privkey.pem
+  prefer_ciphers = server
+}
+
+# The passwd-file is the source of truth for login and LMTP recipient checks.
+passdb passwd-file {
+  default_password_scheme = BLF-CRYPT
+  passwd_file_path = /etc/dovecot/users
+}
+userdb static {
+  fields {
+    uid = ${VMAIL_UID}
+    gid = ${VMAIL_GID}
+    home = ${MAIL_DIR}/%{user | domain}/%{user | username}
+  }
+}
+
 # LMTP delivery socket (inside Postfix chroot)
 service lmtp {
   unix_listener /var/spool/postfix/private/dovecot-lmtp {
@@ -781,10 +927,9 @@ service auth {
   }
 }
 
-# IMAP login
+# Disable unencrypted IMAP (143); expose implicit-TLS IMAP only.
 service imap-login {
   inet_listener imap {
-    # Disable unencrypted IMAP (port 143)
     port = 0
   }
   inet_listener imaps {
@@ -792,29 +937,26 @@ service imap-login {
     ssl = yes
   }
 }
-EOF
 
-# 20-lmtp.conf
-cat > /etc/dovecot/conf.d/20-lmtp.conf <<'EOF'
 protocol lmtp {
-  mail_plugins = $mail_plugins sieve
-  postmaster_address = postmaster@%d
+  mail_plugins {
+    sieve = yes
+  }
+  postmaster_address = postmaster@${DOMAIN}
 }
-EOF
-
-# 20-imap.conf
-cat > /etc/dovecot/conf.d/20-imap.conf <<'EOF'
 protocol imap {
-  mail_plugins = $mail_plugins imap_sieve
   mail_max_userip_connections = 20
 }
-EOF
 
-# 90-sieve.conf — Server-side filtering
-cat > /etc/dovecot/conf.d/90-sieve.conf <<EOF
-plugin {
-  sieve = file:~/sieve;active=~/.dovecot.sieve
-  sieve_before = ${MAIL_DIR}/sieve-before/
+# Personal Sieve scripts and a mandatory administrator script that files spam.
+sieve_script personal {
+  type = personal
+  path = ~/sieve
+  active_path = ~/.dovecot.sieve
+}
+sieve_script spam-before {
+  type = before
+  path = ${MAIL_DIR}/sieve-before/spam-to-junk.sieve
 }
 EOF
 
@@ -828,20 +970,21 @@ if header :contains "X-Spam" "Yes" {
 EOF
 chown vmail:vmail "$MAIL_DIR/sieve-before/spam-to-junk.sieve"
 
-# Compile sieve script
-if command -v sievec &>/dev/null; then
-    sievec "$MAIL_DIR/sieve-before/spam-to-junk.sieve" || true
-    chown vmail:vmail "$MAIL_DIR/sieve-before/spam-to-junk.svbin" 2>/dev/null || true
-fi
+# Compile the script against the generated Dovecot configuration. A failure is
+# fatal because silently skipping it changes mail-delivery behavior.
+sievec "$MAIL_DIR/sieve-before/spam-to-junk.sieve"
+chown vmail:vmail "$MAIL_DIR/sieve-before/spam-to-junk.svbin"
 
 # Create empty users file if not present
 if [[ ! -f /etc/dovecot/users ]]; then
     touch /etc/dovecot/users
-    chmod 600 /etc/dovecot/users
-    chown root:root /etc/dovecot/users
     warn "Dovecot users file created empty. Add users with:"
     warn "  doveadm pw -s BLF-CRYPT | xargs -I{} echo 'user@$DOMAIN:{}' >> /etc/dovecot/users"
 fi
+chmod 0600 /etc/dovecot/users
+chown root:root /etc/dovecot/users
+
+doveconf -n &>/dev/null || err "Generated Dovecot 2.4 configuration is invalid"
 
 msg "Dovecot configured"
 
@@ -867,6 +1010,12 @@ upstream "local" {
 }
 EOF
 
+    # The packaged 8-second task timeout is shorter than ARC plus the other
+    # enabled checks; allow checks to finish instead of silently terminating.
+    cat > /etc/rspamd/local.d/options.inc <<'EOF'
+task_timeout = 30s;
+EOF
+
     # Actions (scoring thresholds)
     cat > /etc/rspamd/local.d/actions.conf <<'EOF'
 reject = 15;
@@ -876,10 +1025,17 @@ EOF
 
     # Milter headers
     cat > /etc/rspamd/local.d/milter_headers.conf <<'EOF'
-use = ["x-spam-status", "x-spam-flag", "authentication-results"];
+use = ["x-spam-status", "spam-header", "authentication-results"];
+routines {
+  spam-header {
+    header = "X-Spam";
+    value = "Yes";
+    remove = 0;
+  }
+}
 EOF
 
-    # Redis backend
+    # Valkey backend (Rspamd retains the redis.conf/module name)
     cat > /etc/rspamd/local.d/redis.conf <<'EOF'
 servers = "127.0.0.1";
 EOF
@@ -892,33 +1048,30 @@ EOF
 
     # DMARC
     cat > /etc/rspamd/local.d/dmarc.conf <<EOF
-reporting = true;
 actions = {
   quarantine = "add_header";
   reject = "reject";
 }
-send_reports = true;
-report_settings {
+reporting {
+  enabled = true;
   org_name = "${DOMAIN}";
   email = "dmarc-reports@${DOMAIN}";
+  domain = "${DOMAIN}";
 }
 EOF
 
-    # ARC signing — rspamd runs as _rspamd and cannot read the OpenDKIM
+    # ARC signing — rspamd runs as its dedicated user and cannot read the OpenDKIM
     # private key (mode 0600, owned opendkim:opendkim). Stage a copy that
-    # _rspamd owns so ARC signing actually succeeds at runtime.
+    # the rspamd service account owns so ARC signing succeeds at runtime.
     if [[ "$DKIM_CONFIGURED" == true ]]; then
         RSPAMD_ARC_KEY="/var/lib/rspamd/arc-${DKIM_SELECTOR}.key"
-        if getent passwd _rspamd &>/dev/null; then
-            install -d -o _rspamd -g _rspamd -m 0750 /var/lib/rspamd
-            install -o _rspamd -g _rspamd -m 0600 \
+        if getent passwd rspamd &>/dev/null; then
+            install -d -o rspamd -g rspamd -m 0750 /var/lib/rspamd
+            install -o rspamd -g rspamd -m 0600 \
                 "/etc/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.private" \
                 "$RSPAMD_ARC_KEY"
         else
-            mkdir -p /var/lib/rspamd
-            cp "/etc/opendkim/keys/${DOMAIN}/${DKIM_SELECTOR}.private" "$RSPAMD_ARC_KEY"
-            chmod 0600 "$RSPAMD_ARC_KEY"
-            warn "_rspamd user not found yet; ARC key ownership may need fixing after rspamd install"
+            err "The signed rspamd package did not create its rspamd service account"
         fi
 
         cat > /etc/rspamd/local.d/arc.conf <<EOF
@@ -974,7 +1127,7 @@ rates {
 }
 EOF
 
-    # Bayes classifier with Redis
+    # Bayes classifier with Valkey's Redis-compatible protocol
     cat > /etc/rspamd/local.d/classifier-bayes.conf <<'EOF'
 backend = "redis";
 autolearn = true;
@@ -1034,15 +1187,25 @@ fi
 mkdir -p /var/log/clamav
 chown clamav:clamav /var/log/clamav
 
-# Download initial virus definitions if missing
-if [[ ! -f /var/lib/clamav/main.cvd && ! -f /var/lib/clamav/main.cld ]]; then
+clamav_database_ready() {
+    [[ -e /var/lib/clamav/main.cvd || -e /var/lib/clamav/main.cld || \
+       -e /var/lib/clamav/main.inc ]] &&
+        [[ -e /var/lib/clamav/daily.cvd || -e /var/lib/clamav/daily.cld || \
+           -e /var/lib/clamav/daily.inc ]]
+}
+
+# Download initial virus definitions if either required database is missing.
+if ! clamav_database_ready; then
     if [[ "$DRY_RUN" == false ]]; then
         info "Downloading ClamAV virus definitions (this may take a few minutes)..."
-        freshclam || warn "freshclam failed — virus definitions may be stale"
+        freshclam || err "freshclam failed; refusing to claim antivirus coverage without current definitions"
+        clamav_database_ready || \
+            err "freshclam completed without installing the required main and daily databases"
     else
         info "Dry-run: skipping freshclam database download"
     fi
 fi
+unset -f clamav_database_ready
 
 msg "ClamAV configured"
 
@@ -1111,6 +1274,9 @@ if [[ "$DKIM_CONFIGURED" == true ]]; then
     mkdir -p /etc/systemd/system/opendkim.service.d
     cat > /etc/systemd/system/opendkim.service.d/hardening.conf <<'EOF'
 [Service]
+# The socket is mode 0660; using Postfix as the primary group lets smtpd reach
+# it while the daemon continues to run as the unprivileged opendkim user.
+Group=postfix
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -1130,7 +1296,7 @@ DevicePolicy=closed
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-ReadWritePaths=/run/opendkim
+ReadWritePaths=/run/opendkim /var/spool/postfix/private
 CapabilityBoundingSet=
 EOF
 fi
@@ -1175,7 +1341,9 @@ msg "Adding firewall rules for mail ports..."
 
 MAIL_PORTS=(25 465 587 993)
 
-if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
+if [[ "$DRY_RUN" == true ]]; then
+    info "Dry-run: skipping live firewall changes"
+elif command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
     {
         for port in "${MAIL_PORTS[@]}"; do
             printf 'insert rule inet filter input ct state new tcp dport %s accept comment "awesome-postfix-%s"\n' \
@@ -1189,7 +1357,8 @@ if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; t
             comment "awesome-postfix-$port"
     done
     msg "nftables rules added for ports ${MAIL_PORTS[*]} without replacing the live ruleset"
-elif command -v iptables &>/dev/null; then
+elif command -v iptables &>/dev/null && command -v ip6tables &>/dev/null && \
+    iptables -L INPUT -n &>/dev/null && ip6tables -L INPUT -n &>/dev/null; then
     for port in "${MAIL_PORTS[@]}"; do
         # Only insert if the rule isn't already present, avoiding duplicates on rerun.
         iptables  -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
@@ -1209,41 +1378,45 @@ fi
 if [[ "$DRY_RUN" == true ]]; then
     msg "Dry-run: validating configs without starting services..."
 
-    postfix check && msg "Postfix config is valid" || warn "Postfix config has errors"
-
-    if command -v dovecot &>/dev/null; then
-        dovecot -n &>/dev/null && msg "Dovecot config is valid" || warn "Dovecot config has errors"
-    fi
+    postfix check && msg "Postfix config is valid" || err "Postfix config has errors"
+    doveconf -n &>/dev/null && msg "Dovecot config is valid" || err "Dovecot config has errors"
+    rspamadm configtest && msg "rspamd config is valid" || err "rspamd config has errors"
 
     info "Use --dry-run to review, then re-run without it to start services"
 else
     msg "Starting services in dependency order..."
 
-    # 1. Redis
-    systemctl enable --now redis
-    systemctl is-active --quiet redis && msg "redis is running" || warn "redis failed to start"
+    # 1. Valkey (Redis-compatible rspamd backend)
+    systemctl enable --now valkey
+    systemctl is-active --quiet valkey && msg "valkey is running" || \
+        err "valkey failed after startup; rspamd persistence is unavailable"
 
     # 2. ClamAV
-    systemctl enable clamav-freshclam
-    systemctl enable clamav-daemon
-    systemctl start clamav-freshclam || warn "clamav-freshclam failed to start"
-    systemctl start clamav-daemon || warn "clamav-daemon failed to start (virus defs may still be downloading)"
+    systemctl enable --now clamav-freshclam
+    systemctl is-active --quiet clamav-freshclam || \
+        err "clamav-freshclam failed after startup; virus definitions will not stay current"
+    systemctl enable --now clamav-daemon
+    systemctl is-active --quiet clamav-daemon || \
+        err "clamav-daemon failed after startup; refusing to leave antivirus scanning unavailable"
 
     # 3. OpenDKIM
     if [[ "$DKIM_CONFIGURED" == true ]]; then
         systemctl enable --now opendkim
-        systemctl is-active --quiet opendkim && msg "opendkim is running" || warn "opendkim failed to start"
+        systemctl is-active --quiet opendkim && msg "opendkim is running" || \
+            err "opendkim failed after startup; refusing to leave outbound mail unsigned"
     fi
 
     # 4. rspamd
     if command -v rspamd &>/dev/null; then
         systemctl enable --now rspamd
-        systemctl is-active --quiet rspamd && msg "rspamd is running" || warn "rspamd failed to start"
+        systemctl is-active --quiet rspamd && msg "rspamd is running" || \
+            err "rspamd failed after startup; refusing to leave mail filtering unavailable"
     fi
 
     # 5. Dovecot
     systemctl enable --now dovecot
-    systemctl is-active --quiet dovecot && msg "dovecot is running" || warn "dovecot failed to start"
+    systemctl is-active --quiet dovecot && msg "dovecot is running" || \
+        err "dovecot failed after startup; refusing an incomplete mail service"
 
     # 6. Postfix
     systemctl enable postfix
@@ -1271,12 +1444,16 @@ echo
 
 # SPF record
 echo -e "${C_GREEN}--- SPF Record ---${C_NC}"
-if [[ -n "$RELAY_HOST" ]]; then
-    echo "${DOMAIN}.    IN TXT   \"v=spf1 mx a:${MAIL_HOSTNAME} include:${RELAY_HOST} -all\""
+if [[ -n "$RELAY_SPF_INCLUDE" ]]; then
+    echo "${DOMAIN}.    IN TXT   \"v=spf1 mx a:${MAIL_HOSTNAME} include:${RELAY_SPF_INCLUDE} -all\""
 else
     echo "${DOMAIN}.    IN TXT   \"v=spf1 mx a:${MAIL_HOSTNAME} -all\""
 fi
 echo
+if [[ -n "$RELAY_HOST" && -z "$RELAY_SPF_INCLUDE" ]]; then
+    echo -e "${C_YELLOW}NOTE: No relay SPF include was supplied. Add your provider's documented include before publishing this record.${C_NC}"
+    echo
+fi
 
 # DKIM record
 if [[ "$DKIM_CONFIGURED" == true ]] && [[ -f "/etc/opendkim/keys/$DOMAIN/$DKIM_SELECTOR.txt" ]]; then
@@ -1338,7 +1515,7 @@ echo
 
 echo
 echo -e "${C_GREEN}========================================================================${C_NC}"
-echo -e "${C_GREEN} ProtonMail-grade mail server configuration complete!${C_NC}"
+echo -e "${C_GREEN} Hardened mail server configuration complete!${C_NC}"
 echo -e "${C_GREEN}========================================================================${C_NC}"
 echo
 
@@ -1348,7 +1525,8 @@ echo "  Postfix master.cf:      /etc/postfix/master.cf"
 echo "  Header checks:          /etc/postfix/header_checks_submission"
 echo "  Virtual mailboxes:      /etc/postfix/vmailbox"
 echo "  Aliases:                /etc/postfix/aliases"
-echo "  Dovecot:                /etc/dovecot/dovecot.conf + conf.d/"
+echo "  Dovecot:                /etc/dovecot/dovecot.conf"
+echo "  Mail encryption key:    $MAIL_CRYPT_PRIVATE_KEY (back this up)"
 echo "  Dovecot users:          /etc/dovecot/users"
 echo "  OpenDKIM:               /etc/opendkim/opendkim.conf"
 echo "  rspamd:                 /etc/rspamd/local.d/"
@@ -1357,8 +1535,8 @@ echo "  systemd overrides:      /etc/systemd/system/{postfix,dovecot,opendkim,rs
 echo
 
 echo -e "${C_BLUE}Security features:${C_NC}"
-echo "  TLS:                    1.2+ only, ECDHE/AEAD ciphers (ProtonMail-grade)"
-echo "  Outbound TLS:           DANE with DNSSEC (falls back to encrypt)"
+echo "  TLS:                    1.2+ only, ECDHE/AEAD ciphers"
+echo "  Outbound TLS:           DANE with valid TLSA; opportunistic otherwise"
 echo "  SMTP smuggling:         Protected (smtpd_forbid_bare_newline)"
 echo "  Postscreen:             DNSBL + deep protocol tests"
 echo "  DKIM:                   RSA 2048, OversignHeaders From"
@@ -1367,10 +1545,10 @@ echo "  Spam filtering:         rspamd with Bayes + phishing detection"
 echo "  Antivirus:              ClamAV via rspamd"
 echo "  Rate limiting:          Postfix + rspamd (dual layer)"
 echo "  Header privacy:         Internal headers stripped on submission"
-echo "  Encryption at rest:     Dovecot mail_crypt (secp521r1)"
+echo "  Encryption at rest:     Dovecot mail_crypt (global EC P-384 key)"
 echo "  IMAP:                   TLS-only (port 143 disabled)"
 echo "  VRFY:                   Disabled"
-echo "  systemd:                All services hardened"
+echo "  systemd:                Core mail daemons hardened"
 echo
 
 echo -e "${C_YELLOW}IMPORTANT — Next steps:${C_NC}"
@@ -1380,14 +1558,11 @@ echo "       doveadm pw -s BLF-CRYPT"
 echo "       echo 'user@${DOMAIN}:{BLF-CRYPT}hash' >> /etc/dovecot/users"
 echo "  3. Add virtual mailboxes:"
 echo "       echo 'user@${DOMAIN} ${DOMAIN}/user/Maildir/' >> /etc/postfix/vmailbox"
-echo "       postmap /etc/postfix/vmailbox"
+echo "       postmap lmdb:/etc/postfix/vmailbox"
 echo "  4. Set PTR record to ${MAIL_HOSTNAME}"
 echo "  5. Upgrade DMARC to p=reject after 2-4 weeks"
 echo "  6. Set up MTA-STS policy file at https://mta-sts.${DOMAIN}/.well-known/mta-sts.txt"
 echo "  7. ClamAV uses ~1GB RAM — monitor with: systemctl status clamav-daemon"
-if [[ -n "${DKIM_CONFIGURED:-}" && "$DKIM_CONFIGURED" == false ]]; then
-    echo "  8. Install opendkim from AUR and re-run this script for DKIM signing"
-fi
 echo
 
 echo -e "${C_BLUE}Verification commands:${C_NC}"

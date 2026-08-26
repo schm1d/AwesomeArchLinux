@@ -1,6 +1,6 @@
-# ProtonMail-Grade Hardened Mail Server
+# Hardened Mail Server
 
-Installs and configures a full **ProtonMail-grade hardened mail server** on Arch Linux with [Postfix](https://www.postfix.org/), [Dovecot](https://www.dovecot.org/), [OpenDKIM](http://www.opendkim.org/), [rspamd](https://rspamd.com/), and [ClamAV](https://www.clamav.net/).
+Installs and configures a full hardened mail server on Arch Linux with [Postfix](https://www.postfix.org/), [Dovecot](https://www.dovecot.org/), [OpenDKIM](http://www.opendkim.org/), [rspamd](https://rspamd.com/), [Valkey](https://valkey.io/), and [ClamAV](https://www.clamav.net/).
 
 ## Quick Start
 
@@ -12,16 +12,20 @@ sudo ./postfix.sh -d example.com
 sudo ./postfix.sh -d example.com --dry-run
 
 # With custom hostname and outbound relay
-sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apikey -p 'SG.xxxx'
+install -m 600 /dev/null /root/.smtp-relay-password
+printf '%s\n' 'SG.xxxx' > /root/.smtp-relay-password
+sudo ./postfix.sh -d example.com -H mx1.example.com \
+  -r smtp.sendgrid.net -u apikey \
+  --relay-password-file /root/.smtp-relay-password \
+  --relay-spf-include sendgrid.net
 ```
 
 ### Prerequisites
 
 1. **Arch Linux** with root access
 2. **TLS certificate** for the mail hostname (e.g., via certbot/nginx.sh)
-3. **AUR helper** (yay or paru) for `opendkim`
-4. **DNS control** over your domain
-5. **DNSSEC** on your domain (required for DANE)
+3. **DNS control** over your domain
+4. **DNSSEC** on your domain (required for DANE)
 
 ### Options
 
@@ -33,7 +37,8 @@ sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apik
 | `-r HOST` | SMTP relay for outbound (hybrid) | |
 | `-R PORT` | SMTP relay port | `587` |
 | `-u USER` | SMTP relay username | |
-| `-p PASS` | SMTP relay password | |
+| `--relay-password-file FILE` | Read the SMTP relay password from a private, non-symlink file | |
+| `--relay-spf-include DOMAIN` | Provider-published SPF include domain | |
 | `-e EMAIL` | Admin email address | `postmaster@$DOMAIN` |
 | `--dry-run` | Write configs, validate, don't start services | |
 | `-h` | Show help | |
@@ -79,9 +84,9 @@ sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apik
 
 - `postfix` — MTA (Mail Transfer Agent)
 - `dovecot` + `pigeonhole` — IMAP server with Sieve filtering
-- `opendkim` — DKIM signing and verification (AUR)
+- `opendkim` — DKIM signing and verification (signed official repository package)
 - `rspamd` — Spam filtering, SPF/DKIM/DMARC/ARC, phishing, rate limiting
-- `redis` — Backend for rspamd Bayes classifier and rate limiting
+- `valkey` — Redis-compatible backend for rspamd Bayes classification and rate limiting
 - `clamav` — Antivirus scanning via rspamd
 - `s-nail` — CLI mail client for testing
 
@@ -90,8 +95,8 @@ sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apik
 | Feature | Setting | Purpose |
 |---------|---------|---------|
 | **Full MX** | `inet_interfaces = all` | Accept inbound + outbound |
-| **TLS 1.2+** | ECDHE/AEAD-only cipher suite | ProtonMail-grade encryption |
-| **DANE** | `smtp_tls_security_level = dane` | DNSSEC-verified outbound TLS |
+| **TLS 1.2+** | ECDHE/AEAD-only cipher suite | Removes legacy protocols and ciphers |
+| **DANE** | `smtp_tls_security_level = dane` | DNSSEC-verified TLS when usable TLSA records exist; opportunistic otherwise |
 | **Postscreen** | DNSBL + protocol tests | Block bots before smtpd |
 | **SMTP smuggling** | `smtpd_forbid_bare_newline` | CVE-2023-51764 protection |
 | **Virtual mailbox** | LMTP to Dovecot | No system user per mailbox |
@@ -108,7 +113,7 @@ sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apik
 |---------|--------|
 | **IMAP only** | POP3 disabled, port 143 disabled |
 | **TLS required** | Same ECDHE/AEAD cipher suite as Postfix |
-| **Encryption at rest** | `mail_crypt` plugin with secp521r1 |
+| **Encryption at rest** | `mail_crypt` with a managed global EC P-384 keypair |
 | **LMTP delivery** | Socket inside Postfix chroot |
 | **SASL auth** | Dovecot provides auth to Postfix |
 | **Sieve** | Server-side filtering, auto Junk folder |
@@ -127,7 +132,7 @@ sudo ./postfix.sh -d example.com -H mx1.example.com -r smtp.sendgrid.net -u apik
 - **DKIM** verification
 - **DMARC** policy enforcement with reporting
 - **ARC** signing and sealing
-- **Bayes** spam classifier (Redis backend, autolearn)
+- **Bayes** spam classifier (Valkey backend, autolearn)
 - **Phishing** detection (OpenPhish + PhishTank)
 - **Rate limiting** (per-recipient and per-sender)
 - **ClamAV** integration (reject on virus)
@@ -171,15 +176,18 @@ echo 'user@example.com:{BLF-CRYPT}$2y$05$...' >> /etc/dovecot/users
 
 # Add mailbox mapping
 echo 'user@example.com example.com/user/Maildir/' >> /etc/postfix/vmailbox
-postmap /etc/postfix/vmailbox
+postmap lmdb:/etc/postfix/vmailbox
 
 # Restart Dovecot to pick up new user
 systemctl restart dovecot
 ```
 
+Back up `/etc/dovecot/mail-crypt.key` separately and securely. It is the global private key used to decrypt stored mail; losing it makes encrypted messages unrecoverable. The installer refuses to generate a new key over an existing Maildir.
+
 ### Add DNS Records
 
 Add all records output by the script to your DNS provider. Wait for propagation before sending production mail.
+When using an outbound relay, pass the SPF include domain published by that provider with `--relay-spf-include`; it is not necessarily the same as the relay server hostname.
 
 ### Upgrade DMARC Policy
 
@@ -303,8 +311,8 @@ ss -tlnp | grep 11332
 # View rspamd web UI (if enabled)
 # Default: http://localhost:11334
 
-# Check Redis
-redis-cli ping
+# Check Valkey
+valkey-cli ping
 ```
 
 ### ClamAV memory usage
@@ -329,46 +337,17 @@ systemctl restart rspamd
 | `/etc/postfix/main.cf` | Main Postfix config (full MX) |
 | `/etc/postfix/master.cf` | Service definitions (postscreen, submission, smtps) |
 | `/etc/postfix/header_checks_submission` | Header stripping for submission |
-| `/etc/postfix/vmailbox` | Virtual mailbox mapping |
-| `/etc/postfix/aliases` | System mail aliases |
-| `/etc/postfix/dh2048.pem` | DH parameters for Postfix TLS |
-| `/etc/postfix/sasl_passwd` | Relay credentials (if relay configured) |
-| `/etc/dovecot/dovecot.conf` | Main Dovecot config |
-| `/etc/dovecot/conf.d/10-ssl.conf` | TLS hardening |
-| `/etc/dovecot/conf.d/10-mail.conf` | Mail storage + encryption at rest |
-| `/etc/dovecot/conf.d/10-auth.conf` | Authentication config |
-| `/etc/dovecot/conf.d/10-master.conf` | LMTP + auth sockets |
-| `/etc/dovecot/conf.d/20-lmtp.conf` | LMTP protocol config |
-| `/etc/dovecot/conf.d/20-imap.conf` | IMAP protocol config |
-| `/etc/dovecot/conf.d/90-sieve.conf` | Sieve filtering |
+| `/etc/postfix/vmailbox{,.lmdb}` | Virtual mailbox source and compiled LMDB map |
+| `/etc/postfix/aliases{,.lmdb}` | System alias source and compiled LMDB map |
+| `/etc/postfix/sasl_passwd{,.lmdb}` | Relay credential source and compiled LMDB map (if configured) |
+| `/etc/dovecot/dovecot.conf` | Complete Dovecot 2.4 config: TLS, auth, LMTP, Sieve, and encrypted Maildir |
 | `/etc/dovecot/users` | Virtual user credentials |
-| `/etc/dovecot/dh.pem` | DH parameters for Dovecot TLS |
+| `/etc/dovecot/mail-crypt.{key,pub}` | Global EC mail-encryption keypair; the private key must be backed up |
 | `/etc/opendkim/opendkim.conf` | OpenDKIM config |
 | `/etc/opendkim/keys/$DOMAIN/` | DKIM keys |
 | `/etc/rspamd/local.d/` | rspamd config overrides (12 files) |
 | `/etc/systemd/system/*.service.d/hardening.conf` | systemd hardening (4 services) |
 | `/etc/tmpfiles.d/opendkim.conf` | Runtime directory for OpenDKIM |
-
-## Security Comparison
-
-| Feature | This Setup | ProtonMail |
-|---------|-----------|------------|
-| TLS 1.2+ only | Yes | Yes |
-| ECDHE/AEAD ciphers | Yes | Yes |
-| DANE/TLSA | Yes | Yes |
-| MTA-STS | Guided setup | Yes |
-| SPF | Yes | Yes |
-| DKIM | RSA 2048 | RSA 2048 |
-| DMARC | Yes (quarantine→reject) | Yes (reject) |
-| ARC | Yes | Yes |
-| Header privacy | Submission ports | All outbound |
-| Encryption at rest | Dovecot mail_crypt | Custom PGP |
-| Postscreen | Yes | Custom |
-| Anti-spam | rspamd | Custom |
-| Antivirus | ClamAV | Custom |
-| Rate limiting | Dual-layer | Yes |
-| SMTP smuggling protection | Yes | Yes |
-| systemd hardening | Yes | N/A (custom) |
 
 ## References
 
@@ -376,7 +355,7 @@ systemctl restart rspamd
 - [Postfix TLS Support](https://www.postfix.org/TLS_README.html)
 - [Postfix Postscreen](https://www.postfix.org/POSTSCREEN_README.html)
 - [Dovecot Documentation](https://doc.dovecot.org/)
-- [Dovecot mail_crypt Plugin](https://doc.dovecot.org/configuration_manual/mail_crypt_plugin/)
+- [Dovecot 2.4 mail_crypt Plugin](https://doc.dovecot.org/2.4.4/core/plugins/mail_crypt.html)
 - [OpenDKIM Documentation](http://www.opendkim.org/docs.html)
 - [rspamd Documentation](https://rspamd.com/doc/)
 - [DANE/TLSA (RFC 7672)](https://tools.ietf.org/html/rfc7672)
