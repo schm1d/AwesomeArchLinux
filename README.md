@@ -129,10 +129,11 @@ AwesomeArchLinux/
 - **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
 - **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), optionally separates `/var`, generates rollback script, and runs software hardening — all on a live, running system without reformatting.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
-- **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images and systemd-boot with `sbctl` during install and re-signs them on every kernel update.
+- **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images, systemd-boot, and fwupd's EFI capsule updater with `sbctl`, then re-signs them after package and kernel updates.
 - **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
 - **Mainline kernel** &mdash; Installs the standard `linux` kernel. We previously shipped `linux-hardened` alongside it, but its stricter module signing and syscall hardening break the NVIDIA proprietary driver (XWayland/DRI3 path stops bridging, gnome-shell loops on `Failed to init X11 display`) and several other proprietary kmods. Users who need `linux-hardened` for non-NVIDIA hardening can install it manually with `pacman -S linux-hardened linux-hardened-headers`.
 - **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
+- **Firmware and mobile broadband** &mdash; Installs fwupd with automatic metadata refresh and ModemManager for NetworkManager WWAN support. The UKI profile configures fwupd for the locally generated Secure Boot keys.
 
 #### Encryption & Key Management (bare-metal)
 

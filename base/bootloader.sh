@@ -359,6 +359,75 @@ EOF
     rm -f /boot/initramfs-linux.img /boot/initramfs-linux-fallback.img
 }
 
+bl_configure_fwupd_secure_boot() {
+    local config_file=/etc/fwupd/fwupd.conf
+    local efi_source=/usr/lib/fwupd/efi/fwupdx64.efi
+    local efi_signed="${efi_source}.signed"
+    local config_tmp
+
+    if [[ ! -f "$config_file" || ! -f "$efi_source" ]]; then
+        echo "fwupd Secure Boot files are missing; cannot configure capsule updates." >&2
+        return 1
+    fi
+
+    # With locally generated Secure Boot keys fwupd must launch its directly
+    # signed EFI binary instead of expecting a shim-signed one. Preserve the
+    # packaged configuration while setting the option idempotently.
+    config_tmp=$(mktemp "${config_file}.XXXXXX")
+    if ! awk '
+        BEGIN {
+            in_section = 0
+            found_section = 0
+            wrote_key = 0
+        }
+        function write_key() {
+            if (in_section && !wrote_key) {
+                print "DisableShimForSecureBoot=true"
+                wrote_key = 1
+            }
+        }
+        /^\[uefi_capsule\][[:space:]]*$/ {
+            write_key()
+            in_section = 1
+            found_section = 1
+            wrote_key = 0
+            print
+            next
+        }
+        /^\[[^]]+\][[:space:]]*$/ {
+            write_key()
+            in_section = 0
+            print
+            next
+        }
+        in_section && /^[[:space:]#;]*DisableShimForSecureBoot[[:space:]]*=/ {
+            if (!wrote_key) {
+                print "DisableShimForSecureBoot=true"
+            }
+            wrote_key = 1
+            next
+        }
+        { print }
+        END {
+            write_key()
+            if (!found_section) {
+                print ""
+                print "[uefi_capsule]"
+                print "DisableShimForSecureBoot=true"
+            }
+        }
+    ' "$config_file" > "$config_tmp"; then
+        rm -f "$config_tmp"
+        return 1
+    fi
+    install -o root -g root -m 0640 "$config_tmp" "$config_file"
+    rm -f "$config_tmp"
+
+    # -s registers the signed output in sbctl's database so its pacman hook
+    # re-signs the updater whenever fwupd-efi is upgraded.
+    sbctl sign -s -o "$efi_signed" "$efi_source"
+}
+
 bl_install_secureboot_helper() {
     cat > /etc/awesome-secureboot.conf <<EOF
 LUKS_DEVICE="/dev/disk/by-uuid/${LUKS_UUID}"
@@ -538,6 +607,7 @@ EOF
     if [[ ! -f /var/lib/sbctl/GUID ]]; then
         sbctl create-keys
     fi
+    bl_configure_fwupd_secure_boot
     sbctl sign -s -o "$systemd_boot_signed" "$systemd_boot_source"
     for efi_binary in "${signed_binaries[@]}"; do
         if [[ ! -f "$efi_binary" ]]; then

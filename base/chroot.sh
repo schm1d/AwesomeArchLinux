@@ -418,8 +418,6 @@ EOF
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
 pacman -S --noconfirm rng-tools
 systemctl enable rngd
-# NOTE: haveged is also installed via pacstrap but is not enabled here —
-# rng-tools is preferred and haveged is considered insecure in VM environments.
 # Modern kernels (5.6+) have adequate entropy from the jitterentropy module.
 
 echo -e "${BBlue}Installing file security utility pax-utils & arch-audit...${NC}"
@@ -772,6 +770,11 @@ systemctl enable NetworkManager
 # `systemctl enable` causes "unit is invalid" errors. The dispatcher
 # will activate automatically if any script in /etc/NetworkManager/
 # dispatcher.d/ is registered.
+
+echo -e "${BBlue}Enabling automatic firmware metadata refresh...${NC}"
+systemctl enable fwupd-refresh.timer
+# ModemManager is D-Bus activated on demand. NetworkManager discovers WWAN
+# modems through it without a separately enabled long-running service.
 
 echo -e "${BBlue}Enabling OpenSSH...${NC}"
 systemctl enable sshd

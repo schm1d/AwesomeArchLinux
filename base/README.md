@@ -93,6 +93,8 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 - DNS-over-TLS via systemd-resolved native DoT (Stubby is optional, not default)
 - nftables firewall (default deny, SSH rate limiting)
 - rng-tools for entropy
+- fwupd firmware discovery with automatic metadata refresh (and a signed capsule updater in the UKI profile)
+- ModemManager for NetworkManager mobile-broadband support (D-Bus activated on demand)
 - ClamAV antivirus with scheduled definition updates
 - rkhunter rootkit detection (daily timer)
 - auditd with MITRE ATT&CK-mapped rules

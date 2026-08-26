@@ -891,12 +891,12 @@ esac
 
 pacstrap /mnt base base-devel archlinux-keyring \
     linux linux-headers \
-    linux-firmware wireless-regdb intel-ucode amd-ucode \
+    linux-firmware wireless-regdb fwupd intel-ucode amd-ucode \
     lvm2 cryptsetup device-mapper \
     "${BOOT_PACKAGES[@]}" \
-    networkmanager iwd dhcpcd openssh \
+    networkmanager modemmanager iwd dhcpcd openssh \
     iptables-nft nftables \
-    apparmor audit rng-tools haveged \
+    apparmor audit rng-tools \
     lynis arch-audit rkhunter \
     firejail bubblewrap \
     git wget curl rsync \
