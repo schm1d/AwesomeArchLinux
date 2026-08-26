@@ -1,0 +1,7 @@
+# Copy to /etc/sysctl.d/99-awesome-local.conf for administrator overrides.
+# Files are processed lexicographically, so this file overrides the managed
+# 60/70/80/90 layers without editing repository-owned configuration.
+
+# Example: use strict reverse-path filtering on a simple single-homed host.
+# net.ipv4.conf.all.rp_filter = 1
+# net.ipv4.conf.default.rp_filter = 1

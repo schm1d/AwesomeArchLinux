@@ -598,7 +598,8 @@ fi
 
 msg "Configuring sysctl for transparent interception..."
 
-# Use z- prefix to override base hardening (99-sysctl.conf sets ip_forward=0)
+# Use z- prefix to override the AwesomeArchLinux workstation network layer,
+# which sets ip_forward=0.
 cat > /etc/sysctl.d/99-z-squid-proxy.conf <<'EOF'
 # Squid transparent proxy — override base hardening ip_forward=0
 # Required for nftables REDIRECT to intercept client traffic

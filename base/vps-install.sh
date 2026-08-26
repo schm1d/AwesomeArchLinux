@@ -25,6 +25,10 @@ BYellow='\033[1;33m'
 # shellcheck disable=SC2034
 NC='\033[0m'
 
+readonly LARGE_DISK_THRESHOLD_BYTES=1000000000000
+readonly DEFAULT_TMP_SIZE_GB=10
+readonly LARGE_DISK_TMP_SIZE_GB=25
+
 # --- Logging setup ---
 INSTALL_LOG="/tmp/vps-install-$(date +%Y%m%d-%H%M%S).log"
 exec 2> >(tee -a "$INSTALL_LOG")
@@ -63,6 +67,19 @@ ask_yes_no() {
             *) echo -e "${BRed}Invalid choice. Please type 'y' or 'n'.\n${NC}" >&2 ;;
         esac
     done
+}
+
+recommended_tmp_size_gb() {
+    local disk="$1"
+    local disk_size_bytes
+
+    disk_size_bytes=$(lsblk -b -d -n -o SIZE "$disk" 2>/dev/null || true)
+    if [[ "$disk_size_bytes" =~ ^[0-9]+$ ]] &&
+       ((disk_size_bytes >= LARGE_DISK_THRESHOLD_BYTES)); then
+        printf '%s\n' "$LARGE_DISK_TMP_SIZE_GB"
+    else
+        printf '%s\n' "$DEFAULT_TMP_SIZE_GB"
+    fi
 }
 
 ask_for_disk() {
@@ -122,25 +139,41 @@ ask_for_sysctl_profile() {
     local choice
     while true; do
         echo -e "${BBlue}Select sysctl profile:${NC}" >&2
-        echo "1) security" >&2
-        echo "2) security+performance" >&2
-        echo "3) full-performance" >&2
+        echo "1) workstation - compatible security baseline (recommended)" >&2
+        echo "2) strict      - disables unprivileged user namespaces, io_uring, kexec, and debugging" >&2
+        echo "3) performance - workstation baseline plus fq + BBR" >&2
         read -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
-            1) echo "security"; return 0 ;;
-            2) echo "security-performance"; return 0 ;;
-            3) echo "full-performance"; return 0 ;;
+            1) echo "workstation"; return 0 ;;
+            2) echo "strict"; return 0 ;;
+            3) echo "performance"; return 0 ;;
             *) echo -e "${BRed}Invalid choice. Please enter 1, 2, or 3.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+ask_for_ipv6_policy() {
+    local choice
+    while true; do
+        echo -e "${BBlue}Select IPv6 policy:${NC}" >&2
+        echo "1) enabled and hardened (recommended; preserves SLAAC)" >&2
+        echo "2) disabled by explicit sysctl overlay" >&2
+        read -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "false"; return 0 ;;
+            2) echo "true"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
         esac
     done
 }
 
 describe_sysctl_profile() {
     case "$1" in
-        security) echo "security" ;;
-        security-performance) echo "security+performance" ;;
-        full-performance) echo "full-performance" ;;
+        workstation) echo "workstation (compatible security baseline)" ;;
+        strict) echo "strict (compatibility-breaking hardening)" ;;
+        performance) echo "performance (workstation + fq/BBR)" ;;
         *) echo "$1" ;;
     esac
 }
@@ -304,8 +337,10 @@ echo
 
 TARGET_DISK=$(ask_for_disk)
 DISK="/dev/$TARGET_DISK"
+TMP_SIZE_GB=$(recommended_tmp_size_gb "$DISK")
 echo -e "${BGreen}Selected: $DISK${NC}\n"
-log_action "Selected disk: $DISK"
+echo -e "${BGreen}/tmp tmpfs ceiling: ${TMP_SIZE_GB} GiB${NC}\n"
+log_action "Selected disk: $DISK, /tmp tmpfs ceiling: ${TMP_SIZE_GB} GiB"
 
 # Partition sizes
 echo -e "${BBlue}Partition sizes:\n${NC}"
@@ -354,6 +389,7 @@ fi
 echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
 SYSCTL_PROFILE=$(ask_for_sysctl_profile)
 SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
+DISABLE_IPV6=$(ask_for_ipv6_policy)
 
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
@@ -362,9 +398,10 @@ echo -e "Locale: $LOCALE"
 echo -e "Keymap: $KEYMAP"
 echo -e "SSH Port: $SSH_PORT"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+echo -e "IPv6: $([[ "$DISABLE_IPV6" == true ]] && echo disabled || echo 'enabled and hardened')"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, SSH Port: $SSH_PORT, Sysctl Profile: $SYSCTL_PROFILE_LABEL"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, SSH Port: $SSH_PORT, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Disable IPv6: $DISABLE_IPV6"
 
 # -----------------------
 # 4. DISK PREPARATION
@@ -477,7 +514,7 @@ cat >> /mnt/etc/fstab <<EOF
 
 # Security-hardened mount options
 # /tmp: noexec omitted — npm, Node.js, and build tools execute from /tmp
-tmpfs /tmp tmpfs rw,nosuid,nodev,relatime,size=2G 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev,relatime,size=${TMP_SIZE_GB}G 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=2G 0 0
 proc /proc proc nosuid,nodev,noexec,hidepid=2,gid=proc 0 0
 EOF
@@ -499,6 +536,8 @@ export INSTALL_TYPE="vps"
 export INSTALL_SSH_PORT="$SSH_PORT"
 export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
+export INSTALL_TMP_SIZE="${TMP_SIZE_GB}G"
 export INSTALL_TIMEZONE="$TIMEZONE"
 export INSTALL_LOCALE="$LOCALE"
 export INSTALL_KEYMAP="$KEYMAP"
@@ -512,6 +551,8 @@ export _INSTALL_HOST="$HOSTNAME"
 export _INSTALL_SSH_PORT="$SSH_PORT"
 export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
 export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
+export _INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
+export _INSTALL_TMP_SIZE="${TMP_SIZE_GB}G"
 export _INSTALL_TYPE="vps"
 export _INSTALL_TIMEZONE="$TIMEZONE"
 export _INSTALL_LOCALE="$LOCALE"
@@ -522,40 +563,28 @@ chmod +x /mnt/set-install-vars.sh
 cp ./vps-chroot.sh /mnt/
 chmod +x /mnt/vps-chroot.sh
 
-# Copy hardening scripts
-case "$SYSCTL_PROFILE" in
-    security)
-        if [ -f ../hardening/sysctl/sysctl.sh ]; then
-            cp ../hardening/sysctl/sysctl.sh /mnt/
-            chmod +x /mnt/sysctl.sh
-        else
-            echo -e "${BRed}Missing security sysctl baseline: ../hardening/sysctl/sysctl.sh${NC}" >&2
-            exit 1
-        fi
-        ;;
-    security-performance)
-        if [ -f ../hardening/sysctl/99-workstation-net.conf ]; then
-            cp ../hardening/sysctl/99-workstation-net.conf /mnt/sysctl-profile.conf
-            chmod 644 /mnt/sysctl-profile.conf
-        else
-            echo -e "${BRed}Missing security+performance sysctl profile: ../hardening/sysctl/99-workstation-net.conf${NC}" >&2
-            exit 1
-        fi
-        ;;
-    full-performance)
-        if [ -f ../hardening/sysctl/99-full-performance.conf ]; then
-            cp ../hardening/sysctl/99-full-performance.conf /mnt/sysctl-profile.conf
-            chmod 644 /mnt/sysctl-profile.conf
-        else
-            echo -e "${BRed}Missing full-performance sysctl profile: ../hardening/sysctl/99-full-performance.conf${NC}" >&2
-            exit 1
-        fi
-        ;;
-    *)
-        echo -e "${BRed}Unknown sysctl profile: $SYSCTL_PROFILE${NC}" >&2
+# Stage the complete sysctl bundle. The chroot helper selects and installs the
+# requested layers without applying them to the live ISO kernel.
+SYSCTL_SOURCE_DIR="../hardening/sysctl"
+SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
+SYSCTL_BUNDLE_FILES=(
+    sysctl.sh
+    60-awesome-security-core.conf
+    70-awesome-workstation-network.conf
+    80-awesome-performance.conf
+    80-awesome-bbr.modules
+    90-awesome-strict.conf
+    90-awesome-ipv6-disabled.conf
+)
+install -d -m 0755 "$SYSCTL_STAGING_DIR"
+for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
+    if [[ ! -f "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
+        echo -e "${BRed}Missing sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
         exit 1
-        ;;
-esac
+    fi
+    install -m 0644 "$SYSCTL_SOURCE_DIR/$sysctl_file" "$SYSCTL_STAGING_DIR/$sysctl_file"
+done
+chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
 if [ -f ../hardening/ssh/ssh.sh ]; then
     cp ../hardening/ssh/ssh.sh /mnt/
@@ -605,9 +634,11 @@ Installation Date: $(date)
 Hostname: $HOSTNAME
 Username: $USERNAME
 Disk: $DISK
+/tmp tmpfs ceiling: ${TMP_SIZE_GB} GiB
 SSH Port: $SSH_PORT
 Boot Mode: $BOOT_MODE
 Sysctl Profile: $SYSCTL_PROFILE_LABEL
+IPv6 Disabled: $DISABLE_IPV6
 
 CRITICAL POST-INSTALLATION STEPS:
 =================================
@@ -663,6 +694,7 @@ log_action "Performing cleanup."
 for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/sysctl-profile.conf /mnt/ssh.sh; do
     [[ -f "$f" ]] && shred -vzu "$f" 2>/dev/null || true
 done
+rm -rf -- /mnt/sysctl-profile
 
 # Clear pacman cache
 arch-chroot /mnt bash -c "pacman -Scc --noconfirm"

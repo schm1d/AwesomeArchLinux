@@ -6,6 +6,8 @@
 
 set -euo pipefail
 source /root/.install-env || { echo "Failed to source /root/.install-env"; exit 1; }
+# shellcheck source=bootloader.sh
+source /bootloader.sh || { echo "Failed to source /bootloader.sh"; exit 1; }
 
 # Set up the variables
 BBlue='\033[1;34m'
@@ -33,11 +35,33 @@ KEYMAP="${_INSTALL_KEYMAP:-us}"
 LUKS_KEYS='/etc/luksKeys/boot.key' # Location of the root partition key
 SSH_PORT=22
 SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
-# shellcheck disable=SC2034  # Referenced in GRUB config and comments
-CRYPT_NAME="crypt_lvm"     # must match luksOpen in archinstall.sh
-LVM_NAME="lvm_arch"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+CRYPT_NAME="${_INSTALL_CRYPT:-crypt_lvm}"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+LVM_NAME="${_INSTALL_LVM:-lvm_arch}"
 INSTALL_TPM="${INSTALL_TPM:-false}"
-SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-security}}"
+SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
+SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
+INSTALL_BOOTLOADER="${_INSTALL_BOOTLOADER:?Missing explicit bootloader profile}"
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
+TPM_PCRS="${_INSTALL_TPM_PCRS:-7}"
+BOOT_EXTRA_CMDLINE=()
+
+case "$INSTALL_BOOTLOADER" in
+    grub|uki) ;;
+    *)
+        echo "Invalid bootloader profile: $INSTALL_BOOTLOADER" >&2
+        exit 1
+        ;;
+esac
+
+case "$SYSCTL_DISABLE_IPV6" in
+    true|false) ;;
+    *)
+        echo "Invalid IPv6 policy value: $SYSCTL_DISABLE_IPV6" >&2
+        exit 1
+        ;;
+esac
 
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
@@ -57,6 +81,7 @@ fi
 #PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
+# shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 LUKS_UUID=$(cryptsetup luksUUID "$PARTITION3")
 
 CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')
@@ -65,14 +90,14 @@ CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}'
 pacman-key --init
 pacman-key --populate archlinux
 
-# Tell GnuPG dirmngr to skip IPv6 — we disable IPv6 in sysctl, and the
-# default IPv6-first keyserver lookup logs "Network is unreachable"
-# noise on every key fetch before falling back to IPv4.
+# Keep dirmngr aligned with the selected IPv6 policy.
 mkdir -p /etc/gnupg
-cat > /etc/gnupg/dirmngr.conf <<'EOF'
-disable-ipv6
-honor-http-proxy
-EOF
+{
+  if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+    printf '%s\n' 'disable-ipv6'
+  fi
+  printf '%s\n' 'honor-http-proxy'
+} > /etc/gnupg/dirmngr.conf
 
 echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 # games is a group on Arch, not a user — userdel not needed
@@ -536,11 +561,47 @@ systemctl enable rkhunter-check.timer
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
 pacman -S --noconfirm arpwatch
 
+echo -e "${BBlue}Installing disk health monitoring (SMART/NVMe)...${NC}"
+# smartmontools watches SATA and NVMe health; nvme-cli provides the manual
+# investigation tools (nvme smart-log, nvme error-log) needed after an
+# unexplained freeze. Without these, a failing drive gives no warning and
+# leaves no history to review after the fact.
+pacman -S --noconfirm smartmontools nvme-cli
+
+# -a          monitor all attributes
+# -o on       enable automatic offline data collection
+# -S on       enable attribute autosave
+# -s ...      short self-test daily 02:00, long self-test Saturday 03:00
+# -W 4,45,55  DIFF,INFO,CRIT: log on 4C swings, log an advisory at 45C,
+#             and treat 55C as critical. Only the CRIT threshold invokes
+#             the -M exec handler; INFO events are journal-only.
+# -m <nomailer> -M exec  route alerts through the script below instead of an
+#             MTA, which this system does not guarantee is configured
+cat <<'SMARTD' > /etc/smartd.conf
+DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,45,55 -m <nomailer> -M exec /usr/local/bin/smart-alert
+SMARTD
+
+install -Dm0755 /dev/stdin /usr/local/bin/smart-alert <<'SMARTALERT'
+#!/usr/bin/env bash
+# Invoked by smartd when a SMART event fires. smartd exports SMARTD_* in the
+# environment. Log to the journal and the console so the alert survives even
+# when no mail transport is configured.
+set -uo pipefail
+
+device="${SMARTD_DEVICE:-unknown device}"
+message="${SMARTD_MESSAGE:-SMART event with no message}"
+
+logger -t smartd -p daemon.crit "SMART alert on ${device}: ${message}"
+wall "SMART alert on ${device}: ${message}" 2>/dev/null || true
+SMARTALERT
+
+systemctl enable smartd.service
+
 echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S --noconfirm usbguard
 
 echo -e "${BBlue}Enhancing usbguard configuration...${NC}"
-cat <<EOF > /etc/usbguard/usbguard-daemon.conf
+cat <<'EOF' > /etc/usbguard/usbguard-daemon.conf
 RuleFile=/etc/usbguard/rules.conf
 ImplicitPolicyTarget=block
 PresentDevicePolicy=apply-policy
@@ -548,9 +609,54 @@ PresentControllerPolicy=keep
 InsertedDevicePolicy=apply-policy
 RestoreControllerDeviceState=false
 DeviceRulesWithPort=false
+IPCAccessControlFiles=/etc/usbguard/IPCAccessControl.d/
 EOF
 
-sh -c 'usbguard generate-policy > /etc/usbguard/rules.conf'
+install -d -m 0755 /etc/usbguard/IPCAccessControl.d
+install -m 0600 /dev/stdin /etc/usbguard/IPCAccessControl.d/root <<'EOF'
+Devices=modify,list,listen
+Policy=modify,list
+Exceptions=listen
+Parameters=modify,list,listen
+EOF
+
+install -Dm0755 /dev/stdin /usr/local/bin/usbguard-initial-policy <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+RULES=/etc/usbguard/rules.conf
+
+if [[ -f "$RULES" ]] && grep -qvE '^[[:space:]]*(#|$)' "$RULES"; then
+    exit 0
+fi
+
+tmp=$(mktemp /etc/usbguard/rules.conf.XXXXXX)
+
+# Only a non-zero exit is a genuine failure. Empty output is a legitimate
+# result on a machine with no USB devices attached, and must still install a
+# policy so the daemon can start and enforce block-by-default.
+if usbguard generate-policy > "$tmp"; then
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$RULES"
+    exit 0
+fi
+
+# Generation genuinely failed. Leave any existing policy untouched and exit
+# non-zero so ExecStartPre aborts the unit. USBGuard must NOT start with an
+# empty policy: ImplicitPolicyTarget=block plus PresentDevicePolicy=apply-policy
+# would block every attached device, including the console keyboard, and
+# stopping the daemon would not restore them. A daemon that never starts leaves
+# USB permissive -- unprotected, but reachable and recoverable.
+rm -f "$tmp"
+exit 1
+EOF
+
+# No "-" prefix: a failed policy generation must prevent USBGuard from starting.
+install -Dm0644 /dev/stdin /etc/systemd/system/usbguard.service.d/10-initial-policy.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/local/bin/usbguard-initial-policy
+EOF
+
 systemctl enable usbguard.service
 
 # Hardening /etc/login.defs
@@ -1032,67 +1138,12 @@ echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
 setfacl -d -m u::rwx,g::---,o::--- ~
 setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
 
-echo -e "${BBlue}Adding GRUB package...${NC}"
-pacman -S grub efibootmgr os-prober --noconfirm
-
-# GRUB hardening setup and encryption
-echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for encryption...${NC}"
-sed -i "s|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-sed -i "s|^FILES=.*|FILES=(${LUKS_KEYS})|g" /etc/mkinitcpio.conf
-# NOTE: mkinitcpio is called AFTER the TPM/non-TPM HOOKS are finalized below
-
-echo -e "${BBlue}Adjusting etc/default/grub for encryption...${NC}"
-sed -ri 's|^#?GRUB_PRELOAD_MODULES=.*|GRUB_PRELOAD_MODULES="part_gpt part_msdos lvm"|' /etc/default/grub
-sed -ri 's|^#?GRUB_ENABLE_CRYPTODISK=.*|GRUB_ENABLE_CRYPTODISK=y|' /etc/default/grub
-
-chmod 400 /etc/luksKeys/boot.key
-
-sleep 1
-
-echo -e "${BBlue}Hardening GRUB and Kernel boot options...${NC}"
-
-# GRUBSEC Hardening explanation:
-# slab_nomerge: This disables slab merging, which significantly increases the difficulty of heap exploitation
-# init_on_alloc=1 Init_on_free=1: enables zeroing of memory during allocation and free time, which can help mitigate use-after-free vulnerabilities and erase sensitive information in memory.
-# page_alloc.shuffle=1: Randomises page allocator freelists, improving security by making page allocations less predictable. This also improves performance.
-# pti=on: Enables Kernel Page Table Isolation, which mitigates Meltdown and prevents some KASLR bypasses.
-# randomize_kstack_offset=on: Randomises the kernel stack offset on each syscall, which makes attacks that rely on deterministic kernel stack layout significantly more difficult
-# vsyscall=none: Disables vsyscalls, as they are obsolete and have been replaced with vDSO. vsyscalls are also at fixed addresses in memory, making them a potential target for ROP attacks.
-# lockdown=confidentiality: Eliminate many methods that user space code could abuse to escalate to kernel privileges and extract sensitive information.
-# lockdown=confidentiality - This was removed because it locked nvidia and vmware module so they couldn't be loaded.
-GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=on randomize_kstack_offset=on vsyscall=none quiet loglevel=3\""
-#GRUBCMD="\"cryptdevice=UUID=$UUID:$LVM_NAME root=/dev/mapper/$LVM_NAME-root cryptkey=rootfs:$LUKS_KEYS\""
-if [ "$INSTALL_TPM" = true ]; then
-    sed -i "s|^HOOKS=.*|HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt lvm2 filesystems fsck)|g" /etc/mkinitcpio.conf
-    GRUBCMD="\"rd.luks.name=${LUKS_UUID}=${LVM_NAME} rd.lvm.lv=${LVM_NAME}/root root=/dev/mapper/${LVM_NAME}-root\""
-    # No cryptkey needed for sd-encrypt; TPM handles unlock post-enroll
-    sed -i "s|^MODULES=.*|MODULES=(tpm tpm_tis tpm_crb)|" /etc/mkinitcpio.conf
-else
-    
-    GRUBCMD="\"cryptdevice=UUID=${LUKS_UUID}:${LVM_NAME} root=/dev/mapper/${LVM_NAME}-root cryptkey=rootfs:/etc/luksKeys/boot.key\""
-    sed -ri 's|^HOOKS=.*|HOOKS=(base udev autodetect keyboard keymap modconf block encrypt lvm2 filesystems fsck)|' /etc/mkinitcpio.conf
-    sed -ri 's|^FILES=.*|FILES=(/etc/luksKeys/boot.key)|' /etc/mkinitcpio.conf
-fi
-
-# Generate initramfs AFTER final HOOKS/FILES are configured
-echo -e "${BBlue}Generating initramfs with final HOOKS configuration...${NC}"
-mkinitcpio -P
-
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=${GRUBCMD}|" /etc/default/grub
-
-# Force a low-res GRUB framebuffer. Without this, GRUB on some UEFI firmwares
-# falls back to a mode where the password prompt never renders (black screen
-# on boot). 1024x768 is the safest universally-supported fallback.
-if grep -q '^#\?GRUB_GFXMODE=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXMODE=.*|GRUB_GFXMODE=1024x768,auto|' /etc/default/grub
-else
-    echo 'GRUB_GFXMODE=1024x768,auto' >> /etc/default/grub
-fi
-if grep -q '^#\?GRUB_GFXPAYLOAD_LINUX=' /etc/default/grub; then
-    sed -ri 's|^#?GRUB_GFXPAYLOAD_LINUX=.*|GRUB_GFXPAYLOAD_LINUX=keep|' /etc/default/grub
-else
-    echo 'GRUB_GFXPAYLOAD_LINUX=keep' >> /etc/default/grub
+# Establish the profile-specific encryption hooks before hardware-specific
+# modules are discovered. The final image/UKI is generated after GPU setup.
+echo -e "${BBlue}Preparing boot hooks for the $INSTALL_BOOTLOADER profile...${NC}"
+bl_set_hooks
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chmod 400 "$LUKS_KEYS"
 fi
 
 sleep 1
@@ -1130,31 +1181,45 @@ configure_bluetooth() {
     # Backup main.conf (using install -Dm)
     install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
 
-cat <<EOF >/etc/bluetooth/main.conf
+cat <<'EOF' >/etc/bluetooth/main.conf
 [General]
-# Hardening and Auto-Enable settings.
+# Strict LE-only Bluetooth profile. BlueZ does not support inline comments on
+# option lines, and silently ignores unknown keys, so keep this file aligned
+# with the option names and sections in the upstream main.conf schema.
 # NOTE: bluetoothd does NOT support inline hash comments in main.conf;
 # it treats everything after the equals sign as part of the value.
 # Keep values clean (no trailing comments).
-AutoEnable=true
-DiscoverableTimeout=0
-PairableTimeout=0
+Name=Bluetooth
+DiscoverableTimeout=120
+AlwaysPairable=false
+PairableTimeout=120
+DebugKeys=false
+ControllerMode=le
+FastConnectable=false
 Privacy=device
 JustWorksRepairing=confirm
-MinEncryptionKeySize=16
-SecureConnectionsOnly=true
-ControllerMode=le
-Name=$HOSTNAME-Bluetooth
+SecureConnections=only
+Experimental=false
+Testing=false
+KernelExperimental=false
+FilterDiscoverable=true
+
+[GATT]
+# Require a full 128-bit key before accessing secured GATT characteristics.
+KeySize=16
+
+[Policy]
+# Do not automatically power controllers when BlueZ discovers them.
+AutoEnable=false
 EOF
 
-  # Systemd override (using install -Dm)
+  # Keep BlueZ's upstream sandbox intact. In particular, do not weaken its
+  # ProtectHome=true to read-only or duplicate StateDirectory/ProtectSystem
+  # settings already maintained by the packaged unit.
   mkdir -p /etc/systemd/system/bluetooth.service.d
-cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
+cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
 [Service]
-ProtectSystem=strict
-ReadWritePaths=/var/lib/bluetooth /run
-ProtectHome=read-only
-PrivateTmp=true
+ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
 EOF
 
@@ -1235,12 +1300,12 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     # Adjust mkinitcpio.conf
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
-    sed -ri 's|^MODULES=.*|MODULES=(nvidia nvidia_drm nvidia_uvm nvidia_modeset)|' /etc/mkinitcpio.conf
-
-    # Optional but recommended: early KMS for smoother boot
-    if ! grep -Eq '(^|\s)kms(\s|\))' /etc/mkinitcpio.conf; then
-      sed -ri 's/(HOOKS=\(.*modconf) /\1 kms /' /etc/mkinitcpio.conf
-    fi
+    bl_set_hooks \
+        --hook kms \
+        --module nvidia \
+        --module nvidia_drm \
+        --module nvidia_uvm \
+        --module nvidia_modeset
 
     # NVreg_PreserveVideoMemoryAllocations=1 is required for reliable
     # suspend / resume on NVIDIA. Without it, GPU VRAM is not restored
@@ -1263,20 +1328,12 @@ EOF
     systemctl enable nvidia-resume.service 2>/dev/null || true
     systemctl enable nvidia-hibernate.service 2>/dev/null || true
 
-    # Re-generate initramfs
-    mkinitcpio -P  # -P regenerates all presets for all installed kernels
-
-    # Adjust GRUB
+    # Add NVIDIA DRM settings to either GRUB's command line or the embedded UKI
+    # command line. The selected bootloader function writes the final value.
     # nvidia-drm.modeset=1  -> DRM KMS (required for Wayland, smooth boot)
     # nvidia-drm.fbdev=1    -> expose DRM framebuffer console (nicer tty
     #                          on NVIDIA, required by modern GDM/KMS path)
-    echo -e "${BBlue}Adjusting /etc/default/grub for NVIDIA...${NC}"
-    sed -i 's|\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)\(".*\)|\1 nvidia-drm.modeset=1 nvidia-drm.fbdev=1\2|' /etc/default/grub
-
-    # Update GRUB config
-    if [[ -f /boot/grub/grub.cfg ]]; then
-        grub-mkconfig -o /boot/grub/grub.cfg
-    fi
+    BOOT_EXTRA_CMDLINE+=(nvidia-drm.modeset=1 nvidia-drm.fbdev=1)
 fi
 
 # --- If not NVIDIA, check for AMD/Radeon ---
@@ -1317,49 +1374,20 @@ fi
 
 sleep 2
 
-configure_grub() {
-  echo -e "${BBlue}Improving GRUB screen performance (if supported by hardware)...${NC}"
-
-  echo -e "${BBlue}Setting up GRUB...${NC}"
-  mkdir -p /boot/grub
-
-  grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
-
-  # --- Set GRUB Password ---
-set +e  # Temporarily disable 'exit on error'
-
-while true; do
-  echo -e "${BBlue}Setting GRUB password...${NC}"
-  GRUB_TMPFILE=$(mktemp /tmp/grubpass.XXXXXX)
-  chmod 600 "$GRUB_TMPFILE"
-  grub-mkpasswd-pbkdf2 | tee "$GRUB_TMPFILE"
-  GRUB_PASS=$(grep 'grub.pbkdf2' "$GRUB_TMPFILE" | awk '{print $NF}')
-  rm -f "$GRUB_TMPFILE"
-  if [[ -n "$GRUB_PASS" ]]; then
-     break # Exit loop if the password was correctly created
-  else
-      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
-      sleep 1 # Add a delay
-  fi
-done
-
-set -e # Re-enable 'exit on error'
-
-# Use a generic "admin" superuser instead of leaking the system username
-cat <<EOF >> /etc/grub.d/40_custom
-set superusers="admin"
-password_pbkdf2 admin $GRUB_PASS
-EOF
-
-grub-mkconfig -o /boot/grub/grub.cfg
-
-}
-
-configure_grub
+case "$INSTALL_BOOTLOADER" in
+    grub)
+        configure_grub
+        ;;
+    uki)
+        configure_systemd_boot_uki
+        ;;
+esac
 
 sleep 2
 
-chmod 600 "$LUKS_KEYS"
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chmod 600 "$LUKS_KEYS"
+fi
 
 # Creating a cool /etc/issue
 echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
@@ -1441,8 +1469,10 @@ chmod 600 /etc/ssh/sshd_config
 chown root:root /etc/fstab
 chown root:root /etc/issue
 chmod 644 /etc/issue
-chown root:root /boot/grub/grub.cfg
-chmod og-rwx /boot/grub/grub.cfg
+if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+    chown root:root /boot/grub/grub.cfg
+    chmod og-rwx /boot/grub/grub.cfg
+fi
 chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
 chown -c root:root /etc/sudoers
@@ -1784,6 +1814,18 @@ harden_sysctl() {
 
   echo -e "${BBlue}Applying sysctl profile: ${SYSCTL_PROFILE}...${NC}"
 
+  if [ -x "/sysctl-profile/sysctl.sh" ]; then
+    local -a sysctl_args=("$SYSCTL_PROFILE" "--no-apply")
+    if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
+      sysctl_args+=("--disable-ipv6")
+    fi
+    /sysctl-profile/sysctl.sh "${sysctl_args[@]}"
+    rm -rf -- /sysctl-profile
+    sleep 2
+    return
+  fi
+
+  # Compatibility with installers from before the composable profile bundle.
   if [ -f "/sysctl-profile.conf" ]; then
     install -m 0644 /sysctl-profile.conf /etc/sysctl.d/99-sysctl.conf
     sysctl --load=/etc/sysctl.d/99-sysctl.conf
@@ -1810,5 +1852,6 @@ sleep 2
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 # Securely remove sensitive files
 shred -u /root/.install-env 2>/dev/null || true
+shred -u /bootloader.sh 2>/dev/null || true
 shred -u /chroot.sh
 exit

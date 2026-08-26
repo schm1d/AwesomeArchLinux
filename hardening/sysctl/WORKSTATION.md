@@ -1,6 +1,6 @@
 # Secure Workstation Companion Checklist
 
-This checklist covers the important **non-sysctl** settings that complement [`99-workstation-net.conf`](./99-workstation-net.conf) on a modern Arch Linux workstation.
+This checklist covers the important **non-sysctl** settings that complement the [`workstation` profile](./README.md#profiles) on a modern Arch Linux workstation.
 
 It is aimed at machines like:
 - high-core-count desktops and workstations
@@ -93,9 +93,9 @@ Recommended approach:
 Why:
 - On GUI systems, memory pressure handling is often better with proactive user-session killing than with a hard kernel OOM event.
 
-## 7. Prefer `fq + bbr` over ad-hoc socket inflation
+## 7. Prefer measured `fq + bbr` over ad-hoc socket inflation
 
-Your sysctl profile already sets:
+The optional `performance` profile adds:
 - `net.core.default_qdisc = fq`
 - `net.ipv4.tcp_congestion_control = bbr`
 
@@ -159,7 +159,8 @@ then keep:
 kernel.unprivileged_userns_clone = 1
 ```
 
-If you prioritize hardening over those workflows, uncomment the stricter option in [`99-workstation-net.conf`](./99-workstation-net.conf):
+If you prioritize hardening over those workflows, select the `strict` profile,
+which installs [`90-awesome-strict.conf`](./90-awesome-strict.conf):
 
 ```conf
 kernel.unprivileged_userns_clone = 0
@@ -234,7 +235,7 @@ For most secure, high-performance desktop/workstation builds:
 - keep swap
 - use `THP=madvise`
 - enable `irqbalance`
-- keep `fq + bbr`
+- use `fq + bbr` only when the `performance` profile fits the workload
 - keep inbound firewall closed by default
 - keep journald bounded
 - keep user namespaces enabled unless you explicitly want the stricter tradeoff

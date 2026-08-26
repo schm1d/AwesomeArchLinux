@@ -1,232 +1,296 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-#Description    : Script to harden sysctl.conf settings
-#Author         : @brulliant                                                
-#Linkedin       : https://www.linkedin.com/in/schmidbruno/
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly CORE_FILE="60-awesome-security-core.conf"
+readonly NETWORK_FILE="70-awesome-workstation-network.conf"
+readonly PERFORMANCE_FILE="80-awesome-performance.conf"
+readonly BBR_MODULE_SOURCE="80-awesome-bbr.modules"
+readonly STRICT_FILE="90-awesome-strict.conf"
+readonly IPV6_DISABLED_FILE="90-awesome-ipv6-disabled.conf"
 
+readonly -a MANAGED_SYSCTL_FILES=(
+    "$CORE_FILE"
+    "$NETWORK_FILE"
+    "$PERFORMANCE_FILE"
+    "$STRICT_FILE"
+    "$IPV6_DISABLED_FILE"
+)
+readonly -a LEGACY_PROFILE_FILES=(
+    "99-workstation-net.conf"
+    "99-full-performance.conf"
+)
 
-# Set up the color variables
-BBlue='\033[1;34m'
-NC='\033[0m'
+PROFILE=""
+TARGET_ROOT="/"
+DISABLE_IPV6=false
+APPLY_SETTINGS=true
+DRY_RUN=false
 
-# Check if user is root
-if [ "$(id -u)" != "0" ]; then
-   echo "This script must be run as root." 1>&2
-   exit 1
+usage() {
+    cat <<EOF
+Usage: $0 PROFILE [OPTIONS]
+
+Install an AwesomeArchLinux sysctl profile.
+
+Profiles:
+  workstation   Compatible security baseline; IPv6 and io_uring stay enabled
+  strict        Workstation baseline plus compatibility-breaking restrictions
+  performance   Workstation baseline plus fq + BBR and MTU black-hole probing
+
+Options:
+  --disable-ipv6  Install the explicit IPv6-disable overlay
+  --no-apply      Install files without changing the running kernel
+  --root PATH     Install below PATH; requires --no-apply
+  --dry-run       Validate and print the selected files without writing
+  -h, --help      Show this help
+
+Deprecated profile aliases are accepted for installer compatibility:
+  security -> strict, security-performance -> performance,
+  full-performance -> performance
+EOF
+}
+
+die() {
+    printf 'Error: %s\n' "$1" >&2
+    exit 1
+}
+
+warn() {
+    printf 'Warning: %s\n' "$1" >&2
+}
+
+canonicalize_profile() {
+    case "$1" in
+        workstation|strict|performance)
+            printf '%s\n' "$1"
+            ;;
+        security)
+            warn "profile 'security' is deprecated; using 'strict'"
+            printf '%s\n' "strict"
+            ;;
+        security-performance|security+performance|full-performance)
+            warn "profile '$1' is deprecated; using 'performance'"
+            printf '%s\n' "performance"
+            ;;
+        *)
+            die "unknown profile '$1'"
+            ;;
+    esac
+}
+
+while (($# > 0)); do
+    case "$1" in
+        --disable-ipv6)
+            DISABLE_IPV6=true
+            shift
+            ;;
+        --no-apply)
+            APPLY_SETTINGS=false
+            shift
+            ;;
+        --root)
+            (($# >= 2)) || die "--root requires an absolute path"
+            TARGET_ROOT="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            APPLY_SETTINGS=false
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --*)
+            die "unknown option '$1'"
+            ;;
+        *)
+            [[ -z "$PROFILE" ]] || die "only one profile may be selected"
+            PROFILE="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ -n "$PROFILE" ]] || {
+    usage >&2
+    exit 2
+}
+PROFILE="$(canonicalize_profile "$PROFILE")"
+
+[[ "$TARGET_ROOT" == /* ]] || die "--root must be an absolute path"
+[[ -d "$TARGET_ROOT" ]] || die "target root does not exist: $TARGET_ROOT"
+TARGET_ROOT="$(realpath -e -- "$TARGET_ROOT")"
+
+if [[ "$TARGET_ROOT" != "/" && "$APPLY_SETTINGS" == true ]]; then
+    die "--root may only be used with --no-apply"
+fi
+if [[ "$DRY_RUN" == false && "$TARGET_ROOT" == "/" && $EUID -ne 0 ]]; then
+    die "run as root when installing into /"
 fi
 
-echo -e "${BBlue}Hardening sysctl...${NC}"
+declare -a SELECTED_FILES=("$CORE_FILE" "$NETWORK_FILE")
+case "$PROFILE" in
+    strict)
+        SELECTED_FILES+=("$STRICT_FILE")
+        ;;
+    performance)
+        SELECTED_FILES+=("$PERFORMANCE_FILE")
+        ;;
+esac
+if [[ "$DISABLE_IPV6" == true ]]; then
+    SELECTED_FILES+=("$IPV6_DISABLED_FILE")
+fi
 
-# Enable the kernel parameters in /etc/sysctl.d/99-sysctl.conf
-echo "dev.tty.ldisc_autoload=0" > /etc/sysctl.d/99-sysctl.conf  # Prevent unprivileged attackers from loading vulnerable line disciplines with the TIOCSETD ioctl
+validate_config() {
+    local file="$1"
 
-# These prevent creating files in potentially attacker-controlled environments, such as world-writable directories, to make data spoofing attacks more difficult.
-echo "fs.protected_fifos = 2" >> /etc/sysctl.d/99-sysctl.conf
-echo "fs.protected_regular = 2" >> /etc/sysctl.d/99-sysctl.conf
+    [[ -f "$file" ]] || die "missing profile component: $file"
+    awk '
+        /^[[:space:]]*($|#|;)/ { next }
+        {
+            line = $0
+            sub(/^[[:space:]]*-/, "", line)
+            if (line !~ /^[[:alnum:]_.\/*-]+[[:space:]]*=/) {
+                printf "%s:%d: invalid assignment: %s\n", FILENAME, FNR, $0 > "/dev/stderr"
+                bad = 1
+                next
+            }
+            key = line
+            sub(/[[:space:]]*=.*/, "", key)
+            if (seen[key]++) {
+                printf "%s:%d: duplicate key: %s\n", FILENAME, FNR, key > "/dev/stderr"
+                bad = 1
+            }
+        }
+        END { exit bad }
+    ' "$file" || die "invalid sysctl profile component: $file"
+}
 
-echo "fs.suid_dumpable = 0" >> /etc/sysctl.d/99-sysctl.conf # Restrict core dumps
-echo "fs.protected_hardlinks = 1" >> /etc/sysctl.d/99-sysctl.conf # Protect hard links
-echo "fs.protected_symlinks = 1" >> /etc/sysctl.d/99-sysctl.conf # Protect symbolic links
+for component in "${SELECTED_FILES[@]}"; do
+    validate_config "$SCRIPT_DIR/$component"
+done
+if [[ "$PROFILE" == "performance" ]]; then
+    [[ -f "$SCRIPT_DIR/$BBR_MODULE_SOURCE" ]] || \
+        die "missing profile component: $SCRIPT_DIR/$BBR_MODULE_SOURCE"
+fi
 
-# ASLR is a common exploit mitigation that randomizes the position of critical parts of a process in memory.
-# The above settings increase the bits of entropy used for mmap ASLR, improving its effectiveness. Values are compatible with x86, but other architectures may differ.
-echo "vm.mmap_rnd_bits=32" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.mmap_rnd_compat_bits=16" >> /etc/sysctl.d/99-sysctl.conf
+if [[ "$DRY_RUN" == true ]]; then
+    printf 'Profile: %s\n' "$PROFILE"
+    printf 'Target:  %s\n' "$TARGET_ROOT"
+    printf 'Apply:   no (dry-run)\n'
+    printf 'Files:\n'
+    printf '  %s\n' "${SELECTED_FILES[@]}"
+    if [[ "$PROFILE" == "performance" ]]; then
+        printf '  %s -> /etc/modules-load.d/80-awesome-bbr.conf\n' "$BBR_MODULE_SOURCE"
+    fi
+    if sysctl --help 2>&1 | grep -q -- '--dry-run'; then
+        for component in "${SELECTED_FILES[@]}"; do
+            sysctl --dry-run --ignore --load "$SCRIPT_DIR/$component" >/dev/null
+        done
+    else
+        warn "installed sysctl lacks --dry-run; structural validation only"
+    fi
+    exit 0
+fi
 
-echo "vm.vfs_cache_pressure = 50" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.mmap_min_addr = 65536" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.swappiness = 10" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.dirty_ratio = 10" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.dirty_background_ratio = 5" >> /etc/sysctl.d/99-sysctl.conf
-# Use default heuristic overcommit (=0); strict no-overcommit (=2) breaks Redis, Java, and Node.js workloads
-echo "vm.overcommit_memory = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "vm.unprivileged_userfaultfd=0" >> /etc/sysctl.d/99-sysctl.conf # Restrict this syscall to the CAP_SYS_PTRACE capability to prevent use-after-free flaws.
-# Allow unprivileged user namespaces — needed for Chromium, Electron, Firefox sandboxing, Podman rootless, and bubblewrap
-echo "kernel.unprivileged_userns_clone=1" >> /etc/sysctl.d/99-sysctl.conf
+if [[ "$PROFILE" == "performance" && "$APPLY_SETTINGS" == true ]]; then
+    command -v modprobe >/dev/null 2>&1 || die "modprobe is required for BBR"
+    modprobe tcp_bbr || die "the running kernel cannot load tcp_bbr"
+fi
 
-# 176 = sync + unmount + reboot only, allowing emergency recovery without exposing dangerous SysRq functions
-echo "kernel.sysrq = 176" >> /etc/sysctl.d/99-sysctl.conf
-echo "kernel.core_uses_pid = 1" >> /etc/sysctl.d/99-sysctl.conf # Controls whether core dumps will append the PID to the core filename.Useful for debugging multi-threaded applications.
-echo "kernel.pid_max = 65535" >> /etc/sysctl.d/99-sysctl.conf # Allow for more PIDs
+readonly SYSCTL_DIR="${TARGET_ROOT%/}/etc/sysctl.d"
+readonly MODULES_DIR="${TARGET_ROOT%/}/etc/modules-load.d"
+install -d -m 0755 -- "$SYSCTL_DIR" "$MODULES_DIR"
 
-# The contents of /proc/<pid>/maps and smaps files are only visible to
+backup_path() {
+    local path="$1"
+    local candidate="${path}.awesomearchlinux-legacy"
+    local suffix=1
 
-echo "kernel.msgmnb = 65535" >> /etc/sysctl.d/99-sysctl.conf # Controls the maximum size of a message, in bytes
-echo "kernel.msgmax = 65535" >> /etc/sysctl.d/99-sysctl.conf # Controls the default maximum size of a message queue
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        candidate="${path}.awesomearchlinux-legacy.${suffix}"
+        ((suffix += 1))
+    done
+    printf '%s\n' "$candidate"
+}
 
-# Those options prevents those information leaks. This must be used in combination with "net.core.bpf_jit_harden=2"
-echo "kernel.printk=3 3 3 3" >> /etc/sysctl.d/99-sysctl.conf
-echo "kernel.unprivileged_bpf_disabled=1" >> /etc/sysctl.d/99-sysctl.conf
+move_legacy_file() {
+    local path="$1"
+    local backup
 
-echo "kernel.panic = 10" >> /etc/sysctl.d/99-sysctl.conf # Wait given seconds before rebooting after a kernel panic. 0 means no reboot.
-echo "kernel.panic_on_oops = 1" >> /etc/sysctl.d/99-sysctl.conf # Specifies that a system must panic if a kernel oops occurs.
+    [[ -e "$path" || -L "$path" ]] || return 0
+    [[ ! -d "$path" ]] || die "refusing to replace directory: $path"
+    backup="$(backup_path "$path")"
+    mv -- "$path" "$backup"
+    warn "moved legacy configuration to $backup"
+}
 
-# kernel.modules_disabled=1 prevents loading modules at runtime When this sysctl is set, 
-# once the kernel has finished booting, no further kernel modules can be loaded (even by root). 
-# If your system has anything that needs the vfat module later—most commonly an EFI System Partition 
-# (/boot/efi) or other FAT/EFI partitions—the kernel must load vfat at boot before that sysctl disables module loading.
-echo "kernel.modules_disabled = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "kernel.randomize_va_space = 2" >> /etc/sysctl.d/99-sysctl.conf
-# echo "kernel.exec-shield = 1" >> /etc/sysctl.d/99-sysctl.conf #  Provide protection against buffer overflow attacks.
-echo "kernel.kptr_restrict = 2" >> /etc/sysctl.d/99-sysctl.conf # This setting aims to mitigate kernel pointer leaks.
-echo "kernel.yama.ptrace_scope = 2" >> /etc/sysctl.d/99-sysctl.conf #  This restricts usage of ptrace to only processes with the CAP_SYS_PTRACE capability. Alternatively, set the sysctl to 3 to disable ptrace entirely.
-echo "kernel.dmesg_restrict = 1" >> /etc/sysctl.d/99-sysctl.conf #  Restricts the kernel log to the CAP_SYSLOG capability.
-echo "kernel.perf_event_paranoid = 3" >> /etc/sysctl.d/99-sysctl.conf # Disallow all usage of performance events to the CAP_PERFMON 
-echo "kernel.shmall = 268435456"  >> /etc/sysctl.d/99-sysctl.conf
-echo "kernel.shmmax = 1073741824"  >> /etc/sysctl.d/99-sysctl.conf
-echo "kernel.kexec_load_disabled = 1" >> /etc/sysctl.d/99-sysctl.conf
+for legacy_name in "${LEGACY_PROFILE_FILES[@]}"; do
+    move_legacy_file "$SYSCTL_DIR/$legacy_name"
+done
 
+legacy_monolith="$SYSCTL_DIR/99-sysctl.conf"
+if [[ -f "$legacy_monolith" ]]; then
+    if grep -qE '^[[:space:]]*net\.ipv4\.tcp_fack[[:space:]]*=[[:space:]]*1' "$legacy_monolith" &&
+       grep -qE '^[[:space:]]*net\.ipv4\.tcp_challenge_ack_limit[[:space:]]*=[[:space:]]*2147483647' "$legacy_monolith"; then
+        move_legacy_file "$legacy_monolith"
+    else
+        warn "$legacy_monolith is not managed by this script and may override the selected profile"
+    fi
+fi
 
-# Network-related settings
-echo "net.ipv4.conf.all.arp_ignore = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.arp_announce = 2" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.bpf_jit_harden = 2" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.dev_weight = 64" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.proxy_arp = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.neigh.default.gc_thresh1 = 32" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.neigh.default.gc_thresh2 = 1024" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.neigh.default.gc_thresh3 = 2048" >> /etc/sysctl.d/99-sysctl.conf
+for managed_name in "${MANAGED_SYSCTL_FILES[@]}"; do
+    managed_path="$SYSCTL_DIR/$managed_name"
+    if [[ -e "$managed_path" || -L "$managed_path" ]]; then
+        [[ ! -d "$managed_path" ]] || die "refusing to replace directory: $managed_path"
+        rm -- "$managed_path"
+    fi
+done
 
-# Controls IP packet forwarding
-echo "net.ipv4.ip_forward = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.accept_source_route = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.accept_source_route = 0" >> /etc/sysctl.d/99-sysctl.conf
+for component in "${SELECTED_FILES[@]}"; do
+    install -m 0644 -- "$SCRIPT_DIR/$component" "$SYSCTL_DIR/$component"
+done
 
-# Often, martian and unroutable packets may be used for a dangerous purpose. Logging these packets for further inspection.
-echo "net.ipv4.conf.all.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.log_martians = 1" >> /etc/sysctl.d/99-sysctl.conf
+bbr_module_target="$MODULES_DIR/80-awesome-bbr.conf"
+if [[ "$PROFILE" == "performance" ]]; then
+    install -m 0644 -- "$SCRIPT_DIR/$BBR_MODULE_SOURCE" "$bbr_module_target"
+elif [[ -e "$bbr_module_target" || -L "$bbr_module_target" ]]; then
+    [[ ! -d "$bbr_module_target" ]] || die "refusing to replace directory: $bbr_module_target"
+    rm -- "$bbr_module_target"
+fi
 
-# By enabling reverse path filtering, the kernel will do source validation of the packets received from all the interfaces on the machine.
-# This can protect from attackers using IP spoofing methods to harm.
-echo "net.ipv4.conf.all.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.rp_filter = 1" >> /etc/sysctl.d/99-sysctl.conf
+if [[ "$APPLY_SETTINGS" == true ]]; then
+    if [[ -x /usr/lib/systemd/systemd-sysctl ]]; then
+        /usr/lib/systemd/systemd-sysctl
+    else
+        warn "systemd-sysctl not found; falling back to procps sysctl"
+        sysctl --ignore --system
+    fi
+fi
 
-# Protect against TCP time-wait assassination hazards, drop RST packets for sockets in the time-wait state.
-echo "net.ipv4.tcp_rfc1337 = 1" >> /etc/sysctl.d/99-sysctl.conf
+if [[ "$APPLY_SETTINGS" == true && "$PROFILE" != "strict" ]]; then
+    declare -a irreversible_runtime_controls=()
+    if [[ "$(sysctl -n kernel.unprivileged_bpf_disabled 2>/dev/null || true)" == "1" ]]; then
+        irreversible_runtime_controls+=("kernel.unprivileged_bpf_disabled=1")
+    fi
+    if [[ "$(sysctl -n kernel.kexec_load_disabled 2>/dev/null || true)" == "1" ]]; then
+        irreversible_runtime_controls+=("kernel.kexec_load_disabled=1")
+    fi
+    if ((${#irreversible_runtime_controls[@]} > 0)); then
+        warn "one-way strict controls remain active until reboot: ${irreversible_runtime_controls[*]}"
+    fi
+fi
 
-# Disable ICMP redirect sending when on a non router
-echo "net.ipv4.conf.all.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.send_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# Allow ICMP echo (ping) — disabling breaks network diagnostics and monitoring.
-# ICMP rate limiting (already set elsewhere) is sufficient protection.
-echo "net.ipv4.icmp_echo_ignore_all = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# Enable ignoring broadcasts request
-echo "net.ipv4.icmp_echo_ignore_broadcasts = 1" >> /etc/sysctl.d/99-sysctl.conf
-
-# Enable bad error message Protection
-echo "net.ipv4.icmp_ignore_bogus_error_responses = 1" >> /etc/sysctl.d/99-sysctl.conf
-
-# Disable ICMP redirects
-echo "net.ipv4.conf.all.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.all.secure_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.conf.default.secure_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# Protect against SYN flood attacks.
-echo "net.ipv4.tcp_syncookies = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_syn_retries = 5" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_synack_retries = 2" >> /etc/sysctl.d/99-sysctl.conf
-
-# Some IPV6 security improvements and tunings are here.
-echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.d/99-sysctl.conf
-# Malicious IPv6 router advertisements can result in a man-in-the-middle attack, so they should be disabled.
-echo "net.ipv6.conf.all.accept_ra = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_ra = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# Disable ICMP redirects
-echo "net.ipv6.conf.all.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_redirects = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# Source routing is a mechanism that allows users to redirect network traffic. 
-# As this can be used to perform man-in-the-middle attacks, we disable it.
-echo "net.ipv6.conf.all.accept_source_route=0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_source_route=0" >> /etc/sysctl.d/99-sysctl.conf
-
-echo "net.ipv6.conf.all.forwarding = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.all.use_tempaddr = 2 " >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_ra_defrtr = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_ra_pinfo = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.accept_source_route = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.autoconf = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.dad_transmits = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.max_addresses = 1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.router_solicitations = 0" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv6.conf.default.use_tempaddr = 2" >> /etc/sysctl.d/99-sysctl.conf
-
-# Enable TCP Fast Open
-# Helps reduce network latency by enabling data to be exchanged during the sender’s initial TCP SYN
-echo "net.ipv4.tcp_fastopen = 3" >> /etc/sysctl.d/99-sysctl.conf
-
-# Increasing the size of the receive queue.
-echo "net.core.netdev_max_backlog = 16384" >> /etc/sysctl.d/99-sysctl.conf
-
-# Increase the maximum connections
-echo "net.core.somaxconn = 8192" >> /etc/sysctl.d/99-sysctl.conf
-
-# Increase the memory dedicated to the network interfaces (increase more in case of a large amount of memory)
-echo "net.core.rmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.rmem_default = 8388608" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.wmem_default = 8388608" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.wmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.core.optmem_max = 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_rmem = 4096 25165824 25165824" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_wmem = 4096 65536 25165824" >> /etc/sysctl.d/99-sysctl.conf
-
-# Increase the default 4096 UDP limits:
-echo "net.ipv4.udp_rmem_min = 8192" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.udp_wmem_min = 8192" >> /etc/sysctl.d/99-sysctl.conf
-
-# CVE-2016-5696
-echo "net.ipv4.tcp_challenge_ack_limit=2147483647" >> /etc/sysctl.d/99-sysctl.conf
-
-# In the event of a synflood DOS attack, this queue can fill up pretty quickly,
-# at which point TCP SYN cookies will kick in, allowing your system to continue to respond to legitimate traffic and allowing you to gain access to block malicious IPs.
-# If the server suffers from overloads at peak times, you may want to increase this value
-echo "net.ipv4.tcp_max_syn_backlog = 20480" >> /etc/sysctl.d/99-sysctl.conf
-
-# tcp_max_tw_buckets is the maximum number of sockets in the TIME_WAIT state.
-# After reaching this number the system will start destroying the sockets in this state.
-# Increase this to prevent simple DOS attacks
-echo "net.ipv4.tcp_max_tw_buckets = 2000000" >> /etc/sysctl.d/99-sysctl.conf
-
-# This helps avoid running out of available network sockets:
-echo "net.ipv4.tcp_tw_reuse = 1" >> /etc/sysctl.d/99-sysctl.conf
-
-# Specify how many seconds to wait for a final FIN packet before the socket is forcibly closed.
-# This is strictly a violation of the TCP specification but required to prevent denial-of-service attacks.
-# Default value is 180
-echo "net.ipv4.tcp_fin_timeout = 20" >> /etc/sysctl.d/99-sysctl.conf
-
-# This setting kills persistent single connection performance and could be turned off:
-echo "net.ipv4.tcp_slow_start_after_idle = 0" >> /etc/sysctl.d/99-sysctl.conf
-
-# TCP will send the keepalive probe that contains null data to the network peer several times after a period of idle time.
-# The socket will be closed automatically if the peer does not respond.
-# By default, the TCP keepalive process waits for two hours (7200 secs) for socket activity before sending the first keepalive probe,
-# and then resending it every 75 seconds. As active TCP/IP socket communications exist, no keepalive packets are needed.
-# With the following settings, your application will detect dead TCP connections after 120 seconds (60s + 10s + 10s + 10s + 10s + 10s + 10s).
-echo "net.ipv4.tcp_keepalive_time = 60" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_keepalive_intvl = 10" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_keepalive_probes = 6" >> /etc/sysctl.d/99-sysctl.conf
-
-# Enable MTU probing
-echo "net.ipv4.tcp_mtu_probing = 1" >> /etc/sysctl.d/99-sysctl.conf
-
-# The BBR congestion control algorithm can help achieve higher bandwidths and lower latencies for internet traffic.
-echo "net.core.default_qdisc = cake" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-sysctl.conf
-
-# Enable TCP SACK. Modern kernels have patched vulnerabilities related to SACK.
-echo "net.ipv4.tcp_sack=1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_dsack=1" >> /etc/sysctl.d/99-sysctl.conf
-echo "net.ipv4.tcp_fack=1" >> /etc/sysctl.d/99-sysctl.conf
-
-
-sysctl --load=/etc/sysctl.d/99-sysctl.conf
-
-echo -e "${BBlue}Sysctl settings have been hardened and applied.${NC}"
-
+printf 'Installed AwesomeArchLinux sysctl profile: %s\n' "$PROFILE"
+if [[ "$DISABLE_IPV6" == true ]]; then
+    printf 'IPv6 policy: disabled by explicit overlay\n'
+else
+    printf 'IPv6 policy: enabled and hardened\n'
+fi
+if [[ "$APPLY_SETTINGS" == false ]]; then
+    printf 'Settings will take effect at the next boot.\n'
+fi
