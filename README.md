@@ -403,7 +403,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 | **fail2ban** | `ProtectSystem=strict`, `NoNewPrivileges=no`, `CAP_NET_ADMIN CAP_NET_RAW` | Python app — no `MemoryDenyWriteExecute`. Ban actions may need privilege escalation. |
 | **Stubby** (opt-in only) | `User=stubby`, `ProtectSystem=strict`, `PrivateDevices=yes`, `AF_UNIX AF_INET AF_INET6` | Dedicated user, network I/O only. Safe for full isolation. Applies only if the user installs Stubby manually; the default install uses `systemd-resolved` native DoT. |
 | **Chrony** | `ProtectKernelTunables=no`, `ProtectClock=no`, `CAP_SYS_TIME`, `@clock` syscalls | Needs kernel tunable reads and clock adjustment. |
-| **Bluetooth** | `ProtectSystem=strict`, `ReadWritePaths=/var/lib/bluetooth /run`, `AF_UNIX AF_BLUETOOTH` | Needs to save pairing data. No `MemoryDenyWriteExecute` (GLib). Bare-metal only. |
+| **Bluetooth** | Upstream `ProtectSystem=strict`, `ProtectHome=true`, `MemoryDenyWriteExecute=true`, `StateDirectory=bluetooth`; local `AF_UNIX AF_BLUETOOTH` restriction | Keeps BlueZ's packaged sandbox intact and narrows its socket families. Pairing data stays in the upstream-managed 0700 state directory. Bare-metal only. |
 | **systemd-resolved** | No custom drop-in — upstream is already hardened | Custom drop-ins replace (not extend) upstream's tuned syscall filter, breaking resolved. |
 | **systemd-journald** | No custom drop-in — upstream is already hardened | Needs `/dev/kmsg`, capabilities, full proc access. Generic templates break all logging. |
 | **rngd** | No custom drop-in — needs `/dev/hwrng` and `CAP_SYS_ADMIN` | Generic templates block device access and drop capabilities, making it useless. |
@@ -451,7 +451,7 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 #### Physical Security (bare-metal only)
 
 - **USBGuard** &mdash; Default-block policy with a one-time allow policy generated for devices present at the first service start; root IPC access remains available to authorize later devices.
-- **Bluetooth** &mdash; Hardware detection, secure connections only, LE mode, minimum 16-byte encryption key, privacy mode, systemd service hardened.
+- **Bluetooth** &mdash; Strict LE-only profile with Secure Connections required, a 16-byte minimum key for secured GATT characteristics, device privacy, a generic adapter name, and two-minute discoverable/pairable windows. BlueZ does not automatically power newly discovered controllers; the local user opts in when Bluetooth is needed. Classic BR/EDR profiles such as A2DP audio are intentionally unavailable; changing `ControllerMode=le` to `dual` restores compatibility at the cost of a larger wireless attack surface. BlueZ's upstream systemd sandbox is retained and its socket families are restricted.
 - **Disk health monitoring** &mdash; `smartd` scans all SATA and NVMe devices, runs a short self-test daily and a long self-test weekly, and tracks drive temperature (advisory entries logged at 45 &deg;C; only the 55 &deg;C critical threshold raises an alert). Alerts are written to the journal and the console rather than mailed, so they arrive without a configured MTA. `nvme-cli` is installed for post-incident investigation (`nvme smart-log`, `nvme error-log`).
 
 #### File System Security

@@ -1181,31 +1181,45 @@ configure_bluetooth() {
     # Backup main.conf (using install -Dm)
     install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true # Safer backup, ignore errors if file doesn't exist
 
-cat <<EOF >/etc/bluetooth/main.conf
+cat <<'EOF' >/etc/bluetooth/main.conf
 [General]
-# Hardening and Auto-Enable settings.
+# Strict LE-only Bluetooth profile. BlueZ does not support inline comments on
+# option lines, and silently ignores unknown keys, so keep this file aligned
+# with the option names and sections in the upstream main.conf schema.
 # NOTE: bluetoothd does NOT support inline hash comments in main.conf;
 # it treats everything after the equals sign as part of the value.
 # Keep values clean (no trailing comments).
-AutoEnable=true
-DiscoverableTimeout=0
-PairableTimeout=0
+Name=Bluetooth
+DiscoverableTimeout=120
+AlwaysPairable=false
+PairableTimeout=120
+DebugKeys=false
+ControllerMode=le
+FastConnectable=false
 Privacy=device
 JustWorksRepairing=confirm
-MinEncryptionKeySize=16
-SecureConnectionsOnly=true
-ControllerMode=le
-Name=$HOSTNAME-Bluetooth
+SecureConnections=only
+Experimental=false
+Testing=false
+KernelExperimental=false
+FilterDiscoverable=true
+
+[GATT]
+# Require a full 128-bit key before accessing secured GATT characteristics.
+KeySize=16
+
+[Policy]
+# Do not automatically power controllers when BlueZ discovers them.
+AutoEnable=false
 EOF
 
-  # Systemd override (using install -Dm)
+  # Keep BlueZ's upstream sandbox intact. In particular, do not weaken its
+  # ProtectHome=true to read-only or duplicate StateDirectory/ProtectSystem
+  # settings already maintained by the packaged unit.
   mkdir -p /etc/systemd/system/bluetooth.service.d
-cat <<EOF | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
+cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
 [Service]
-ProtectSystem=strict
-ReadWritePaths=/var/lib/bluetooth /run
-ProtectHome=read-only
-PrivateTmp=true
+ProtectHome=true
 RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
 EOF
 
