@@ -464,6 +464,31 @@ Every directive below is a systemd `[Service]` option. Understanding what each o
 - **Home directory ACLs** &mdash; Default ACLs restrict group and other access.
 - **Compiler restrictions** &mdash; `gcc`, `g++`, `clang`, `make`, `as`, `ld` restricted to `compilers` group (750).
 
+##### `/tmp` Capacity Policy
+
+| Installation path | Backing storage | Disk below 1 TB | Disk at least 1 TB |
+|---|---|---:|---:|
+| Bare metal | Dedicated ext4 LV inside the encrypted LUKS/LVM container | 10 GiB | 25 GiB |
+| VPS installer | tmpfs | 10 GiB ceiling | 25 GiB ceiling |
+| VPS live hardening | tmpfs | 10 GiB ceiling | 25 GiB ceiling |
+
+The bare-metal layout keeps temporary workloads off RAM and prevents `/tmp`
+from consuming the root or home filesystem. On VPS systems, the tmpfs value is
+a maximum rather than reserved memory; pages consume RAM and swap only as files
+are written. `/dev/shm` remains independently capped at 2 GiB.
+
+The compliance audit reports a failure when `/tmp` is smaller than 10 GiB. To
+inspect a running system:
+
+```bash
+findmnt -b -o SOURCE,FSTYPE,SIZE,OPTIONS /tmp
+```
+
+This policy applies automatically to new installations and when rerunning the
+VPS live-hardening workflow. Existing bare-metal installations are not resized
+automatically because changing an established LVM layout requires a separate,
+recovery-aware migration.
+
 #### Protocol Hardening
 
 - Disabled kernel modules: `dccp`, `sctp`, `rds`, `tipc`.

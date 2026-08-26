@@ -24,3 +24,6 @@ Thumbs.db
 # IDE settings
 .vscode/
 .idea/
+
+# Review reports (working artifacts, not project history)
+AWESOMEARCHLINUX_DIFFERENTIAL_REVIEW_*.md
