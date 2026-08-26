@@ -13,7 +13,9 @@
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
-# Usage:       sudo ./postgresql.sh [-p PORT] [--ssl] [--local-only] [-h]
+# Usage:       sudo ./postgresql.sh [-p PORT] [--ssl --ssl-cert PATH
+#                    --ssl-key PATH] [--local-only | --no-local
+#                    --allow-cidr CIDR] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -34,6 +36,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -50,9 +56,16 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 PORT=5432
 ENABLE_SSL=false
 LOCAL_ONLY=true
+REMOTE_CIDR=""
+SSL_CERT_SOURCE=""
+SSL_KEY_SOURCE=""
 PG_DATA="/var/lib/postgres/data"
 PG_CONF="$PG_DATA/postgresql.conf"
 PG_HBA="$PG_DATA/pg_hba.conf"
+PG_TLS_DIR="/var/lib/postgres/tls"
+PG_SSL_CERT="$PG_TLS_DIR/server.crt"
+PG_SSL_KEY="$PG_TLS_DIR/server.key"
+NFT_CONFIG="${AAL_NFT_CONFIG:-/etc/nftables.conf}"
 LOGFILE="/var/log/postgresql-hardening-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Usage ---
@@ -61,16 +74,22 @@ usage() {
 Usage: sudo $0 [options]
 
 Options:
-  -p PORT       PostgreSQL listen port (default: $PORT)
-  --ssl         Enable SSL/TLS connections (generates placeholder paths)
-  --local-only  Listen only on localhost (default: enabled)
-  --no-local    Listen on all interfaces (disables --local-only)
-  -h, --help    Show this help
+  -p PORT          PostgreSQL listen port (default: $PORT)
+  --ssl            Enable SSL/TLS connections
+  --ssl-cert PATH  PEM server certificate to install (required with --ssl)
+  --ssl-key PATH   PEM private key to install (required with --ssl)
+  --local-only     Listen only on localhost (default: enabled)
+  --no-local       Listen on all interfaces; requires --ssl and --allow-cidr
+  --allow-cidr CIDR
+                   IPv4 client network allowed in remote mode (for example,
+                   10.20.30.0/24)
+  -h, --help       Show this help
 
 Examples:
   sudo $0                           # Localhost only, port 5432
-  sudo $0 -p 5433 --ssl             # Custom port, SSL enabled, localhost only
-  sudo $0 --no-local --ssl          # All interfaces, SSL enabled
+  sudo $0 -p 5433 --ssl --ssl-cert /root/server.crt --ssl-key /root/server.key
+  sudo $0 --no-local --allow-cidr 10.20.30.0/24 --ssl \
+      --ssl-cert /root/server.crt --ssl-key /root/server.key
 EOF
     exit 0
 }
@@ -78,10 +97,26 @@ EOF
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -p)          PORT="$2"; shift 2 ;;
+        -p)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || err "-p requires a port"
+            PORT="$2"; shift 2
+            ;;
         --ssl)       ENABLE_SSL=true; shift ;;
+        --ssl-cert)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || err "--ssl-cert requires a path"
+            SSL_CERT_SOURCE="$2"; shift 2
+            ;;
+        --ssl-key)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || err "--ssl-key requires a path"
+            SSL_KEY_SOURCE="$2"; shift 2
+            ;;
         --local-only) LOCAL_ONLY=true; shift ;;
         --no-local)  LOCAL_ONLY=false; shift ;;
+        --allow-cidr)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || \
+                err "--allow-cidr requires an IPv4 CIDR"
+            REMOTE_CIDR="$2"; shift 2
+            ;;
         -h|--help)   usage ;;
         *)           err "Unknown option: $1" ;;
     esac
@@ -91,8 +126,58 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 
 # Validate port range
-if [[ "$PORT" -lt 1 || "$PORT" -gt 65535 ]]; then
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
     err "Port must be between 1 and 65535"
+fi
+
+validate_ipv4_cidr() {
+    local cidr="$1" address prefix octet
+    local -a octets
+
+    [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|3[0-2])$ ]] || return 1
+    address=${cidr%/*}
+    prefix=${cidr#*/}
+    IFS=. read -r -a octets <<< "$address"
+    (( ${#octets[@]} == 4 )) || return 1
+    for octet in "${octets[@]}"; do
+        (( 10#$octet <= 255 )) || return 1
+    done
+    [[ "$prefix" =~ ^[0-9]+$ ]]
+}
+
+if [[ "$ENABLE_SSL" == true ]]; then
+    [[ -n "$SSL_CERT_SOURCE" && -n "$SSL_KEY_SOURCE" ]] || \
+        err "--ssl requires both --ssl-cert and --ssl-key"
+    [[ -f "$SSL_CERT_SOURCE" ]] || err "SSL certificate not found: $SSL_CERT_SOURCE"
+    [[ -f "$SSL_KEY_SOURCE" ]] || err "SSL private key not found: $SSL_KEY_SOURCE"
+    command -v openssl &>/dev/null || err "--ssl requires openssl"
+    openssl x509 -in "$SSL_CERT_SOURCE" -noout &>/dev/null || \
+        err "Invalid PEM certificate: $SSL_CERT_SOURCE"
+    openssl pkey -in "$SSL_KEY_SOURCE" -passin pass: -noout &>/dev/null || \
+        err "Invalid or encrypted PEM private key: $SSL_KEY_SOURCE"
+    CERT_PUBLIC_KEY=$(openssl x509 -in "$SSL_CERT_SOURCE" -pubkey -noout 2>/dev/null |
+        openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)
+    PRIVATE_PUBLIC_KEY=$(openssl pkey -in "$SSL_KEY_SOURCE" -passin pass: -pubout -outform DER 2>/dev/null |
+        sha256sum)
+    [[ "$CERT_PUBLIC_KEY" == "$PRIVATE_PUBLIC_KEY" ]] || \
+        err "SSL certificate and private key do not match"
+elif [[ -n "$SSL_CERT_SOURCE" || -n "$SSL_KEY_SOURCE" ]]; then
+    err "--ssl-cert and --ssl-key require --ssl"
+fi
+
+if [[ "$LOCAL_ONLY" == false ]]; then
+    [[ "$ENABLE_SSL" == true ]] || err "--no-local requires --ssl"
+    [[ -n "$REMOTE_CIDR" ]] || err "--no-local requires --allow-cidr"
+    validate_ipv4_cidr "$REMOTE_CIDR" || err "Invalid IPv4 CIDR: $REMOTE_CIDR"
+    command -v nft &>/dev/null || err "Remote mode requires nftables"
+    [[ -f "$NFT_CONFIG" ]] || err "Remote mode requires the installer-owned $NFT_CONFIG"
+    nft list chain inet filter input &>/dev/null || \
+        err "Remote mode requires the installer-owned inet filter input chain"
+    if grep -Fq '/etc/nftables.d/postgresql.conf' "$NFT_CONFIG"; then
+        err "Remove the legacy PostgreSQL snippet include from $NFT_CONFIG and reload nftables before using remote mode"
+    fi
+elif [[ -n "$REMOTE_CIDR" ]]; then
+    err "--allow-cidr is only valid with --no-local"
 fi
 
 # Redirect output to logfile as well
@@ -101,6 +186,9 @@ exec > >(tee -a "$LOGFILE") 2>&1
 info "Port: $PORT"
 info "SSL: $ENABLE_SSL"
 info "Local only: $LOCAL_ONLY"
+if [[ "$LOCAL_ONLY" == false ]]; then
+    info "Allowed client network: $REMOTE_CIDR"
+fi
 info "Log: $LOGFILE"
 
 # =============================================================================
@@ -136,6 +224,26 @@ else
         --auth-host=scram-sha-256"
 
     msg "Database cluster initialized with data checksums and scram-sha-256"
+fi
+
+# Install operator-supplied TLS material under PostgreSQL's writable state
+# directory. PostgreSQL refuses permissive private-key modes, so keep both
+# files postgres-owned and private.
+if [[ "$ENABLE_SSL" == true ]]; then
+    msg "Installing PostgreSQL TLS certificate and private key..."
+    install -d -o postgres -g postgres -m 0700 "$PG_TLS_DIR"
+    if [[ ! "$SSL_CERT_SOURCE" -ef "$PG_SSL_CERT" ]]; then
+        install -o postgres -g postgres -m 0600 "$SSL_CERT_SOURCE" "$PG_SSL_CERT"
+    else
+        chown postgres:postgres "$PG_SSL_CERT"
+        chmod 0600 "$PG_SSL_CERT"
+    fi
+    if [[ ! "$SSL_KEY_SOURCE" -ef "$PG_SSL_KEY" ]]; then
+        install -o postgres -g postgres -m 0600 "$SSL_KEY_SOURCE" "$PG_SSL_KEY"
+    else
+        chown postgres:postgres "$PG_SSL_KEY"
+        chmod 0600 "$PG_SSL_KEY"
+    fi
 fi
 
 # =============================================================================
@@ -183,10 +291,10 @@ authentication_timeout = 30s
 EOF
 
 if [[ "$ENABLE_SSL" == true ]]; then
-    cat >> "$PG_CONF" <<'EOF'
+    cat >> "$PG_CONF" <<EOF
 ssl = on
-ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
-ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
+ssl_cert_file = '$PG_SSL_CERT'
+ssl_key_file = '$PG_SSL_KEY'
 ssl_min_protocol_version = 'TLSv1.2'
 ssl_ciphers = 'HIGH:!aNULL:!MD5:!3DES:!RC4'
 ssl_prefer_server_ciphers = on
@@ -278,24 +386,14 @@ host    all       all       127.0.0.1/32            scram-sha-256
 host    all       all       ::1/128                 scram-sha-256
 EOF
 
-# If not local-only and SSL is enabled, allow remote SSL connections
-if [[ "$LOCAL_ONLY" == false && "$ENABLE_SSL" == true ]]; then
-    cat >> "$PG_HBA" <<'EOF'
+# Remote mode is validated above to require TLS and one explicit client CIDR.
+if [[ "$LOCAL_ONLY" == false ]]; then
+    cat >> "$PG_HBA" <<EOF
 
 # Remote connections — SSL required, scram-sha-256 only
-hostssl all       all       0.0.0.0/0               scram-sha-256
-hostssl all       all       ::/0                     scram-sha-256
+hostssl all       all       $REMOTE_CIDR             scram-sha-256
 EOF
-    info "pg_hba.conf: remote SSL connections enabled"
-elif [[ "$LOCAL_ONLY" == false && "$ENABLE_SSL" == false ]]; then
-    warn "Remote access enabled without SSL — connections will NOT be encrypted!"
-    warn "Consider re-running with --ssl for production use."
-    cat >> "$PG_HBA" <<'EOF'
-
-# Remote connections — WARNING: not encrypted! Use --ssl for production.
-host    all       all       0.0.0.0/0               scram-sha-256
-host    all       all       ::/0                     scram-sha-256
-EOF
+    info "pg_hba.conf: TLS connections allowed only from $REMOTE_CIDR"
 fi
 
 msg "pg_hba.conf written (no 'trust' authentication anywhere)"
@@ -313,7 +411,8 @@ cat <<'SQL'
 sudo -u postgres psql
 
 -- Create a restricted application user
-CREATE USER appuser WITH PASSWORD 'changeme' CONNECTION LIMIT 10;
+CREATE USER appuser CONNECTION LIMIT 10;
+\password appuser
 
 -- Create application database owned by the user
 CREATE DATABASE appdb OWNER appuser;
@@ -406,35 +505,29 @@ systemctl daemon-reload
 msg "systemd hardening override installed"
 
 # =============================================================================
-# 8. NFTABLES SNIPPET (if not local-only)
+# 8. NFTABLES ACCESS RULE (if not local-only)
 # =============================================================================
 
 if [[ "$LOCAL_ONLY" == false ]]; then
-    msg "Creating nftables snippet for PostgreSQL..."
-
-    NFTABLES_SNIPPET="/etc/nftables.d/postgresql.conf"
-    mkdir -p /etc/nftables.d
-
-    cat > "$NFTABLES_SNIPPET" <<EOF
-# =============================================================================
-# nftables — PostgreSQL ($PORT/tcp)
-# Generated by AwesomeArchLinux/hardening/postgresql/postgresql.sh
-#
-# Include this in your main nftables.conf inside the input chain:
-#   include "/etc/nftables.d/postgresql.conf"
-#
-# Or add the rule manually:
-#   tcp dport $PORT ct state new accept
-# =============================================================================
-
-tcp dport $PORT ct state new accept
+    msg "Installing restricted nftables access rule for PostgreSQL..."
+    aal_nft_persist_block postgresql-remote-access <<EOF
+insert rule inet filter input ip saddr $REMOTE_CIDR tcp dport $PORT ct state new accept comment "awesome-postgresql-remote"
 EOF
-
-    chmod 644 "$NFTABLES_SNIPPET"
-    info "nftables snippet written to $NFTABLES_SNIPPET"
-    warn "Remember to include this in your main /etc/nftables.conf and reload: systemctl reload nftables"
+    aal_nft_remove_live_rules inet filter input awesome-postgresql-remote
+    nft insert rule inet filter input ip saddr "$REMOTE_CIDR" tcp dport "$PORT" \
+        ct state new accept comment "awesome-postgresql-remote"
+    info "nftables permits PostgreSQL only from $REMOTE_CIDR"
 else
-    info "Skipping nftables snippet (--local-only mode, no remote access)"
+    # Re-running in local-only mode revokes a remote rule installed by a
+    # previous version of this script without requiring a ruleset reload.
+    if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
+        aal_nft_remove_live_rules inet filter input awesome-postgresql-remote
+    fi
+    if [[ -f "$NFT_CONFIG" ]] && \
+            grep -Fqx '# BEGIN AwesomeArchLinux: postgresql-remote-access' "$NFT_CONFIG"; then
+        aal_nft_persist_block postgresql-remote-access </dev/null
+    fi
+    info "Local-only mode: no PostgreSQL firewall opening is installed"
 fi
 
 # =============================================================================
@@ -484,7 +577,7 @@ echo "  postgresql.conf:  ${PG_CONF}"
 echo "  pg_hba.conf:      ${PG_HBA}"
 echo "  systemd override: /etc/systemd/system/postgresql.service.d/hardening.conf"
 if [[ "$LOCAL_ONLY" == false ]]; then
-echo "  nftables snippet: /etc/nftables.d/postgresql.conf"
+echo "  Allowed CIDR:        ${REMOTE_CIDR} (managed in $NFT_CONFIG)"
 fi
 echo
 echo -e "${C_BLUE}Security Checklist:${C_NC}"
@@ -501,7 +594,7 @@ echo "  [x] pg_stat_statements loaded for query monitoring"
 if [[ "$ENABLE_SSL" == true ]]; then
 echo "  [x] SSL/TLS enabled (TLS 1.2+, strong ciphers)"
 else
-echo "  [ ] SSL/TLS not enabled — run with --ssl for encrypted connections"
+echo "  [ ] SSL/TLS not enabled (local-only mode)"
 fi
 echo
 echo -e "${C_YELLOW}IMPORTANT next steps:${C_NC}"
@@ -509,17 +602,12 @@ echo "  1. Change the default postgres superuser password:"
 echo "     sudo -u postgres psql -c \"ALTER USER postgres PASSWORD 'your-strong-password';\""
 echo "  2. Create application-specific users (see template above)"
 echo "  3. Never use the postgres superuser for application connections"
-if [[ "$ENABLE_SSL" == true ]]; then
-echo "  4. Replace placeholder SSL certificates with real ones:"
-echo "     ssl_cert_file = '/path/to/server.crt'"
-echo "     ssl_key_file  = '/path/to/server.key'"
-fi
-echo "  5. Set up regular backups:"
+echo "  4. Set up regular backups:"
 echo "     pg_dump, pg_basebackup, or WAL archiving"
-echo "  6. Consider connection pooling with PgBouncer for production loads"
-echo "  7. Monitor queries with pg_stat_statements:"
+echo "  5. Consider connection pooling with PgBouncer for production loads"
+echo "  6. Monitor queries with pg_stat_statements:"
 echo "     SELECT * FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;"
-echo "  8. Review postgresql.conf resource settings for your hardware:"
+echo "  7. Review postgresql.conf resource settings for your hardware:"
 echo "     https://pgtune.leopard.in.ua/"
 echo
 echo -e "${C_GREEN}Done.${C_NC}"

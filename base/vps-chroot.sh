@@ -1161,8 +1161,9 @@ Description=Check for available package updates (notification only)
 
 [Service]
 Type=oneshot
-# Sync databases and log available updates without automatically installing them.
-ExecStart=/bin/sh -c '/usr/bin/pacman -Sy && /usr/bin/pacman -Qu > /var/log/pacman-updates.log 2>&1 || true'
+# checkupdates syncs a temporary database, leaving pacman's live sync database
+# untouched. Exit 2 means there are no pending updates and is not an error.
+ExecStart=/bin/sh -c '/usr/bin/checkupdates > /var/log/pacman-updates.log 2>&1; rc=$$?; [ "$$rc" -eq 0 ] || [ "$$rc" -eq 2 ]'
 EOF
 systemctl enable pacman-autoupdate.timer
 

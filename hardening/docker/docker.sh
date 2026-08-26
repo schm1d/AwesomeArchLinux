@@ -12,7 +12,7 @@
 #                - CIS Docker Benchmark audit (daemon + running containers)
 #                - Image vulnerability scanning via Trivy
 #                - Docker Compose security auditing
-#                - Docker network hardening with nftables
+#                - Isolated container network with persistent nftables policy
 #                - Docker's maintained built-in AppArmor and seccomp defaults
 #
 # Author:      Bruno Schmid @brulliant
@@ -24,7 +24,7 @@
 #              --bench          Run CIS Docker Benchmark security audit
 #              --scan           Scan all local images with Trivy
 #              --compose PATH   Audit a docker-compose.yml for security issues
-#              --network        Generate Docker network hardening rules
+#              --network        Create and firewall an isolated network
 #              -h, --help       Show this help
 #
 #              With no flags the script preserves the runtime security defaults
@@ -37,6 +37,10 @@
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -75,7 +79,7 @@ Modes:
   --bench          Run CIS Docker Benchmark security audit
   --scan           Scan all local images with Trivy
   --compose PATH   Audit a docker-compose.yml for security issues
-  --network        Generate Docker network hardening rules
+  --network        Create and firewall an isolated container network
 
 Options:
   -h, --help       Show this help
@@ -87,7 +91,7 @@ Examples:
   sudo $0 --bench                         # CIS benchmark audit
   sudo $0 --scan                          # Scan all images
   sudo $0 --compose /opt/app/docker-compose.yml
-  sudo $0 --network                       # Generate nftables rules
+  sudo $0 --network                       # Create isolated network and rules
   sudo $0 --bench --scan --network        # All checks
 EOF
     exit 0
@@ -98,7 +102,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --bench)     DO_BENCH=true;   shift ;;
         --scan)      DO_SCAN=true;    shift ;;
-        --compose)   DO_COMPOSE=true; COMPOSE_PATH="$2"; shift 2 ;;
+        --compose)
+            [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || err "--compose requires a path"
+            DO_COMPOSE=true; COMPOSE_PATH="$2"; shift 2
+            ;;
         --network)   DO_NETWORK=true; shift ;;
         -h|--help)   usage ;;
         *)           err "Unknown option: $1. See -h for help." ;;
@@ -388,46 +395,12 @@ if [[ "$DO_SCAN" == true ]]; then
     if ! command -v trivy &>/dev/null; then
         msg "Installing Trivy..."
 
-        TRIVY_INSTALLED=false
-
-        # Try AUR helpers first
-        if command -v paru &>/dev/null; then
-            info "Attempting install via paru (AUR)..."
-            if sudo -u "${SUDO_USER:-nobody}" paru -S --noconfirm trivy-bin 2>/dev/null; then
-                TRIVY_INSTALLED=true
-            fi
-        elif command -v yay &>/dev/null; then
-            info "Attempting install via yay (AUR)..."
-            if sudo -u "${SUDO_USER:-nobody}" yay -S --noconfirm trivy-bin 2>/dev/null; then
-                TRIVY_INSTALLED=true
-            fi
-        fi
-
-        # Fall back to direct binary download
-        if [[ "$TRIVY_INSTALLED" == false ]]; then
-            info "Downloading Trivy binary from GitHub releases..."
-            TRIVY_VERSION=$(curl -fsSL "https://api.github.com/repos/aquasecurity/trivy/releases/latest" \
-                | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1)
-
-            if [[ -z "$TRIVY_VERSION" ]]; then
-                err "Could not determine latest Trivy version. Check your internet connection."
-            fi
-
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64)  TRIVY_ARCH="Linux-64bit" ;;
-                aarch64) TRIVY_ARCH="Linux-ARM64" ;;
-                *)       err "Unsupported architecture: $ARCH" ;;
-            esac
-
-            TRIVY_URL="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_ARCH}.tar.gz"
-            TMP_DIR=$(mktemp -d)
-            curl -fsSL "$TRIVY_URL" -o "$TMP_DIR/trivy.tar.gz"
-            tar -xzf "$TMP_DIR/trivy.tar.gz" -C "$TMP_DIR"
-            install -m 755 "$TMP_DIR/trivy" /usr/local/bin/trivy
-            rm -rf "$TMP_DIR"
-            msg "Trivy v${TRIVY_VERSION} installed to /usr/local/bin/trivy"
-        fi
+        # Trivy is in Arch's signed official repositories. Do not fall back to
+        # an AUR package or an unauthenticated release archive.
+        pacman -S --noconfirm --needed trivy
+        command -v trivy &>/dev/null || err "Trivy installation completed but no executable was found"
+        TRIVY_VER=$(trivy --version 2>/dev/null | head -1)
+        info "Installed from the signed Arch repository: $TRIVY_VER"
     else
         TRIVY_VER=$(trivy --version 2>/dev/null | head -1)
         info "Trivy already installed: $TRIVY_VER"
@@ -789,6 +762,12 @@ if [[ "$DO_NETWORK" == true ]]; then
     echo -e "${C_BLUE}========================================================================${C_NC}"
     echo
 
+    command -v nft &>/dev/null || err "--network requires nftables"
+    nft list chain inet filter input &>/dev/null || \
+        err "--network requires the installer-owned inet filter input chain"
+    nft list chain inet filter forward &>/dev/null || \
+        err "--network requires the installer-owned inet filter forward chain"
+
     # -----------------------------------------------------------------
     # 5.1 Create isolated Docker network
     # -----------------------------------------------------------------
@@ -797,106 +776,73 @@ if [[ "$DO_NETWORK" == true ]]; then
 
         ISOLATED_NET="docker-isolated"
         if docker network ls --format '{{.Name}}' | grep -q "^${ISOLATED_NET}$"; then
-            info "Network '$ISOLATED_NET' already exists"
+            DOCKER_INTERNAL=$(docker network inspect --format '{{.Internal}}' "$ISOLATED_NET")
+            DOCKER_SUBNETS=$(docker network inspect --format \
+                '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' "$ISOLATED_NET")
+            DOCKER_ICC=$(docker network inspect --format \
+                '{{index .Options "com.docker.network.bridge.enable_icc"}}' "$ISOLATED_NET")
+            [[ "$DOCKER_INTERNAL" == true ]] || \
+                err "Existing network '$ISOLATED_NET' is not internal; refusing to trust it"
+            grep -Fxq '172.28.0.0/16' <<< "$DOCKER_SUBNETS" || \
+                err "Existing network '$ISOLATED_NET' does not use 172.28.0.0/16"
+            [[ "$DOCKER_ICC" == false ]] || \
+                err "Existing network '$ISOLATED_NET' does not disable inter-container communication"
+            info "Verified existing isolated network '$ISOLATED_NET'"
         else
-            docker network create \
+            if ! docker network create \
                 --driver bridge \
                 --internal \
                 --subnet 172.28.0.0/16 \
                 --opt com.docker.network.bridge.enable_icc=false \
-                "$ISOLATED_NET" 2>/dev/null && \
-                msg "Created isolated network: $ISOLATED_NET (internal, no ICC)" || \
-                warn "Failed to create isolated network (Docker daemon may not be running)"
+                "$ISOLATED_NET"; then
+                err "Failed to create isolated Docker network"
+            fi
+            msg "Created isolated network: $ISOLATED_NET (internal, no ICC)"
         fi
     else
         msg "Creating isolated Podman network..."
         ISOLATED_NET="podman-isolated"
         if podman network ls --format '{{.Name}}' | grep -q "^${ISOLATED_NET}$"; then
-            info "Network '$ISOLATED_NET' already exists"
+            PODMAN_INTERNAL=$(podman network inspect --format '{{.Internal}}' "$ISOLATED_NET")
+            PODMAN_SUBNETS=$(podman network inspect --format \
+                '{{range .Subnets}}{{println .Subnet}}{{end}}' "$ISOLATED_NET")
+            [[ "$PODMAN_INTERNAL" == true ]] || \
+                err "Existing network '$ISOLATED_NET' is not internal; refusing to trust it"
+            grep -Fxq '172.28.0.0/16' <<< "$PODMAN_SUBNETS" || \
+                err "Existing network '$ISOLATED_NET' does not use 172.28.0.0/16"
+            info "Verified existing isolated network '$ISOLATED_NET'"
         else
-            podman network create \
+            if ! podman network create \
                 --internal \
                 --subnet 172.28.0.0/16 \
-                "$ISOLATED_NET" 2>/dev/null && \
-                msg "Created isolated network: $ISOLATED_NET (internal)" || \
-                warn "Failed to create isolated network"
+                "$ISOLATED_NET"; then
+                err "Failed to create isolated Podman network"
+            fi
+            msg "Created isolated network: $ISOLATED_NET (internal)"
         fi
     fi
 
     # -----------------------------------------------------------------
-    # 5.2 Generate nftables rules for Docker
+    # 5.2 Persist and apply host isolation rules
     # -----------------------------------------------------------------
-    msg "Generating nftables rules for Docker network hardening..."
+    msg "Installing persistent nftables isolation for 172.28.0.0/16..."
+    aal_nft_persist_block container-isolated-network <<'EOF'
+insert rule inet filter input ip saddr 172.28.0.0/16 drop comment "awesome-container-host-drop"
+insert rule inet filter forward ip saddr 172.28.0.0/16 drop comment "awesome-container-egress-drop"
+insert rule inet filter forward ip daddr 172.28.0.0/16 drop comment "awesome-container-ingress-drop"
+EOF
+    aal_nft_remove_live_rules inet filter input awesome-container-host-drop
+    aal_nft_remove_live_rules inet filter forward awesome-container-egress-drop
+    aal_nft_remove_live_rules inet filter forward awesome-container-ingress-drop
+    nft insert rule inet filter input ip saddr 172.28.0.0/16 \
+        drop comment "awesome-container-host-drop"
+    nft insert rule inet filter forward ip saddr 172.28.0.0/16 \
+        drop comment "awesome-container-egress-drop"
+    nft insert rule inet filter forward ip daddr 172.28.0.0/16 \
+        drop comment "awesome-container-ingress-drop"
 
-    NFTABLES_RULES="/etc/nftables.d/docker-hardening.nft"
-    mkdir -p /etc/nftables.d
-
-    cat > "$NFTABLES_RULES" <<'NFTRULES'
-#!/usr/sbin/nft -f
-# =============================================================================
-# nftables rules for Docker container network hardening
-# Generated by AwesomeArchLinux/hardening/docker/docker.sh
-#
-# Apply with:  nft -f /etc/nftables.d/docker-hardening.nft
-# Verify with: nft list ruleset
-# =============================================================================
-
-table inet docker_hardening {
-
-    # --- Chain: restrict container-to-host communication ---
-    chain docker_input {
-        type filter hook input priority filter; policy accept;
-
-        # Allow established/related connections
-        ct state established,related accept
-
-        # Allow containers to reach host DNS (port 53)
-        iifname "docker0" tcp dport 53 accept
-        iifname "docker0" udp dport 53 accept
-
-        # Allow DHCP from containers
-        iifname "docker0" udp dport { 67, 68 } accept
-
-        # Log and drop other container-to-host traffic
-        iifname "docker0" log prefix "[DOCKER-DROP] " drop
-    }
-
-    # --- Chain: restrict container outbound traffic ---
-    chain docker_forward {
-        type filter hook forward priority filter; policy accept;
-
-        # Allow established/related connections
-        ct state established,related accept
-
-        # Allow specific outbound ports from containers
-        # HTTP, HTTPS, DNS, NTP — adjust as needed
-        iifname "docker0" oifname != "docker0" tcp dport { 80, 443 } accept
-        iifname "docker0" oifname != "docker0" udp dport { 53, 123 } accept
-
-        # Log and drop other container-to-external traffic
-        iifname "docker0" oifname != "docker0" log prefix "[DOCKER-FWD-DROP] " drop
-    }
-}
-NFTRULES
-
-    chmod 644 "$NFTABLES_RULES"
-    GENERATED_FILES+=("$NFTABLES_RULES")
-    msg "nftables rules written to $NFTABLES_RULES"
-
-    echo
-    echo -e "${C_YELLOW}To apply the nftables rules:${C_NC}"
-    echo "  nft -f $NFTABLES_RULES"
-    echo
-    echo -e "${C_YELLOW}To persist across reboots, include in /etc/nftables.conf:${C_NC}"
-    echo "  include \"$NFTABLES_RULES\""
-    echo
-    echo -e "${C_YELLOW}To verify the ruleset:${C_NC}"
-    echo "  nft list ruleset"
-    echo
-
-    info "Allowed outbound ports from containers: 80 (HTTP), 443 (HTTPS), 53 (DNS), 123 (NTP)"
-    info "All other container-to-host and container-to-external traffic is logged and dropped."
-    info "Edit $NFTABLES_RULES to allow additional ports as needed."
+    msg "Isolated network policy applied and persisted in ${AAL_NFT_CONFIG:-/etc/nftables.conf}"
+    info "Containers on '$ISOLATED_NET' cannot reach the host or external networks."
 
 fi  # end --network
 
@@ -956,7 +902,7 @@ fi
 if [[ "$DO_NETWORK" == true ]]; then
     echo -e "${C_BLUE}Network Hardening:${C_NC}"
     echo "  Isolated network: ${ISOLATED_NET:-N/A}"
-    echo "  nftables rules:   ${NFTABLES_RULES:-N/A}"
+    echo "  Isolated subnet:  172.28.0.0/16 (managed in ${AAL_NFT_CONFIG:-/etc/nftables.conf})"
     echo
 fi
 

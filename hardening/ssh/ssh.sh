@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/nftables.sh"
+
 BBlue='\033[1;34m'
 BRed='\033[1;31m'
 BGreen='\033[1;32m'
@@ -44,7 +48,8 @@ while getopts ":u:p:kh" opt; do
         p) SSH_PORT="$OPTARG" ;;
         k) SKIP_KEY_CHECK=1 ;;
         h) show_help ;;
-        *) show_help ;;
+        :) echo -e "${BRed}ERROR: -${OPTARG} requires an argument.${NC}" >&2; exit 1 ;;
+        \?) echo -e "${BRed}ERROR: Unknown option: -${OPTARG}.${NC}" >&2; exit 1 ;;
     esac
 done
 
@@ -52,6 +57,10 @@ done
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root." 1>&2
    exit 1
+fi
+if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || (( 10#$SSH_PORT < 1 || 10#$SSH_PORT > 65535 )); then
+    echo -e "${BRed}ERROR: SSH port must be between 1 and 65535.${NC}" >&2
+    exit 1
 fi
 
 # Resolve ALLOWED_USERS: flag > SUDO_USER > prompt
@@ -294,27 +303,65 @@ else
     exit 1
 fi
 
-# Rate limiting — prefer nftables, fall back to iptables
+# Rate limiting — prefer the installer-owned nftables ruleset
 echo -e "${BBlue}Rate Limiting to avoid brute-forcing...${NC}"
-if command -v nft &>/dev/null && nft list table inet filter &>/dev/null; then
-    nft add rule inet filter input tcp dport "$SSH_PORT" ct state new limit rate 4/minute accept 2>/dev/null || true
-    nft add rule inet filter input tcp dport "$SSH_PORT" ct state new drop 2>/dev/null || true
-    echo -e "${BGreen}nftables SSH rate-limit rule applied.${NC}"
+if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
+    # insert places each rule at the head, so persist/apply the drop first and
+    # the limited accept second. The final live order is accept-then-drop,
+    # before the installer's terminal drop rule.
+    aal_nft_persist_block ssh-rate-limit <<EOF
+insert rule inet filter input tcp dport $SSH_PORT ct state new drop comment "awesome-ssh-rate-drop"
+insert rule inet filter input tcp dport $SSH_PORT ct state new limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
+EOF
+    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-accept
+    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-drop
+    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop"
+    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new \
+        limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
+    echo -e "${BGreen}nftables SSH rate limit applied and persisted without replacing unrelated rules.${NC}"
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
-    # iptables fallback (legacy kernel or VPS without nf_tables)
-    if ! iptables -C INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-            -m limit --limit 4/min --limit-burst 4 -j ACCEPT 2>/dev/null; then
-        iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-            -m limit --limit 4/min --limit-burst 4 -j ACCEPT
-        iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
-    fi
-    # Persist rules
-    if command -v iptables-save &>/dev/null; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/iptables.rules
-        systemctl enable iptables.service 2>/dev/null || true
-    fi
-    echo -e "${BGreen}iptables SSH rate-limit rule applied (legacy fallback).${NC}"
+    # Persist only the owned rules through an idempotent oneshot unit. Saving
+    # the whole live table here would also capture transient Docker rules.
+    install -d -o root -g root -m 0755 /usr/local/libexec
+    cat > /usr/local/libexec/awesome-ssh-rate-limit <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+SSH_PORT=$SSH_PORT
+delete_rules_by_comment() {
+    local marker="\$1" rule_number
+    while rule_number=\$(iptables -L INPUT --line-numbers -n | awk -v marker="\$marker" '
+        index(\$0, "/* " marker " */") { print \$1; exit }
+    '); [[ -n "\$rule_number" ]]; do
+        iptables -D INPUT "\$rule_number"
+    done
+}
+delete_rules_by_comment awesome-ssh-rate-accept
+delete_rules_by_comment awesome-ssh-rate-drop
+iptables -I INPUT 1 -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
+    -m comment --comment awesome-ssh-rate-drop -j DROP
+iptables -I INPUT 1 -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
+    -m limit --limit 4/min --limit-burst 4 \
+    -m comment --comment awesome-ssh-rate-accept -j ACCEPT
+EOF
+    chmod 0755 /usr/local/libexec/awesome-ssh-rate-limit
+    cat > /etc/systemd/system/awesome-ssh-rate-limit.service <<'EOF'
+[Unit]
+Description=Install AwesomeArchLinux SSH rate-limit rules
+After=iptables.service
+Before=sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/awesome-ssh-rate-limit
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable awesome-ssh-rate-limit.service
+    systemctl restart awesome-ssh-rate-limit.service
+    echo -e "${BGreen}iptables SSH rate limit applied and persisted by an idempotent systemd unit.${NC}"
 else
     echo -e "${BYellow}Neither nftables nor iptables is functional — skipping rate limiting.${NC}"
     echo -e "${BYellow}Rate limiting is already configured if you ran the base installation.${NC}"

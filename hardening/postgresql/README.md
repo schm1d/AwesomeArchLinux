@@ -15,10 +15,12 @@ Installs and hardens [PostgreSQL](https://archlinux.org/packages/extra/x86_64/po
 sudo ./postgresql.sh
 
 # Custom port with SSL
-sudo ./postgresql.sh -p 5433 --ssl
+sudo ./postgresql.sh -p 5433 --ssl \
+  --ssl-cert /root/server.crt --ssl-key /root/server.key
 
 # Remote access with SSL (for app servers on a private network)
-sudo ./postgresql.sh --no-local --ssl
+sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
+  --ssl-cert /root/server.crt --ssl-key /root/server.key
 ```
 
 ### Options
@@ -27,8 +29,11 @@ sudo ./postgresql.sh --no-local --ssl
 |------|-------------|---------|
 | `-p PORT` | PostgreSQL listen port | `5432` |
 | `--ssl` | Enable SSL/TLS connections | off |
+| `--ssl-cert PATH` | PEM server certificate; required with `--ssl` | none |
+| `--ssl-key PATH` | Unencrypted PEM private key; required with `--ssl` | none |
 | `--local-only` | Listen only on localhost | on (default) |
-| `--no-local` | Listen on all interfaces | off |
+| `--no-local` | Listen on all interfaces; requires TLS and an allowed CIDR | off |
+| `--allow-cidr CIDR` | IPv4 client network allowed by `pg_hba.conf` and nftables (`/0` is rejected) | none |
 | `-h` | Show help | |
 
 ## What It Does
@@ -118,7 +123,7 @@ sudo ./postgresql.sh --no-local --ssl
 | `local` | all | all | | `scram-sha-256` |
 | `host` | all | all | `127.0.0.1/32` | `scram-sha-256` |
 | `host` | all | all | `::1/128` | `scram-sha-256` |
-| `hostssl` | all | all | `0.0.0.0/0` | `scram-sha-256` (remote+SSL only) |
+| `hostssl` | all | all | operator-supplied IPv4 CIDR | `scram-sha-256` (remote+SSL only) |
 
 **No `trust` authentication anywhere.**
 
@@ -182,12 +187,15 @@ Client certificate authentication over SSL. Requires PKI infrastructure but prov
 
 ```
 # pg_hba.conf
-hostssl all    all    0.0.0.0/0    cert    clientcert=verify-full
+hostssl all    all    10.20.30.0/24    cert    clientcert=verify-full
 ```
 
 ## SSL Setup with Real Certificates
 
-The script uses placeholder certificate paths. For production, replace them with real certificates.
+The script refuses `--ssl` without a valid, matching certificate and unencrypted
+private key. It installs them as postgres-owned mode-0600 files under
+`/var/lib/postgres/tls/`; remote mode additionally requires an explicit IPv4
+client CIDR and installs the matching rule in the project-owned nftables ruleset.
 
 ### Option 1: Let's Encrypt (with certbot)
 
@@ -198,20 +206,10 @@ pacman -S certbot
 # Obtain certificate
 certbot certonly --standalone -d db.example.com
 
-# Update postgresql.conf
-ssl_cert_file = '/etc/letsencrypt/live/db.example.com/fullchain.pem'
-ssl_key_file = '/etc/letsencrypt/live/db.example.com/privkey.pem'
-```
-
-Make sure PostgreSQL can read the private key:
-
-```bash
-chmod 640 /etc/letsencrypt/live/db.example.com/privkey.pem
-chown root:postgres /etc/letsencrypt/live/db.example.com/privkey.pem
-
-# Also fix the archive directory
-chmod 750 /etc/letsencrypt/archive/db.example.com/
-chown root:postgres /etc/letsencrypt/archive/db.example.com/
+# Install the certificate through the hardening script
+sudo ./postgresql.sh --ssl \
+  --ssl-cert /etc/letsencrypt/live/db.example.com/fullchain.pem \
+  --ssl-key /etc/letsencrypt/live/db.example.com/privkey.pem
 ```
 
 ### Option 2: Self-signed (internal networks)
@@ -236,9 +234,10 @@ openssl x509 -req -days 365 \
     -CAcreateserial \
     -out /etc/ssl/postgresql/server.crt
 
-# Set permissions
-chown postgres:postgres /etc/ssl/postgresql/server.key
-chmod 600 /etc/ssl/postgresql/server.key
+# Install for one private application subnet
+sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
+  --ssl-cert /etc/ssl/postgresql/server.crt \
+  --ssl-key /etc/ssl/postgresql/server.key
 ```
 
 ### Verify SSL Connections
@@ -555,7 +554,7 @@ CREATE POLICY user_isolation ON sensitive_data
 
 **Problem:** Passwords and data travel in plaintext.
 
-**Fix:** Use `hostssl` entries in pg_hba.conf (not `host`), set `ssl = on`, and deploy real certificates.
+**Fix:** Use `--no-local` only with an explicit private `--allow-cidr`, `--ssl`, and real certificate/key files. The script rejects cleartext or world-wide remote access.
 
 ### 9. Not Monitoring Queries
 
@@ -575,8 +574,9 @@ CREATE POLICY user_isolation ON sensitive_data
 |------|-------------|
 | `/var/lib/postgres/data/postgresql.conf` | Hardened main configuration |
 | `/var/lib/postgres/data/pg_hba.conf` | Hardened client authentication |
+| `/var/lib/postgres/tls/server.{crt,key}` | Installed TLS material (`0600`, `postgres:postgres`) |
 | `/etc/systemd/system/postgresql.service.d/hardening.conf` | systemd security override |
-| `/etc/nftables.d/postgresql.conf` | Firewall snippet (remote access only) |
+| `/etc/nftables.conf` managed block | CIDR-restricted firewall rule (remote access only) |
 | `/var/log/postgresql-hardening-*.log` | Script execution log |
 
 ## References

@@ -1,146 +1,85 @@
-# 🛡️ Enhancing Network Security: Firehol Arch Linux setup
+# FireHOL Blocklist Firewall
 
-This sultry little FireHOL setup script brings you cutting-edge protection with minimal effort.  Paired with the sizzling blocklists from [FireHOL/blocklist-ipsets](https://github.com/firehol/blocklist-ipsets), it’s your ticket to locking down malicious traffic in style. Let’s dive in and get that firewall purring!
+Installs FireHOL and its `update-ipsets` utility from the AUR package, enables
+the selected FireHOL aggregate list plus `fullbogons`, and creates a default-deny
+iptables policy.
 
-## 🔥 Ignite Your Setup
+FireHOL is an alternative firewall backend. It must not be stacked on the
+installer-owned nftables `inet filter` chains: an accept in one firewall cannot
+override a drop in the other. The script detects that configuration and refuses
+to proceed rather than silently producing a partially effective ruleset.
 
- **Snag the Script:**  
-   Download the script to get started:
-   ```bash
-   wget https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/firehol/firehol.sh
-```
+## Usage
 
-Make the script executable and run it:
+Choose inbound services explicitly. Running without an inbound-policy choice is
+refused so a remote operator cannot accidentally lock out the machine.
 
 ```bash
-    chmod +x ./firehol.sh
-   ./firehol.sh
-   ```
+# SSH-only server
+sudo ./firehol.sh --allow-ssh 22
 
-Now that FireHOL is running successfully, you can add blocklists from the FireHOL blocklist-ipsets repository.  
-Here's a step-by-step guide to implement these blocklists:
+# SSH plus a web server
+sudo ./firehol.sh --allow-ssh 2222 --allow-http --allow-https
 
-## 1. **Download the blocklist IP sets**
-   ```bash
-   sudo update-ipsets -g
-   ```
-   This will download all available blocklists to your system.
+# Host that intentionally accepts no inbound connections
+sudo ./firehol.sh --no-inbound
 
-## 2. **View available blocklists**
-   ```bash
-   sudo update-ipsets
-   ```
-   This shows all blocklists you can use.
+# Rebuild configuration without reinstalling the AUR package
+sudo ./firehol.sh --update-only --allow-ssh 22
+```
 
-## 3. **Enable specific blocklists**
-   You can enable individual blocklists according to your needs:
-   ```bash
-   # Basic protection (recommended to start with)
-   sudo update-ipsets enable firehol_level1
-   
-   # For specific threats, add more specialized lists
-   sudo update-ipsets enable sslbl
-   sudo update-ipsets enable spamhaus_edrop
-   sudo update-ipsets enable ransomware_rw 
-   ```
+| Option | Meaning |
+|---|---|
+| `-l LEVEL` | FireHOL aggregate level 1, 2, or 3 (default: 1) |
+| `-u`, `--update-only` | Skip package installation |
+| `--allow-ssh PORT` | Allow inbound SSH on the specified TCP port |
+| `--allow-http` | Allow inbound TCP 80 |
+| `--allow-https` | Allow inbound TCP 443 |
+| `--no-inbound` | Explicitly allow no inbound services |
+| `-h`, `--help` | Show help |
 
- ## 4. **Edit your FireHOL configuration**
-   ```bash
-   sudo nano /etc/firehol/firehol.conf
-   ```
-   
-   Modify your configuration to include the blocklists. Add these lines within the `interface any world` section:
-   ```
-   # Block traffic using FireHOL IP sets
-   blacklist full ipset:firehol_level1
-   blacklist full ipset:spamhaus_edrop
-   blacklist full ipset:dshield
-   ```
+`--no-inbound` cannot be combined with an allow option.
 
-   The blocklist format is:
-   ```bash
-   # Block both directions (most restrictive)
-   blacklist full ipset:firehol_level1
-   
-   # Block only incoming traffic from these IPs
-   blacklist ipset:spamhaus_drop
-   
-   # Block only outgoing traffic to these IPs
-   blacklist out ipset:dshield 
-   
-   # Block by IP/network group - use for multiple IP sets with same policy
-   ipset4 create mygroup hash:net
-   ipset4 addfile mygroup ipsets/firehol_level1
-   ipset4 addfile mygroup ipsets/spamhaus_drop
-   blacklist full ipset:mygroup
-   ```
+## Installation safety
 
-   ### Updating IP Sets
-   Update your IP sets manually:
-   ```bash
-   sudo update-ipsets
-   ```
+- Repository dependencies are installed with a complete `pacman -Syu`; partial
+  `pacman -Sy` upgrades are not used.
+- `iprange` and `firehol` are built as an unprivileged `_makepkg` user. Only the
+  resulting package files inside the build directory are passed to root
+  `pacman -U`.
+- `update-ipsets` is provided by the FireHOL package; there is no separate
+  `update-ipsets` AUR package.
+- A failed list enable/download or `firehol debug` validation aborts activation.
 
-   ### Force a recheck of all IP sets
-   ```bash
-   sudo update-ipsets --recheck
-   ```
+## Generated configuration
 
-   ### Update only specific IP sets
-   ```bash
-   sudo update-ipsets run firehol_level1 dshield
-   ```
+The script writes `/etc/firehol/firehol.conf` with:
 
-   ## 5. **Test your configuration**
-   ```bash
-   sudo firehol try
-   ```
-   This will load the new configuration temporarily and prompt you to confirm it works.
+- `firehol_level1`, `firehol_level2`, or `firehol_level3`;
+- `fullbogons`;
+- both blacklists declared before the first interface, as FireHOL requires;
+- a default-drop inbound policy;
+- unrestricted outbound client traffic;
+- only the inbound services explicitly selected on the command line.
 
-   ## 6. **Additional blocklist options**
+The daily `/etc/cron.d/firehol-ipsets` job reloads the active firewall only when
+`update-ipsets` succeeds. It uses `firehol condrestart`; the interactive
+30-second `firehol try` command is reserved for attended manual testing.
 
-   There are different levels of protection:
-   - `firehol_level1`: Safe for most users
-   - `firehol_level2`: More aggressive blocking
-   - `firehol_level3`: Very aggressive (may cause false positives)
-   - `firehol_level4`: Extremely aggressive (high chance of false positives)
+## Verification
 
-   Category-specific blocklists:
-   - `firehol_webserver`: Protection for web servers
-   - `firehol_anonymous`: Blocks anonymous networks (Tor, proxies)
-   - `cybercrime`: Blocks known cybercrime sources
-   - `coinbl_hosts`: Cryptocurrency mining/cryptojacking protection
-   - `malware`: Known malware sources
+```bash
+sudo firehol debug
+sudo systemctl status firehol
+sudo ipset list -n
+sudo journalctl -u firehol
+```
 
-   ### Based on the documentation:
+Start with level 1. Higher aggregate levels increase false-positive risk and
+should be tested against the machine's actual dependencies.
 
-   - `General protection`: firehol_level1
-   - `Web server protection`: firehol_level1, firehol_webserver
-  - ` Mail server protection`: firehol_level1, spamhaus_drop, spamhaus_edrop
-  - ` Protection against malicious activities`: firehol_level3, dshield
-   - `Protection against child exploitation material`: iblocklist_pedophiles
-   - `Ransomware protection`: ransomware_rw, ransomware_feed
+## References
 
-## 7. **Verify your own active blocklists**
-
-The `ipset` command is command line utility that allows the firewall admins to manage large lists of IPs. More about it [here](https://firehol.org/guides/ipset/).
-
-   ```bash
-   sudo ipset list -n
-   ```
-   This will show all active IP sets.
-
-## 8. **Monitor logs for blocked traffic**
-   ```bash
-   sudo journalctl -f | grep DROP
-   ```
-
-The cron job you've already set up will automatically update these IP sets daily, ensuring you have the latest protection.  
-
- Dive Deeper
- [FireHOL Docs](https://firehol.org/documentation/)  
-
-> [!IMPORTANT]
-> Start with fewer blocklists and gradually add more as needed to avoid accidentally blocking legitimate traffic.
-
-
+- [FireHOL configuration reference](https://firehol.org/firehol-manual/firehol-conf/)
+- [FireHOL blacklist reference](https://firehol.org/firehol-manual/firehol-blacklist/)
+- [FireHOL command reference](https://firehol.org/firehol-manual/firehol/)

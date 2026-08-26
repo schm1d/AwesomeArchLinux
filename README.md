@@ -147,8 +147,8 @@ AwesomeArchLinux/
 
 #### Firewall
 
-- **nftables** &mdash; Default deny policy, SSH rate limiting (2/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
-- **FireHOL** &mdash; Optional advanced firewall with IP blocklist integration from FireHOL's blocklist-ipsets repository. Configurable blocklist levels, automated daily updates via cron.
+- **nftables** &mdash; Default deny policy, SSH rate limiting (4/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
+- **FireHOL** &mdash; Optional iptables-based alternative firewall with FireHOL blocklists, explicit inbound-service selection, and fail-closed daily updates. It refuses to stack on the installer-owned nftables ruleset.
 - **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
 - **Composable sysctl profiles** &mdash; Compatible workstation hardening by default, with explicit strict, fq + BBR performance, and IPv6-disable overlays plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
 
@@ -201,7 +201,7 @@ AwesomeArchLinux/
 
 #### Database Hardening (PostgreSQL & MariaDB)
 
-- **PostgreSQL** (`postgresql.sh`) &mdash; `initdb` with `--data-checksums --auth-host=scram-sha-256`, hardened `postgresql.conf` (SSL required, `password_encryption=scram-sha-256`, `log_connections=on`, `log_disconnections=on`), locked-down `pg_hba.conf` (no `trust` anywhere), `pg_stat_statements` extension, systemd sandboxing.
+- **PostgreSQL** (`postgresql.sh`) &mdash; `initdb` with `--data-checksums --auth-host=scram-sha-256`, locked-down `pg_hba.conf` (no `trust` anywhere), `pg_stat_statements`, and systemd sandboxing. Remote mode fails closed unless given real TLS material and an explicit client CIDR enforced by both PostgreSQL and nftables.
 - **MariaDB** (`mariadb.sh`) &mdash; Automated `mysql_secure_installation` equivalent (removes anonymous users, test database, remote root), random root password saved to `/root/.mariadb-root-pass` (600 permissions), `local-infile=0`, `skip-name-resolve`, `secure-file-priv`, `STRICT_TRANS_TABLES` SQL mode, self-signed SSL certificate generation, systemd hardening, logrotate.
 - See [`hardening/postgresql/README.md`](hardening/postgresql/README.md) and [`hardening/mariadb/README.md`](hardening/mariadb/README.md) for backup strategies and common security mistakes.
 
@@ -219,7 +219,7 @@ AwesomeArchLinux/
 - **CIS Docker Benchmark** (`--bench`) &mdash; Automated audit against the CIS Docker Benchmark, checks daemon configuration, container runtime, images, and host security.
 - **Trivy image scanning** (`--scan`) &mdash; Vulnerability scanning for container images with weekly systemd timer for automated re-scans.
 - **Compose hardening** (`--compose PATH`) &mdash; Audits Docker Compose files for 11 security issues (privileged mode, host networking, writable root filesystem, missing resource limits, etc.).
-- **Network hardening** (`--network`) &mdash; nftables rules for container traffic, inter-container communication restrictions.
+- **Network hardening** (`--network`) &mdash; Creates a fixed internal subnet and installs persistent nftables rules that block container-to-host and external forwarding by subnet rather than an unstable bridge name.
 - **Security profiles** &mdash; Keeps Docker's maintained built-in `docker-default` AppArmor and default seccomp profiles; the former static profiles were weaker than current Docker defaults.
 - See [`hardening/docker/README.md`](hardening/docker/README.md) for container security best practices.
 
@@ -529,7 +529,7 @@ recovery-aware migration.
 - **sysstat** &mdash; System performance accounting.
 - **logrotate** &mdash; Daily rotation, 7-day retention, compressed.
 - **journald** &mdash; Persistent storage, compressed, sealed, 200MB max.
-- **Update notifications** &mdash; Daily `pacman -Sy && pacman -Qu` check via systemd timer (logs available updates to `/var/log/pacman-updates.log` without auto-installing).
+- **Update notifications** &mdash; Daily `checkupdates` run against a temporary sync database via systemd timer (logs available updates to `/var/log/pacman-updates.log` without changing the live package database or auto-installing).
 
 #### GRUB Security
 
@@ -713,7 +713,7 @@ sudo ./hardening/mariadb/mariadb.sh                                   # MariaDB 
 
 # --- Container Security ---
 sudo ./hardening/docker/docker.sh --bench                             # CIS Docker Benchmark audit
-sudo ./hardening/docker/docker.sh --scan myimage:latest               # Trivy image scan
+sudo ./hardening/docker/docker.sh --scan                              # Scan all local images with Trivy
 sudo ./hardening/docker/docker.sh --compose docker-compose.yml        # Compose security audit
 sudo ./hardening/docker/docker.sh --network                           # Container network hardening
 
@@ -724,7 +724,7 @@ sudo ./hardening/postfix/postfix.sh -r smtp.gmail.com -u user@gmail.com -p 'pass
 
 # --- Detection ---
 sudo ./hardening/crowdsec/crowdsec.sh --with-nginx --with-nftables    # CrowdSec IDS
-sudo ./hardening/firehol/firehol.sh -l 1       # FireHOL with IP blocklists
+sudo ./hardening/firehol/firehol.sh -l 1 --allow-ssh 22  # FireHOL alternative with IP blocklists
 
 # --- Utilities ---
 sudo ./utils/backup.sh --init                  # Initialize encrypted backups

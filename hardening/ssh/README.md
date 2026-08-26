@@ -109,7 +109,7 @@ Runs `sshd -t` to validate the configuration before restarting. On failure, auto
 
 ### 6. Rate Limiting (nftables / iptables)
 
-Adds rate limiting for SSH: allows up to 4 new connections per minute, dropping excess. Prefers nftables (integrates with the `inet filter` table created by the base installation). Falls back to iptables automatically on VPS kernels that lack the `nf_tables` module.
+Adds rate limiting for SSH: allows up to 4 new connections per minute, dropping excess. Prefers nftables and installs a validated managed block in the `inet filter` table created by the base installation. On VPS kernels without `nf_tables`, an idempotent oneshot service restores only the script-owned iptables rules at boot instead of snapshotting transient rules from other software.
 
 ---
 
@@ -189,5 +189,5 @@ After running the script:
 
 - **Backup access:** Ensure you have console or out-of-band access before applying. The script backs up the original config automatically.
 - **Authorized keys:** Copy your public key to `~/.ssh/authorized_keys` on the server *before* disconnecting, as password authentication is disabled.
-- **Firewall persistence:** nftables rules persist via `/etc/nftables.conf` and `nftables.service`. If the iptables fallback is used, rules are saved to `/etc/iptables/iptables.rules` with `iptables.service` enabled.
+- **Firewall persistence:** nftables rules persist in a marked block in `/etc/nftables.conf`. The iptables fallback persists through `awesome-ssh-rate-limit.service` and `/usr/local/libexec/awesome-ssh-rate-limit`.
 - **Banner:** Modify `/etc/issue.net` to match your organization's legal requirements.

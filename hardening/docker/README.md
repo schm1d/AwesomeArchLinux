@@ -7,7 +7,7 @@ This script complements `utils/docker.sh` (which handles installation and daemon
 ## Quick Start
 
 ```bash
-# Run all checks and generate security profiles
+# Run all checks and create an isolated network
 sudo ./docker.sh --bench --scan --network
 
 # CIS benchmark audit only
@@ -19,7 +19,7 @@ sudo ./docker.sh --scan
 # Audit a docker-compose.yml
 sudo ./docker.sh --compose /path/to/docker-compose.yml
 
-# Generate network hardening rules
+# Create and firewall an isolated network
 sudo ./docker.sh --network
 
 # Generate profiles only (no flags)
@@ -33,7 +33,7 @@ sudo ./docker.sh
 | `--bench` | Run CIS Docker Benchmark security audit |
 | `--scan` | Scan all local images with Trivy (HIGH/CRITICAL) |
 | `--compose PATH` | Audit a docker-compose.yml for security issues |
-| `--network` | Create isolated networks and generate nftables rules |
+| `--network` | Create and firewall an isolated internal network |
 | (no flags) | Preserve Docker's built-in AppArmor and seccomp defaults |
 
 Running with no flags leaves the runtime security defaults intact and reports that policy. Flags can be combined.
@@ -73,7 +73,7 @@ Results are reported as PASS/WARN/FAIL with a final score percentage.
 
 The `--scan` flag provides automated vulnerability scanning:
 
-1. **Installs Trivy** if not present (via AUR helper or direct binary download from GitHub).
+1. **Installs Trivy** if not present from Arch's signed official repository.
 2. **Scans all local images** for HIGH and CRITICAL vulnerabilities.
 3. **Generates a JSON report** at `/var/log/docker-security/image-scan-<date>.json`.
 4. **Creates a systemd timer** (`docker-image-scan.timer`) for weekly automated scans.
@@ -179,24 +179,23 @@ networks:
 
 ### nftables rules
 
-The script generates nftables rules at `/etc/nftables.d/docker-hardening.nft` that:
+The script installs marked rules directly into the installer-owned
+`inet filter` input and forward chains. They match the fixed
+`172.28.0.0/16` subnet rather than a runtime-generated bridge name and block:
 
-- **Restrict container-to-host communication** -- Only DNS (53) and DHCP (67, 68) allowed.
-- **Restrict container outbound traffic** -- Only HTTP (80), HTTPS (443), DNS (53), and NTP (123) allowed.
-- **Log dropped packets** -- All blocked traffic is logged with `[DOCKER-DROP]` and `[DOCKER-FWD-DROP]` prefixes.
+- traffic from the isolated subnet to the host;
+- traffic from the isolated subnet to external networks;
+- forwarded traffic into the isolated subnet.
+
+The rules are validated as part of the complete `/etc/nftables.conf`, applied
+immediately, and persisted in a replaceable managed block. The internal network
+is intentionally fully isolated; use a separately designed network when a
+workload requires outbound access.
 
 ```bash
-# Apply rules
-nft -f /etc/nftables.d/docker-hardening.nft
-
-# Verify
+# Verify the active policy
 nft list ruleset
-
-# Persist across reboots (add to /etc/nftables.conf)
-include "/etc/nftables.d/docker-hardening.nft"
 ```
-
-Edit the rules to allow additional ports as needed for your workloads.
 
 ## Seccomp and AppArmor for Containers
 
@@ -383,7 +382,7 @@ docker ps -q | xargs -I {} docker inspect --format '{{.Name}}: AppArmor={{.AppAr
 
 | File | Purpose |
 |------|---------|
-| `/etc/nftables.d/docker-hardening.nft` | nftables rules for container network isolation (--network) |
+| `/etc/nftables.conf` managed block | Persistent subnet isolation rules (`--network`) |
 | `/usr/local/bin/docker-image-scan.sh` | Automated image scanning script (--scan) |
 | `/etc/systemd/system/docker-image-scan.timer` | Weekly scan timer (--scan) |
 | `/var/log/docker-security/image-scan-*.json` | Trivy scan reports (--scan) |
