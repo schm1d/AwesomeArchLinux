@@ -35,7 +35,7 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 | 1 MiB ef02 | 1 GiB FAT32 | +------+------+------+--------+-----------+ |
 | unmounted  | /efi        | | swap | root | var* | tmp    | home      | |
 |            |             | +------+------+------+--------+-----------+ |
-|            |             | /tmp: 10 GiB, or 25 GiB on >=1 TB disks    |
+|            |             | /tmp: 10 GiB, or 25 GiB on >=1 TB disks     |
 +------------+-------------+---------------------------------------------+
 ```
 
