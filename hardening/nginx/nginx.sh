@@ -22,12 +22,11 @@
 #
 # What this script does:
 #   1. Installs nginx-mainline + certbot + certbot-nginx
-#   2. Generates a 4096-bit DH parameter file
-#   3. Obtains Let's Encrypt certificates via certbot
-#   4. Writes a hardened nginx configuration
-#   5. Sets up automatic certificate renewal via systemd timer
-#   6. Hardens the nginx systemd service with security overrides
-#   7. Verifies configuration and reloads nginx
+#   2. Obtains Let's Encrypt certificates via certbot
+#   3. Writes a hardened nginx configuration
+#   4. Sets up automatic certificate renewal via systemd timer
+#   5. Hardens the nginx systemd service with security overrides
+#   6. Verifies configuration and reloads nginx
 # =============================================================================
 
 set -euo pipefail
@@ -35,6 +34,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -56,8 +57,6 @@ HTTPS_PORT=443
 DRY_RUN=false
 SKIP_CERTBOT=false
 NGINX_CONF="/etc/nginx/nginx.conf"
-SSL_DIR="/etc/nginx/ssl"
-DH_PARAM="$SSL_DIR/dhparam.pem"
 SECURITY_CONF="/etc/nginx/conf.d/security-headers.conf"
 SSL_CONF="/etc/nginx/conf.d/ssl-hardening.conf"
 LOGFILE="/var/log/nginx-hardening-$(date +%Y%m%d-%H%M%S).log"
@@ -87,12 +86,13 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -d)          DOMAINS+=("$2"); shift 2 ;;
-        -e)          EMAIL="$2"; shift 2 ;;
-        -w)          WEBROOT="$2"; shift 2 ;;
-        -p)          HTTPS_PORT="$2"; shift 2 ;;
+        -d)          need_arg "$@"; DOMAINS+=("$2"); shift 2 ;;
+        -e)          need_arg "$@"; EMAIL="$2"; shift 2 ;;
+        -w)          need_arg "$@"; WEBROOT="$2"; shift 2 ;;
+        -p)          need_arg "$@"; HTTPS_PORT="$2"; shift 2 ;;
         --dry-run)   DRY_RUN=true; shift ;;
         --skip-certbot) SKIP_CERTBOT=true; shift ;;
         -h|--help)   usage ;;
@@ -106,6 +106,19 @@ done
 [[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || \
     err "HTTPS port must be between 1 and 65535"
 
+declare -A SEEN_DOMAINS=()
+declare -a NORMALIZED_DOMAINS=()
+for domain in "${DOMAINS[@]}"; do
+    domain="${domain,,}"
+    aal_valid_hostname "$domain" || err "Invalid domain name: $domain"
+    if [[ -z "${SEEN_DOMAINS[$domain]:-}" ]]; then
+        NORMALIZED_DOMAINS+=("$domain")
+        SEEN_DOMAINS["$domain"]=1
+    fi
+done
+DOMAINS=("${NORMALIZED_DOMAINS[@]}")
+unset SEEN_DOMAINS NORMALIZED_DOMAINS domain
+
 # This path is used as the target of recursive chown/chmod operations. Resolve
 # existing symlinks and constrain it to dedicated web-content hierarchies so a
 # typo such as '-w /' cannot alter the operating system tree.
@@ -114,9 +127,12 @@ case "$WEBROOT" in
     /var/www/*|/srv/http/*) ;;
     *) err "Unsafe webroot '$WEBROOT'. Use a dedicated directory below /var/www/ or /srv/http/." ;;
 esac
+[[ "$WEBROOT" =~ ^/(var/www|srv/http)/[A-Za-z0-9._/-]+$ ]] || \
+    err "Webroot contains unsupported characters: $WEBROOT"
 
 PRIMARY_DOMAIN="${DOMAINS[0]}"
 EMAIL="${EMAIL:-webmaster@$PRIMARY_DOMAIN}"
+aal_valid_email "$EMAIL" || err "Invalid certificate notification email: $EMAIL"
 
 # Redirect output to logfile as well
 exec > >(tee -a "$LOGFILE") 2>&1
@@ -141,22 +157,7 @@ NGINX_VER=$(nginx -v 2>&1 | grep -oP '[\d.]+')
 info "nginx version: $NGINX_VER"
 
 # =============================================================================
-# 2. GENERATE DH PARAMETERS
-# =============================================================================
-
-mkdir -p "$SSL_DIR"
-chmod 700 "$SSL_DIR"
-
-if [[ ! -f "$DH_PARAM" ]]; then
-    msg "Generating 4096-bit DH parameters (this takes a few minutes)..."
-    openssl dhparam -out "$DH_PARAM" 4096
-    chmod 600 "$DH_PARAM"
-else
-    info "DH parameters already exist at $DH_PARAM"
-fi
-
-# =============================================================================
-# 3. PREPARE DIRECTORIES
+# 2. PREPARE DIRECTORIES
 # =============================================================================
 
 msg "Preparing web directories..."
@@ -177,7 +178,7 @@ mkdir -p /etc/nginx/conf.d
 mkdir -p /etc/nginx/sites-enabled
 
 # =============================================================================
-# 4. WRITE PRE-CERTIFICATE NGINX CONFIG (for ACME challenge)
+# 3. WRITE PRE-CERTIFICATE NGINX CONFIG (for ACME challenge)
 # =============================================================================
 
 msg "Writing initial nginx config for ACME challenge..."
@@ -273,11 +274,20 @@ systemctl enable nginx
 systemctl restart nginx
 
 # =============================================================================
-# 4b. OPEN FIREWALL PORTS (80/443)
+# 3b. OPEN FIREWALL PORTS (80/443)
 # =============================================================================
 
 msg "Opening firewall ports 80 (HTTP) and $HTTPS_PORT (HTTPS)..."
 if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null 2>&1; then
+    # Remove the legacy fallback service if this host has moved to the
+    # installer-owned nftables ruleset.
+    if [[ -x /usr/local/bin/awesome-nginx-iptables ]]; then
+        /usr/local/bin/awesome-nginx-iptables stop || \
+            err "Could not remove the legacy nginx iptables chain"
+    fi
+    if [[ -f /etc/systemd/system/awesome-nginx-firewall.service ]]; then
+        systemctl disable awesome-nginx-firewall.service
+    fi
     aal_nft_persist_block "nginx" <<EOF
 insert rule inet filter input ct state new tcp dport 80 accept comment "awesome-nginx-http"
 insert rule inet filter input ct state new tcp dport $HTTPS_PORT accept comment "awesome-nginx-https"
@@ -288,19 +298,119 @@ EOF
     nft insert rule inet filter input ct state new tcp dport "$HTTPS_PORT" accept comment "awesome-nginx-https"
     msg "nftables: ports 80/$HTTPS_PORT opened without replacing the live ruleset."
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null 2>&1; then
-    iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -p tcp --dport "$HTTPS_PORT" -j ACCEPT 2>/dev/null || true
-    if command -v iptables-save &>/dev/null; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/iptables.rules
+    install -d -o root -g root -m 0755 /etc/default
+    install -d -o root -g root -m 0755 /usr/local/bin
+    cat > /etc/default/awesome-nginx-firewall <<EOF
+HTTP_PORT=80
+HTTPS_PORT=$HTTPS_PORT
+EOF
+    chmod 0600 /etc/default/awesome-nginx-firewall
+
+    cat > /usr/local/bin/awesome-nginx-iptables <<'NGINX_IPTABLES'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG=${AAL_NGINX_FIREWALL_CONFIG:-/etc/default/awesome-nginx-firewall}
+IPTABLES_BIN=${AAL_IPTABLES_BIN:-iptables}
+IP6TABLES_BIN=${AAL_IP6TABLES_BIN:-ip6tables}
+CHAIN=AWESOME_NGINX
+
+[[ -r "$CONFIG" ]] || { printf 'Firewall configuration is unreadable: %s\n' "$CONFIG" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$CONFIG"
+for port in "${HTTP_PORT:-}" "${HTTPS_PORT:-}"; do
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || {
+        printf 'Invalid nginx firewall port: %s\n' "$port" >&2
+        exit 1
+    }
+done
+
+family_available() {
+    command -v "$1" &>/dev/null && "$1" -L INPUT -n &>/dev/null
+}
+
+start_family() {
+    local command=$1
+
+    if "$command" -L "$CHAIN" -n &>/dev/null; then
+        "$command" -F "$CHAIN"
+    else
+        "$command" -N "$CHAIN"
     fi
-    msg "iptables: ports 80/$HTTPS_PORT opened."
+    "$command" -A "$CHAIN" -p tcp --dport "$HTTP_PORT" -j ACCEPT
+    if [[ "$HTTPS_PORT" != "$HTTP_PORT" ]]; then
+        "$command" -A "$CHAIN" -p tcp --dport "$HTTPS_PORT" -j ACCEPT
+    fi
+    if ! "$command" -C INPUT -j "$CHAIN" &>/dev/null; then
+        "$command" -I INPUT 1 -j "$CHAIN"
+    fi
+}
+
+stop_family() {
+    local command=$1
+
+    while "$command" -C INPUT -j "$CHAIN" &>/dev/null; do
+        "$command" -D INPUT -j "$CHAIN"
+    done
+    if "$command" -L "$CHAIN" -n &>/dev/null; then
+        "$command" -F "$CHAIN"
+        "$command" -X "$CHAIN"
+    fi
+}
+
+case "${1:-}" in
+    start)
+        family_available "$IPTABLES_BIN" || {
+            printf 'iptables INPUT chain is unavailable\n' >&2
+            exit 1
+        }
+        start_family "$IPTABLES_BIN"
+        if family_available "$IP6TABLES_BIN"; then
+            start_family "$IP6TABLES_BIN"
+        fi
+        ;;
+    stop)
+        if family_available "$IPTABLES_BIN"; then
+            stop_family "$IPTABLES_BIN"
+        fi
+        if family_available "$IP6TABLES_BIN"; then
+            stop_family "$IP6TABLES_BIN"
+        fi
+        ;;
+    *)
+        printf 'Usage: %s {start|stop}\n' "$0" >&2
+        exit 2
+        ;;
+esac
+NGINX_IPTABLES
+    chmod 0755 /usr/local/bin/awesome-nginx-iptables
+
+    cat > /etc/systemd/system/awesome-nginx-firewall.service <<'EOF'
+[Unit]
+Description=AwesomeArchLinux nginx iptables fallback
+After=network-pre.target iptables.service ip6tables.service
+Before=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/awesome-nginx-iptables start
+ExecReload=/usr/local/bin/awesome-nginx-iptables start
+ExecStop=/usr/local/bin/awesome-nginx-iptables stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    /usr/local/bin/awesome-nginx-iptables start
+    systemctl enable awesome-nginx-firewall.service
+    msg "iptables: managed IPv4/IPv6 chain opened ports 80/$HTTPS_PORT without snapshotting the live ruleset."
 else
     warn "No supported firewall detected — ensure ports 80/$HTTPS_PORT are reachable."
 fi
 
 # =============================================================================
-# 5. OBTAIN CERTIFICATES
+# 4. OBTAIN CERTIFICATES
 # =============================================================================
 
 if [[ "$SKIP_CERTBOT" == false ]]; then
@@ -338,7 +448,7 @@ if [[ ! -d "$CERT_DIR" ]]; then
 fi
 
 # =============================================================================
-# 6. WRITE SSL HARDENING CONFIG
+# 5. WRITE SSL HARDENING CONFIG
 # =============================================================================
 
 msg "Writing SSL hardening configuration..."
@@ -364,9 +474,6 @@ ssl_prefer_server_ciphers on;
 # --- ECDH curve ---
 ssl_ecdh_curve X25519:secp384r1:secp256r1;
 
-# --- DH parameters (4096-bit) ---
-ssl_dhparam $DH_PARAM;
-
 # --- Session settings ---
 ssl_session_timeout 1d;
 ssl_session_cache shared:SSL:50m;
@@ -391,7 +498,7 @@ resolver_timeout 5s;
 EOF
 
 # =============================================================================
-# 7. WRITE SECURITY HEADERS CONFIG
+# 6. WRITE SECURITY HEADERS CONFIG
 # =============================================================================
 
 msg "Writing security headers configuration..."
@@ -465,7 +572,7 @@ add_header X-Permitted-Cross-Domain-Policies "none" always;
 HEADERS
 
 # =============================================================================
-# 8. WRITE FINAL HTTPS SERVER BLOCK
+# 7. WRITE FINAL HTTPS SERVER BLOCK
 # =============================================================================
 
 msg "Writing final server block..."
@@ -536,7 +643,7 @@ server {
 EOF
 
 # =============================================================================
-# 9. CERTBOT AUTO-RENEWAL
+# 8. CERTBOT AUTO-RENEWAL
 # =============================================================================
 
 msg "Setting up automatic certificate renewal..."
@@ -572,7 +679,7 @@ systemctl enable certbot-renew.timer
 systemctl start certbot-renew.timer
 
 # =============================================================================
-# 10. NGINX SYSTEMD HARDENING
+# 9. NGINX SYSTEMD HARDENING
 # =============================================================================
 
 msg "Hardening nginx systemd service..."
@@ -628,7 +735,7 @@ EOF
 systemctl daemon-reload
 
 # =============================================================================
-# 11. ADDITIONAL HARDENING
+# 10. ADDITIONAL HARDENING
 # =============================================================================
 
 msg "Applying additional hardening..."
@@ -638,7 +745,6 @@ chmod 640 /etc/nginx/nginx.conf
 chown root:http /etc/nginx/nginx.conf
 chmod 640 "$SSL_CONF"
 chmod 640 "$SECURITY_CONF"
-chmod 700 "$SSL_DIR"
 
 # Ensure log directory permissions
 chmod 750 /var/log/nginx
@@ -666,7 +772,7 @@ HTML
 fi
 
 # =============================================================================
-# 12. VALIDATE AND RELOAD
+# 11. VALIDATE AND RELOAD
 # =============================================================================
 
 msg "Testing nginx configuration..."
@@ -679,7 +785,7 @@ else
 fi
 
 # =============================================================================
-# 13. SUMMARY
+# 12. SUMMARY
 # =============================================================================
 
 echo
@@ -692,14 +798,12 @@ echo -e "${C_BLUE}HTTPS Port:${C_NC}    $HTTPS_PORT"
 echo -e "${C_BLUE}Web Root:${C_NC}      $WEBROOT"
 echo -e "${C_BLUE}SSL Config:${C_NC}    $SSL_CONF"
 echo -e "${C_BLUE}Headers:${C_NC}       $SECURITY_CONF"
-echo -e "${C_BLUE}DH Params:${C_NC}     $DH_PARAM"
 echo -e "${C_BLUE}Certificates:${C_NC}  $CERT_DIR/"
 echo -e "${C_BLUE}Log:${C_NC}           $LOGFILE"
 echo
 echo -e "${C_BLUE}SSL/TLS Features:${C_NC}"
 echo "  - TLS 1.2 + 1.3 only (no SSLv3, TLS 1.0, TLS 1.1)"
 echo "  - ECDHE + AEAD ciphers only (ChaCha20-Poly1305, AES-GCM)"
-echo "  - 4096-bit DH parameters"
 echo "  - ECDSA P-384 certificate (Let's Encrypt)"
 echo "  - Forward secrecy (session tickets disabled)"
 echo "  - HTTP/2 enabled"

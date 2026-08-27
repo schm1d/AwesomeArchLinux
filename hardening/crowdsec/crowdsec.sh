@@ -18,10 +18,10 @@
 # Requirements:
 #   - Arch Linux with pacman
 #   - Root privileges
-#   - yay or paru AUR helper (for AUR packages)
+#   - A controlling terminal for explicit AUR recipe review
 #
 # What this script does:
-#   1. Installs CrowdSec from AUR via yay/paru
+#   1. Reviews and builds CrowdSec from an exact AUR commit
 #   2. Configures log acquisition (journalctl, syslog, optionally nginx)
 #   3. Installs CrowdSec detection collections (linux, sshd, nginx)
 #   4. Optionally installs and configures the nftables firewall bouncer
@@ -32,6 +32,10 @@
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/aur-review.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -48,7 +52,6 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"    "$C_NC" "$1" >&2; exit 1; }
 # --- Defaults ---
 WITH_NGINX=false
 WITH_NFTABLES=false
-AUR_HELPER=""
 ACQUIS_CONF="/etc/crowdsec/acquis.yaml"
 BOUNCER_CONF="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
 NGINX_BOUNCER_KEY_FILE="/root/.crowdsec-nginx-bouncer-key"
@@ -96,41 +99,19 @@ info "Log: $LOGFILE"
 info "Options: nginx=$WITH_NGINX nftables=$WITH_NFTABLES"
 
 # =============================================================================
-# 1. DETECT AUR HELPER
+# 1. PREPARE REVIEWED AUR BUILDS
 # =============================================================================
 
-detect_aur_helper() {
-    if command -v yay &>/dev/null; then
-        AUR_HELPER="yay"
-    elif command -v paru &>/dev/null; then
-        AUR_HELPER="paru"
-    else
-        err "No AUR helper found. Install yay or paru first:
-  git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si"
-    fi
-    info "Using AUR helper: $AUR_HELPER"
-}
-
-# Install an AUR package as the invoking user (AUR helpers refuse to run as root)
 aur_install() {
-    local pkg="$1"
-    local invoking_user="${SUDO_USER:-}"
-
-    if pacman -Qi "$pkg" &>/dev/null; then
-        info "$pkg is already installed"
-        return 0
-    fi
-
-    if [[ -z "$invoking_user" ]]; then
-        err "Cannot determine the invoking user (SUDO_USER not set).
-Run this script with: sudo ./crowdsec.sh"
-    fi
-
-    msg "Installing $pkg from AUR..."
-    sudo -u "$invoking_user" "$AUR_HELPER" -S --noconfirm --needed "$pkg"
+    local pkg=$1 pkgbase=${2:-$1}
+    msg "Reviewing $pkg before AUR installation..."
+    aal_aur_install_reviewed "$pkg" "$pkgbase"
 }
 
-detect_aur_helper
+msg "Installing signed repository build prerequisites..."
+# Pair the package database refresh with a complete upgrade; Arch does not
+# support partial upgrades.
+pacman -Syu --needed --noconfirm base-devel git
 
 # =============================================================================
 # 2. INSTALL CROWDSEC
@@ -262,7 +243,8 @@ info "Installed parser: crowdsecurity/whitelists"
 if [[ "$WITH_NFTABLES" == true ]]; then
     msg "Installing nftables firewall bouncer..."
 
-    aur_install "crowdsec-firewall-bouncer-nftables"
+    # The requested nftables package is built by this split package base.
+    aur_install "crowdsec-firewall-bouncer-nftables" "crowdsec-firewall-bouncer"
 
     # Back up existing bouncer config
     if [[ -f "$BOUNCER_CONF" ]]; then

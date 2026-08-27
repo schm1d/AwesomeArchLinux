@@ -95,7 +95,8 @@ Traffic from the configured network is transparently redirected to Squid via nft
 - **Ads + tracking**: StevenBlack unified hosts (100K+ domains)
 - **Malware + fakenews**: StevenBlack extended list
 - **Whitelist**: Custom destination overrides, evaluated only after the client matches the trusted LAN or localhost ACL
-- **Auto-update**: systemd timer runs daily at 03:00
+- **Auto-update**: systemd timer runs daily at 03:00 using `/usr/local/bin/awesome-squid-blocklist-update`
+- **Failure safety**: both downloads are staged and size-checked before any Squid or dnsmasq list is replaced; parse or reload failure restores the previous files, reapplies them to the daemons, and fails the unit visibly
 
 ### SSL Bump (Optional)
 

@@ -31,6 +31,8 @@ sudo ./wordpress.sh -d blog.example.com -w /srv/http/wordpress --db-name wpblog 
 - nginx-mainline installed (see `../nginx/nginx.sh`)
 - PHP-FPM installed and running
 
+For safety, the resolved WordPress path must be below `/var/www/` or `/srv/http/`; the domain is validated before it is used in nginx paths or directives.
+
 ## What It Does
 
 ### 1. WordPress Verification

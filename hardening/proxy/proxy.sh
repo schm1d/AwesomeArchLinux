@@ -179,7 +179,7 @@ backup_file() {
 
 msg "Installing packages..."
 
-PKGS=(squid openssl nftables)
+PKGS=(squid openssl nftables curl)
 [[ "$DNS_FILTER" == true ]] && PKGS+=(dnsmasq)
 
 for pkg in "${PKGS[@]}"; do
@@ -260,37 +260,180 @@ fi
 # 4. DOWNLOAD DOMAIN BLOCKLISTS
 # =============================================================================
 
-msg "Downloading domain blocklists..."
+msg "Installing the atomic blocklist updater..."
 
-download_blocklist() {
-    local url="$1" output="$2" label="$3"
+install -d -m 0755 /usr/local/bin
+cat > /usr/local/bin/awesome-squid-blocklist-update <<'BLOCKLIST_UPDATE'
+#!/usr/bin/env bash
+set -euo pipefail
 
-    local tmp
-    tmp=$(mktemp)
+readonly BLOCKLIST_DIR="${AAL_SQUID_BLOCKLIST_DIR:-/etc/squid/blocklists}"
+readonly MIN_ENTRIES="${AAL_MIN_BLOCKLIST_ENTRIES:-1000}"
+readonly ADS_URL="${AAL_ADS_BLOCKLIST_URL:-https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts}"
+readonly MALWARE_URL="${AAL_MALWARE_BLOCKLIST_URL:-https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-porn/hosts}"
+readonly CURL_BIN="${AAL_CURL_BIN:-/usr/bin/curl}"
+readonly SQUID_BIN="${AAL_SQUID_BIN:-/usr/bin/squid}"
+readonly DNSMASQ_BLOCKLIST="${AAL_DNSMASQ_BLOCKLIST:-/etc/dnsmasq.d/proxy-blocklist.conf}"
+readonly DNSMASQ_BIN="${AAL_DNSMASQ_BIN:-/usr/bin/dnsmasq}"
+readonly SYSTEMCTL_BIN="${AAL_SYSTEMCTL_BIN:-/usr/bin/systemctl}"
 
-    if curl -fsSL --max-time 120 "$url" -o "$tmp" 2>/dev/null; then
-        # StevenBlack hosts format: "0.0.0.0 domain" → ".domain"
-        grep '^0\.0\.0\.0 ' "$tmp" | awk '{print "."$2}' | sort -u > "$output"
-        local count
-        count=$(wc -l < "$output")
-        msg "$label: $count domains"
-    else
-        warn "Failed to download $label blocklist — using existing or empty file"
-    fi
-
-    rm -f "$tmp"
+NO_RECONFIGURE=false
+if [[ "${1:-}" == "--no-reconfigure" ]]; then
+    NO_RECONFIGURE=true
+    shift
+fi
+(( $# == 0 )) || { printf 'Usage: %s [--no-reconfigure]\n' "$0" >&2; exit 2; }
+[[ "$MIN_ENTRIES" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'Invalid minimum blocklist size: %s\n' "$MIN_ENTRIES" >&2
+    exit 2
+}
+[[ -d "$BLOCKLIST_DIR" ]] || {
+    printf 'Blocklist directory does not exist: %s\n' "$BLOCKLIST_DIR" >&2
+    exit 1
 }
 
-if [[ "$DRY_RUN" == false ]]; then
-    download_blocklist \
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" \
-        "$BLOCKLIST_DIR/ads.txt" \
-        "Ads + tracking"
+declare -a TEMP_FILES=() STAGED_FILES=() DESTINATIONS=() BACKUPS=()
+REPLACED=0
+STAGE_RESULT=""
+DNS_ACTIVE=false
 
-    download_blocklist \
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-porn/hosts" \
-        "$BLOCKLIST_DIR/malware.txt" \
-        "Malware + fakenews + gambling"
+rollback() {
+    local i
+    for (( i = REPLACED - 1; i >= 0; i-- )); do
+        if [[ -n "${BACKUPS[$i]}" && -f "${BACKUPS[$i]}" ]]; then
+            mv -f -- "${BACKUPS[$i]}" "${DESTINATIONS[$i]}"
+            BACKUPS[$i]=""
+        else
+            rm -f -- "${DESTINATIONS[$i]}"
+        fi
+    done
+}
+
+cleanup() {
+    local file
+    for file in "${TEMP_FILES[@]}" "${STAGED_FILES[@]}" "${BACKUPS[@]}"; do
+        [[ -n "$file" ]] && rm -f -- "$file"
+    done
+}
+
+finish() {
+    local rc=$?
+    trap - EXIT
+    if (( rc != 0 && REPLACED > 0 )); then
+        rollback
+        if [[ "$NO_RECONFIGURE" == false ]]; then
+            "$SQUID_BIN" -k reconfigure >/dev/null 2>&1 || \
+                printf 'Warning: could not reload the restored Squid blocklists.\n' >&2
+            if [[ "$DNS_ACTIVE" == true ]]; then
+                "$SYSTEMCTL_BIN" reload dnsmasq >/dev/null 2>&1 || \
+                    printf 'Warning: could not reload the restored dnsmasq blocklist.\n' >&2
+            fi
+        fi
+    fi
+    cleanup
+    exit "$rc"
+}
+
+trap finish EXIT
+trap 'exit 130' HUP INT TERM
+
+stage_blocklist() {
+    local url="$1" label="$2" raw compiled count
+    raw=$(mktemp "$BLOCKLIST_DIR/.${label}.raw.XXXXXX")
+    compiled=$(mktemp "$BLOCKLIST_DIR/.${label}.compiled.XXXXXX")
+    TEMP_FILES+=("$raw")
+    STAGED_FILES+=("$compiled")
+
+    if ! "$CURL_BIN" -fsSL --max-time 120 "$url" -o "$raw"; then
+        printf 'Failed to download %s blocklist; installed lists were not changed.\n' "$label" >&2
+        return 1
+    fi
+
+    awk '
+        $1 == "0.0.0.0" {
+            domain = tolower($2)
+            if (domain ~ /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/ &&
+                domain ~ /[.]/ && domain != "0.0.0.0") {
+                print "." domain
+            }
+        }
+    ' "$raw" | sort -u > "$compiled"
+
+    count=$(wc -l < "$compiled")
+    if (( count < MIN_ENTRIES )); then
+        printf '%s blocklist has only %d valid entries (minimum %d); installed lists were not changed.\n' \
+            "$label" "$count" "$MIN_ENTRIES" >&2
+        return 1
+    fi
+
+    chmod 0644 "$compiled"
+    chown root:root "$compiled"
+    STAGE_RESULT="$compiled"
+    printf 'Validated %s blocklist: %d domains.\n' "$label" "$count"
+}
+
+stage_blocklist "$ADS_URL" ads
+ads_stage="$STAGE_RESULT"
+stage_blocklist "$MALWARE_URL" malware
+malware_stage="$STAGE_RESULT"
+
+DESTINATIONS=("$BLOCKLIST_DIR/ads.txt" "$BLOCKLIST_DIR/malware.txt")
+STAGED_FILES=("$ads_stage" "$malware_stage")
+
+if [[ -e "$DNSMASQ_BLOCKLIST" ]]; then
+    dnsmasq_dir=$(dirname -- "$DNSMASQ_BLOCKLIST")
+    [[ -d "$dnsmasq_dir" ]] || {
+        printf 'dnsmasq blocklist directory does not exist: %s\n' "$dnsmasq_dir" >&2
+        exit 1
+    }
+    dnsmasq_stage=$(mktemp "$dnsmasq_dir/.proxy-blocklist.compiled.XXXXXX")
+    STAGED_FILES+=("$dnsmasq_stage")
+    {
+        printf '# Auto-generated blocklist for DNS filtering\n'
+        printf '# Generated by awesome-squid-blocklist-update\n\n'
+        awk '{ domain=$0; sub(/^\./, "", domain); print "address=/" domain "/0.0.0.0" }' \
+            "$ads_stage" "$malware_stage" | sort -u
+    } > "$dnsmasq_stage"
+    chmod 0644 "$dnsmasq_stage"
+    chown root:root "$dnsmasq_stage"
+    DESTINATIONS+=("$DNSMASQ_BLOCKLIST")
+    DNS_ACTIVE=true
+fi
+
+for destination in "${DESTINATIONS[@]}"; do
+    if [[ -e "$destination" ]]; then
+        backup=$(mktemp "$BLOCKLIST_DIR/.blocklist.backup.XXXXXX")
+        cp -p -- "$destination" "$backup"
+        BACKUPS+=("$backup")
+    else
+        BACKUPS+=("")
+    fi
+done
+
+for i in "${!DESTINATIONS[@]}"; do
+    mv -f -- "${STAGED_FILES[$i]}" "${DESTINATIONS[$i]}"
+    STAGED_FILES[$i]=""
+    (( REPLACED += 1 ))
+done
+
+if [[ "$NO_RECONFIGURE" == false ]]; then
+    "$SQUID_BIN" -k parse
+    if [[ "$DNS_ACTIVE" == true ]]; then
+        "$DNSMASQ_BIN" --test
+    fi
+    "$SQUID_BIN" -k reconfigure
+    if [[ "$DNS_ACTIVE" == true ]]; then
+        "$SYSTEMCTL_BIN" reload dnsmasq
+    fi
+fi
+
+REPLACED=0
+printf 'Squid blocklists updated successfully.\n'
+BLOCKLIST_UPDATE
+chmod 0755 /usr/local/bin/awesome-squid-blocklist-update
+
+if [[ "$DRY_RUN" == false ]]; then
+    /usr/local/bin/awesome-squid-blocklist-update --no-reconfigure
 else
     info "Dry-run: skipping blocklist download"
 fi
@@ -546,7 +689,7 @@ EOF
         fi
     fi
 
-    # Convert blocklist to dnsmasq format
+    # Convert both validated blocklists to dnsmasq format
     DNSMASQ_BLOCKLIST="/etc/dnsmasq.d/proxy-blocklist.conf"
     mkdir -p /etc/dnsmasq.d
 
@@ -556,8 +699,9 @@ EOF
         echo "# Generated by AwesomeArchLinux/hardening/proxy/proxy.sh"
         echo ""
         # Convert ".domain" → "address=/domain/0.0.0.0"
-        if [[ -s "$BLOCKLIST_DIR/ads.txt" ]]; then
-            sed 's/^\./address=\//' "$BLOCKLIST_DIR/ads.txt" | sed 's/$/\/0.0.0.0/'
+        if [[ -s "$BLOCKLIST_DIR/ads.txt" && -s "$BLOCKLIST_DIR/malware.txt" ]]; then
+            awk '{ domain=$0; sub(/^\./, "", domain); print "address=/" domain "/0.0.0.0" }' \
+                "$BLOCKLIST_DIR/ads.txt" "$BLOCKLIST_DIR/malware.txt" | sort -u
         fi
     } > "$DNSMASQ_BLOCKLIST"
 
@@ -781,14 +925,27 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '\\
-  curl -fsSL --max-time 120 \\
-    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" \\
-    | grep "^0\\.0\\.0\\.0 " | awk "{print \\".\\"\\\$2}" | sort -u \\
-    > ${BLOCKLIST_DIR}/ads.txt.tmp \\
-  && mv ${BLOCKLIST_DIR}/ads.txt.tmp ${BLOCKLIST_DIR}/ads.txt \\
-  && squid -k reconfigure 2>/dev/null || true'
-PrivateTmp=true
+ExecStart=/usr/local/bin/awesome-squid-blocklist-update
+User=root
+UMask=0022
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_KILL
+ReadWritePaths=${BLOCKLIST_DIR} -/etc/dnsmasq.d /run/squid
 EOF
 
 cat > /etc/systemd/system/squid-blocklist-update.timer <<'EOF'
@@ -842,7 +999,7 @@ if [[ "$DRY_RUN" == true ]]; then
     if squid -k parse 2>/dev/null; then
         msg "Squid config is valid"
     else
-        warn "Squid config has errors — run: squid -k parse"
+        err "Squid config has errors — run: squid -k parse"
     fi
 
     info "Re-run without --dry-run to start services"
@@ -892,6 +1049,7 @@ echo "  Logs:                  /var/log/squid/"
 echo "  Log rotation:          /etc/logrotate.d/squid"
 echo "  sysctl override:       /etc/sysctl.d/99-z-squid-proxy.conf"
 echo "  systemd hardening:     /etc/systemd/system/squid.service.d/hardening.conf"
+echo "  Blocklist updater:     /usr/local/bin/awesome-squid-blocklist-update"
 echo "  Blocklist timer:       /etc/systemd/system/squid-blocklist-update.timer"
 echo "  nftables table:        squid_proxy (ip family)"
 if [[ "$SSL_BUMP" == true ]]; then

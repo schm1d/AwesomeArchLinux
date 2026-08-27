@@ -35,6 +35,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/validation.sh"
+
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -74,11 +78,12 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -a)         APP_PATH="$2"; shift 2 ;;
-        -p)         PORT="$2"; shift 2 ;;
-        -d)         DOMAIN="$2"; shift 2 ;;
+        -a)         need_arg "$@"; APP_PATH="$2"; shift 2 ;;
+        -p)         need_arg "$@"; PORT="$2"; shift 2 ;;
+        -d)         need_arg "$@"; DOMAIN="$2"; shift 2 ;;
         -h|--help)  usage ;;
         *)          err "Unknown option: $1" ;;
     esac
@@ -88,6 +93,16 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$APP_PATH" ]] || err "App path is required (-a /path/to/app)"
 [[ -d "$APP_PATH" ]] || err "App path does not exist: $APP_PATH"
+DOMAIN="${DOMAIN,,}"
+aal_valid_hostname "$DOMAIN" || err "Invalid domain name: $DOMAIN"
+
+APP_PATH=$(realpath -- "$APP_PATH") || err "Could not resolve application path"
+case "$APP_PATH" in
+    /var/www/*|/srv/http/*) ;;
+    *) err "Unsafe application path '$APP_PATH'. Use a dedicated directory below /var/www/ or /srv/http/." ;;
+esac
+[[ "$APP_PATH" =~ ^/(var/www|srv/http)/[A-Za-z0-9._/-]+$ ]] || \
+    err "Application path contains unsupported characters: $APP_PATH"
 
 # Validate PORT is a number in valid range
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
@@ -164,13 +179,27 @@ fi
 # =============================================================================
 
 CONF_FILE="/etc/nginx/sites-enabled/${DOMAIN}.conf"
+CONF_BACKUP=""
+CONF_PREEXISTED=false
+
+restore_nginx_conf() {
+    if [[ "$CONF_PREEXISTED" == true ]]; then
+        cp -- "$CONF_BACKUP" "$CONF_FILE"
+        warn "Restored the previous nginx server block"
+    else
+        rm -f -- "$CONF_FILE"
+        warn "Removed the new nginx server block"
+    fi
+}
 
 msg "Writing nginx server block: $CONF_FILE"
 
 # Back up existing config if present
 if [[ -f "$CONF_FILE" ]]; then
+    CONF_PREEXISTED=true
     BACKUP="${CONF_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
     cp "$CONF_FILE" "$BACKUP"
+    CONF_BACKUP="$BACKUP"
     info "Existing config backed up to $BACKUP"
 fi
 
@@ -403,10 +432,17 @@ msg "Testing nginx configuration..."
 
 if nginx -t 2>&1; then
     msg "Configuration test passed"
-    systemctl reload nginx
-    msg "nginx reloaded successfully"
+    if systemctl reload nginx; then
+        msg "nginx reloaded successfully"
+    else
+        restore_nginx_conf
+        systemctl reload nginx 2>/dev/null || \
+            warn "Could not reload nginx after restoring its previous configuration"
+        err "nginx reload failed; the server block was rolled back"
+    fi
 else
-    err "nginx configuration test failed! Review $CONF_FILE"
+    restore_nginx_conf
+    err "nginx configuration test failed; no invalid server block was left enabled"
 fi
 
 # =============================================================================

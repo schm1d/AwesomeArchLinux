@@ -44,9 +44,17 @@ sudo ./firehol.sh --update-only --allow-ssh 22
 
 - Repository dependencies are installed with a complete `pacman -Syu`; partial
   `pacman -Sy` upgrades are not used.
-- `iprange` and `firehol` are built as an unprivileged `_makepkg` user. Only the
-  resulting package files inside the build directory are passed to root
-  `pacman -U`.
+- Mutable AUR HEAD is never executed automatically. The complete `iprange` and
+  `firehol` recipes are displayed with terminal control characters escaped,
+  and each exact AUR commit requires an `INSTALL <package> <full-commit>`
+  confirmation before `makepkg` evaluates it.
+- AUR dependencies require their own review. Signed Arch-repository
+  dependencies are installed only after the parent recipe is approved.
+- Builds run as unique disposable users. Background build processes are killed,
+  the identity is removed, and only the specifically requested package archive
+  is passed to root `pacman -U`.
+- Review records containing the AUR commit and built package SHA-256 are written
+  under `/var/lib/awesomearchlinux/aur-reviews/`.
 - `update-ipsets` is provided by the FireHOL package; there is no separate
   `update-ipsets` AUR package.
 - A failed list enable/download or `firehol debug` validation aborts activation.

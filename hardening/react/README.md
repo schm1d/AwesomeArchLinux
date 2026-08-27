@@ -22,6 +22,7 @@ sudo ./react.sh -a /var/www/myapp -d app.example.com
 | `-h` | Show help | |
 
 The script auto-detects the build directory by checking for `index.html` in the root, then in `dist/`, `build/`, and `out/` subdirectories.
+For safety, the resolved application path must be below `/var/www/` or `/srv/http/`; domain names are validated before they are used in nginx paths or directives.
 
 ## What It Does
 

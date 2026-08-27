@@ -299,7 +299,10 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '/usr/bin/aide --check > ${AIDE_LOG_DIR}/aide-check.log 2>&1 || true'
+ExecStart=/usr/bin/aide --check
+UMask=0077
+StandardOutput=file:${AIDE_LOG_DIR}/aide-check.log
+StandardError=inherit
 Nice=19
 IOSchedulingClass=idle
 EOF
@@ -320,9 +323,7 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now aide-check.timer 2>/dev/null || true
-
-    success "Systemd timer enabled: daily at 04:00 (+/- 1h random delay)"
+    success "Systemd service and timer created."
 }
 
 # =============================================================================
@@ -350,7 +351,13 @@ mode_init() {
     cp "${AIDE_DB_NEW}" "${AIDE_DB}"
     chmod 600 "${AIDE_DB}" "${AIDE_DB_NEW}"
 
+    # Do not arm the timer until the reference database exists. This prevents a
+    # first-run race from producing a failed check against a missing database.
+    systemctl enable --now aide-check.timer
+
     success "AIDE database initialized successfully."
+    success "Systemd timer enabled: daily at 04:00 (+/- 1h random delay)"
+    info "AIDE changes and errors leave aide-check.service in a failed state for monitoring."
     echo ""
 
     # Print summary

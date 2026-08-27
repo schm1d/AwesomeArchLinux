@@ -29,13 +29,25 @@ sudo ./crowdsec.sh --with-nginx --with-nftables
 
 - Arch Linux with `pacman`
 - Root privileges (`sudo`)
-- An AUR helper (`yay` or `paru`) for installing CrowdSec packages
+- A controlling terminal for reviewing each AUR recipe and entering its exact approval phrase
 
 ## What It Does
 
 ### 1. Package Installation
 
-CrowdSec packages are installed from the AUR:
+CrowdSec packages are built from the AUR, but mutable AUR HEAD is never executed
+automatically. For every package (including AUR dependencies), the installer:
+
+1. checks out and records one exact AUR Git commit;
+2. displays every tracked recipe file with terminal control characters escaped;
+3. requires `INSTALL <package> <full-commit>` to be typed exactly;
+4. installs signed Arch-repository dependencies and recursively reviews AUR dependencies;
+5. builds as a disposable unprivileged user and installs only the specifically requested artifact; and
+6. records the commit and resulting package SHA-256 under `/var/lib/awesomearchlinux/aur-reviews/`.
+
+Refusing the prompt, losing the controlling terminal, or encountering an unresolved dependency aborts before that package is built. No `yay` or `paru` helper is used.
+
+The reviewed packages are:
 
 | Package | Description |
 |---------|-------------|

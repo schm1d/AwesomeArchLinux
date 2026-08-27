@@ -44,7 +44,6 @@ sudo ./nginx.sh -d example.com --dry-run
 | TLS 1.2 Ciphers | ECDHE + AEAD only (AES-128/256-GCM, ChaCha20-Poly1305) |
 | TLS 1.3 Ciphers | Managed by OpenSSL (TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256) |
 | ECDH Curves | X25519, secp384r1, secp256r1 |
-| DH Parameters | 4096-bit (generated at install time) |
 | Certificate | ECDSA P-384 via Let's Encrypt |
 | Session Tickets | Disabled (forward secrecy for TLS 1.2) |
 | Session Cache | 50MB shared, 1-day timeout |
@@ -105,13 +104,13 @@ certbot renew --dry-run
 | Path | Description |
 |------|-------------|
 | `/etc/nginx/nginx.conf` | Main nginx config (core, buffers, timeouts) |
-| `/etc/nginx/conf.d/ssl-hardening.conf` | TLS protocols, ciphers, DH params, session config |
+| `/etc/nginx/conf.d/ssl-hardening.conf` | TLS protocols, ECDHE ciphers, curves, and session config |
 | `/etc/nginx/conf.d/security-headers.conf` | All security response headers |
 | `/etc/nginx/sites-enabled/default.conf` | HTTP redirect + HTTPS server block |
-| `/etc/nginx/ssl/dhparam.pem` | 4096-bit DH parameters |
 | `/etc/letsencrypt/live/<domain>/` | Let's Encrypt certificates |
 | `/etc/systemd/system/certbot-renew.timer` | Auto-renewal timer |
 | `/etc/systemd/system/nginx.service.d/hardening.conf` | systemd security override |
+| `/etc/systemd/system/awesome-nginx-firewall.service` | Idempotent iptables fallback, when nftables is unavailable |
 
 ## Customization
 

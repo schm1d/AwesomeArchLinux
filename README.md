@@ -148,7 +148,7 @@ AwesomeArchLinux/
 #### Firewall
 
 - **nftables** &mdash; Default deny policy, SSH rate limiting (4/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
-- **FireHOL** &mdash; Optional iptables-based alternative firewall with FireHOL blocklists, explicit inbound-service selection, and fail-closed daily updates. It refuses to stack on the installer-owned nftables ruleset.
+- **FireHOL** &mdash; Optional iptables-based alternative firewall with FireHOL blocklists, explicit inbound-service selection, fail-closed daily updates, and mandatory per-commit AUR recipe review. It refuses to stack on the installer-owned nftables ruleset.
 - **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
 - **Composable sysctl profiles** &mdash; Compatible workstation hardening by default, with explicit strict, fq + BBR performance, and IPv6-disable overlays plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
 
@@ -170,6 +170,7 @@ AwesomeArchLinux/
 #### Intrusion Detection (CrowdSec)
 
 - **CrowdSec IDS** &mdash; Behavior-based intrusion detection with community-powered threat intelligence.
+- **AUR trust gate** &mdash; CrowdSec packages and transitive AUR dependencies require review and exact commit confirmation before an unprivileged build; no AUR helper runs unattended.
 - **nftables bouncer** &mdash; Automatic IP banning via nftables sets.
 - **nginx bouncer** &mdash; Layer-7 blocking for web attacks (SQLi, XSS, path traversal).
 - **Collections** &mdash; Pre-installed detection scenarios for Linux, SSH, and nginx.
@@ -178,7 +179,7 @@ AwesomeArchLinux/
 #### Web Server Hardening (nginx)
 
 - **nginx-mainline** with Let's Encrypt (certbot) &mdash; One-command setup targeting SSL Labs A+ and securityheaders.com A+.
-- **TLS** &mdash; TLS 1.2 + 1.3 only, ECDHE + AEAD ciphers, X25519/P-384 curves, 4096-bit DH params, ECDSA P-384 certificates, session tickets disabled (forward secrecy), HTTP/2.
+- **TLS** &mdash; TLS 1.2 + 1.3 only, ECDHE + AEAD ciphers, X25519/P-384 curves, ECDSA P-384 certificates, session tickets disabled (forward secrecy), HTTP/2.
 - **Security headers** &mdash; All six securityheaders.com graded headers (HSTS with 2-year preload, CSP, Permissions-Policy, Referrer-Policy, X-Content-Type-Options, X-Frame-Options) plus OWASP Cross-Origin headers (COEP, COOP, CORP).
 - **Hardening** &mdash; Buffer limits, Slowloris timeouts, gzip disabled (BREACH prevention), dotfile/sensitive-file blocking, server tokens hidden.
 - **Auto-renewal** &mdash; systemd timer runs certbot twice daily with nginx reload hook.
@@ -440,7 +441,7 @@ units; hardware daemons also require representative hot-plug coverage.
 
 - **ClamAV** &mdash; Full configuration with PUA detection, heuristic alerts, encrypted archive alerts, all file type scanning enabled. Auto-updating signatures via `clamav-freshclam.service`.
 - **rkhunter** &mdash; Rootkit detection with daily automated checks via systemd timer.
-- **AIDE** &mdash; File integrity monitoring with custom rules (NORMAL, DIR, PERMS, LOG, DATAONLY), monitors `/boot`, `/etc`, `/usr/bin`, `/usr/sbin`, sensitive config files. Daily checks via systemd timer. See `utils/aide-config.sh`.
+- **AIDE** &mdash; File integrity monitoring with custom rules (NORMAL, DIR, PERMS, LOG, DATAONLY), monitors `/boot`, `/etc`, `/usr/bin`, `/usr/sbin`, sensitive config files. Daily checks preserve AIDE's exit status so detected changes and scan errors are visible as failed systemd units. See `utils/aide-config.sh`.
 - **auditd** &mdash; MITRE ATT&CK-mapped audit rules (~500 rules covering initial access, execution, persistence, privilege escalation, defense evasion, credential access, discovery, lateral movement, collection, exfiltration, and C2).
 - **fail2ban** &mdash; 7 jails covering SSH, nginx, and recidive (repeat offenders).
 - **CrowdSec** &mdash; Behavior-based IDS with community threat intelligence, nftables and nginx bouncers.

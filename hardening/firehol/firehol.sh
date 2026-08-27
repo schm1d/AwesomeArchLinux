@@ -9,6 +9,10 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/aur-review.sh"
+
 # ==============================
 # Configuration Defaults
 # ==============================
@@ -125,47 +129,10 @@ install_pkgs() {
   pacman -Syu --needed --noconfirm "${pkgs[@]}"
 }
 
-# Run makepkg as an unprivileged, throwaway build user.
-# $1 = build directory (must already contain PKGBUILD)
-_run_makepkg_as_build_user() {
-  local builddir=$1
-  local build_user="_makepkg"
-  local package_file
-  local -a package_files=()
-
-  useradd -r -M -d /var/empty -s /usr/bin/nologin "$build_user" 2>/dev/null || true
-  install -d -o "$build_user" -g "$build_user" -m 0700 "$builddir/.home"
-  chown -R "$build_user":"$build_user" "$builddir"
-  (
-    cd "$builddir"
-    runuser -u "$build_user" -- env HOME="$builddir/.home" \
-      makepkg --cleanbuild --noconfirm
-    mapfile -t package_files < <(
-      runuser -u "$build_user" -- env HOME="$builddir/.home" makepkg --packagelist
-    )
-    (( ${#package_files[@]} > 0 )) || { echo_err "makepkg produced no package paths"; exit 1; }
-    for package_file in "${package_files[@]}"; do
-      [[ "$package_file" == "$builddir"/* && -f "$package_file" ]] || {
-        echo_err "Refusing unexpected package path: $package_file"
-        exit 1
-      }
-    done
-    pacman -U --needed --noconfirm "${package_files[@]}"
-  )
-  userdel "$build_user" 2>/dev/null || true
-}
-
 install_aur_pkg() {
   local pkg=$1
-  echo_msg "Installing $pkg from AUR"
-  # Build AUR packages via makepkg under a throwaway build user instead of
-  # relying on $SUDO_USER (which is unset when the script is run as root).
-  local tmpdir builddir
-  tmpdir=$(mktemp -d)
-  builddir="$tmpdir/$pkg"
-  git clone "https://aur.archlinux.org/${pkg}.git" "$builddir"
-  _run_makepkg_as_build_user "$builddir"
-  rm -rf "$tmpdir"
+  echo_msg "Reviewing $pkg before AUR installation"
+  aal_aur_install_reviewed "$pkg"
 }
 
 backup_conf() {
