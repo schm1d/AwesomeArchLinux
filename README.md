@@ -749,6 +749,29 @@ sudo ./utils/audit-check.sh --json             # Machine-readable compliance rep
 - **Backup paths** &mdash; Edit `backup.sh` include/exclude lists for your environment.
 - **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/prometheus/node-exporter/`.
 
+### Security References and Methodology
+
+The settings in this repository are implementation choices, not a claim of
+formal compliance or universal suitability. Each hardening module documents
+its service-specific sources and compatibility tradeoffs in its own README.
+The shared baseline is grounded in:
+
+- [Arch Linux Installation Guide](https://wiki.archlinux.org/title/Installation_guide)
+  and [Arch Linux Security guidance](https://wiki.archlinux.org/title/Security)
+- [Linux kernel self-protection documentation](https://docs.kernel.org/security/self-protection.html)
+  and [kernel sysctl documentation](https://docs.kernel.org/admin-guide/sysctl/)
+- [systemd service sandboxing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
+  and [`systemd-analyze security`](https://www.freedesktop.org/software/systemd/man/latest/systemd-analyze.html)
+- [OWASP Cheat Sheet Series](https://cheatsheetseries.owasp.org/) for
+  application-facing controls
+- [Arch User Repository security guidance](https://wiki.archlinux.org/title/Arch_User_Repository)
+  for the explicit AUR review workflow
+
+These sources explain the mechanisms; they do not replace testing on the
+actual hardware and workload. The project deliberately records known
+compatibility costs and avoids presenting a larger hardening score as proof
+that a service still works.
+
 ### Contributing
 
 Contributions are welcome! Feel free to submit issues or pull requests to improve the scripts, add new features, or enhance the documentation.

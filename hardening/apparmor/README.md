@@ -154,3 +154,12 @@ sudo rm /etc/apparmor.d/usr.bin.myservice
 sudo systemctl disable apparmor.service
 # Then remove kernel params from /etc/default/grub and run grub-mkconfig
 ```
+
+## References
+
+- [AppArmor — ArchWiki](https://wiki.archlinux.org/title/AppArmor)
+- [AppArmor upstream documentation](https://gitlab.com/apparmor/apparmor/-/wikis/Documentation)
+- [`apparmor.d(5)` profile language](https://man.archlinux.org/man/apparmor.d.5.en)
+- [`apparmor_parser(8)`](https://man.archlinux.org/man/apparmor_parser.8.en)
+- [`aa-logprof(8)`](https://man.archlinux.org/man/aa-logprof.8.en)
+- [Linux Security Module documentation](https://docs.kernel.org/admin-guide/LSM/)

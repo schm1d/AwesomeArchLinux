@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# kernel.modules_disabled semantics:
+# https://docs.kernel.org/admin-guide/sysctl/kernel.html#modules-disabled
+
 readonly PERSIST_FILE="/etc/sysctl.d/90-awesome-modules-lockdown.conf"
 MODE=""
 CONFIRMATION=""

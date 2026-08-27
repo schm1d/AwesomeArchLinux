@@ -315,3 +315,12 @@ The `encrypt` ext4 feature itself stays enabled (there is no in-place
 Nothing outside `hardening/fscrypt/` in this repo is affected. The base
 installer (`base/archinstall.sh`, `base/chroot.sh`) is unchanged — this
 module is strictly opt-in.
+
+## References
+
+- [Linux kernel fscrypt documentation](https://docs.kernel.org/filesystems/fscrypt.html)
+- [fscrypt userspace documentation](https://github.com/google/fscrypt/blob/master/README.md)
+- [fscrypt — ArchWiki](https://wiki.archlinux.org/title/Fscrypt)
+- [fscrypt command and recovery guide](https://github.com/google/fscrypt/blob/master/README.md#example-usage)
+- [dm-crypt comparison and full-disk encryption guidance](https://wiki.archlinux.org/title/Dm-crypt)
+- [PAM configuration — ArchWiki](https://wiki.archlinux.org/title/PAM)

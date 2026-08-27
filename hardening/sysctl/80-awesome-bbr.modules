@@ -1,2 +1,3 @@
 # Managed by AwesomeArchLinux.
+# Reference: https://docs.kernel.org/networking/ip-sysctl.html
 tcp_bbr

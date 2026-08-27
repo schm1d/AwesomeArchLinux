@@ -359,6 +359,10 @@ curl -I http://localhost:3000/assets/index.abc123.js.map
 
 ## References
 
+- [React: JSX is transformed into JavaScript](https://react.dev/learn/writing-markup-with-jsx)
+- [Vite production build guide](https://vite.dev/guide/build)
+- [nginx HTTP headers module](https://nginx.org/en/docs/http/ngx_http_headers_module.html)
+- [RFC 9111: HTTP caching](https://datatracker.ietf.org/doc/html/rfc9111)
 - [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/)
 - [Content-Security-Policy Reference](https://content-security-policy.com/)
 - [CSP Evaluator (Google)](https://csp-evaluator.withgoogle.com/)

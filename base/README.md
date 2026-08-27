@@ -272,3 +272,17 @@ After rebooting into your new system:
 8. Review fail2ban status: `sudo fail2ban-client status sshd`
 9. Verify AppArmor profiles: `sudo aa-status`
 10. Copy your SSH public key to `~/.ssh/authorized_keys` before relying on key-only auth
+
+---
+
+## References
+
+- [Arch Linux Installation Guide](https://wiki.archlinux.org/title/Installation_guide)
+- [dm-crypt: Encrypting an entire system](https://wiki.archlinux.org/title/Dm-crypt/Encrypting_an_entire_system)
+- [Unified kernel images — ArchWiki](https://wiki.archlinux.org/title/Unified_kernel_image)
+- [UAPI Unified Kernel Image specification](https://uapi-group.org/specifications/specs/unified_kernel_image/)
+- [UEFI Secure Boot — ArchWiki](https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot)
+- [`systemd-cryptenroll` TPM2 enrollment](https://www.freedesktop.org/software/systemd/man/latest/systemd-cryptenroll.html)
+- [`bootctl` and systemd-boot](https://www.freedesktop.org/software/systemd/man/latest/bootctl.html)
+- [GRUB security guidance](https://www.gnu.org/software/grub/manual/grub/html_node/Security.html)
+- [`sbctl` manual](https://github.com/Foxboron/sbctl/blob/master/docs/sbctl.8.txt)

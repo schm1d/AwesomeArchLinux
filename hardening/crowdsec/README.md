@@ -324,6 +324,8 @@ echo '<log_line>' | cscli explain --type syslog
 
 ## References
 
+- [Arch User Repository security guidance](https://wiki.archlinux.org/title/Arch_User_Repository)
+- [`makepkg(8)`](https://man.archlinux.org/man/makepkg.8.en)
 - [CrowdSec Documentation](https://docs.crowdsec.net/)
 - [CrowdSec Hub (Collections, Parsers, Scenarios)](https://hub.crowdsec.net/)
 - [CrowdSec Console](https://app.crowdsec.net/)
@@ -331,3 +333,4 @@ echo '<log_line>' | cscli explain --type syslog
 - [Arch Wiki -- CrowdSec](https://wiki.archlinux.org/title/CrowdSec)
 - [nftables Bouncer Documentation](https://docs.crowdsec.net/docs/bouncers/firewall/)
 - [CrowdSec Community Blocklist](https://www.crowdsec.net/community-blocklist)
+- [systemd service sandboxing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)

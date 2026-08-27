@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# References: https://docs.kernel.org/admin-guide/sysctl/
+#             https://www.freedesktop.org/software/systemd/man/latest/systemd-sysctl.html
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly CORE_FILE="60-awesome-security-core.conf"

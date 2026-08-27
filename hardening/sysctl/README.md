@@ -118,3 +118,15 @@ media if the machine cannot boot or initialize required hardware.
 
 See [`WORKSTATION.md`](./WORKSTATION.md) for higher-value non-sysctl workstation
 decisions such as swap, THP, IRQ balancing, CPU policy, and measurement.
+
+## References
+
+- [Linux kernel sysctl documentation](https://docs.kernel.org/admin-guide/sysctl/)
+- [Linux kernel IP sysctl documentation](https://docs.kernel.org/networking/ip-sysctl.html)
+- [Linux kernel self-protection](https://docs.kernel.org/security/self-protection.html)
+- [`systemd-sysctl(8)`](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysctl.html)
+- [`sysctl(8)`](https://man7.org/linux/man-pages/man8/sysctl.8.html)
+- [RFC 3704: Ingress filtering and multihoming](https://datatracker.ietf.org/doc/html/rfc3704)
+- [RFC 8200: IPv6 routing-header processing](https://datatracker.ietf.org/doc/html/rfc8200)
+- [BBR congestion control paper](https://research.google/pubs/bbr-congestion-based-congestion-control/)
+- [ArchWiki sysctl guidance](https://wiki.archlinux.org/title/Sysctl)

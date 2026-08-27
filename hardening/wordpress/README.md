@@ -432,5 +432,7 @@ Ensure WordPress-related logs do not grow unbounded:
 - [fail2ban Documentation](https://www.fail2ban.org/wiki/index.php/Main_Page)
 - [WordPress REST API Handbook](https://developer.wordpress.org/rest-api/)
 - [WordPress Salts Generator](https://api.wordpress.org/secret-key/1.1/salt/)
+- [WordPress Cron API](https://developer.wordpress.org/plugins/cron/)
+- [`wp config` command reference](https://developer.wordpress.org/cli/commands/config/)
 - [Arch Wiki - nginx](https://wiki.archlinux.org/title/Nginx)
 - [Arch Wiki - PHP](https://wiki.archlinux.org/title/PHP)

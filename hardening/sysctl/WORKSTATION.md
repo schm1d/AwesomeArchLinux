@@ -241,3 +241,19 @@ For most secure, high-performance desktop/workstation builds:
 - keep user namespaces enabled unless you explicitly want the stricter tradeoff
 
 That gives you a better day-2 workstation profile than trying to push more and more behavior into `sysctl` alone.
+
+## References
+
+- [Linux kernel command-line parameters](https://docs.kernel.org/admin-guide/kernel-parameters.html)
+- [Linux kernel Transparent Huge Pages documentation](https://docs.kernel.org/admin-guide/mm/transhuge.html)
+- [`systemd-oomd` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd-oomd.service.html)
+- [systemd resource-control and memory-pressure behavior](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html)
+- [`irqbalance(1)`](https://man.archlinux.org/man/irqbalance.1.en)
+- [`journald.conf(5)` retention controls](https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html)
+- [systemd zram generator](https://github.com/systemd/zram-generator)
+- [User namespaces — ArchWiki](https://wiki.archlinux.org/title/Security#Sandboxing_applications)
+- [NVIDIA DRM/KMS guidance — ArchWiki](https://wiki.archlinux.org/title/NVIDIA)
+- [`mount(8)` atime semantics](https://man7.org/linux/man-pages/man8/mount.8.html)
+- [`fstrim(8)`](https://man.archlinux.org/man/fstrim.8.en)
+- [`smartctl(8)`](https://man.archlinux.org/man/smartctl.8.en)
+- [`fwupdmgr(1)`](https://man.archlinux.org/man/fwupdmgr.1.en)

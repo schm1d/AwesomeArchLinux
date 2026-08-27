@@ -191,3 +191,15 @@ After running the script:
 - **Authorized keys:** Copy your public key to `~/.ssh/authorized_keys` on the server *before* disconnecting, as password authentication is disabled.
 - **Firewall persistence:** nftables rules persist in a marked block in `/etc/nftables.conf`. The iptables fallback persists through `awesome-ssh-rate-limit.service` and `/usr/local/libexec/awesome-ssh-rate-limit`.
 - **Banner:** Modify `/etc/issue.net` to match your organization's legal requirements.
+
+---
+
+## References
+
+- [OpenSSH upstream manual index](https://www.openssh.org/manual.html)
+- [`sshd_config(5)`](https://man.openbsd.org/sshd_config)
+- [`ssh_config(5)`](https://man.openbsd.org/ssh_config)
+- [`ssh-keygen(1)`](https://man.openbsd.org/ssh-keygen)
+- [OpenSSH security advisories](https://www.openssh.org/security.html)
+- [OpenSSH — ArchWiki](https://wiki.archlinux.org/title/OpenSSH)
+- [Fail2ban limitations and SSH guidance — ArchWiki](https://wiki.archlinux.org/title/Fail2ban)

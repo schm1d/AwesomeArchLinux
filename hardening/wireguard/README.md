@@ -228,3 +228,14 @@ This is useful when you only need access to resources on the VPN network without
 - `SaveConfig = false` prevents WireGuard from overwriting your carefully crafted config on shutdown.
 - Firewall and NAT rules are persistent and owned by the marked WireGuard block in `/etc/nftables.conf`.
 - **Never transmit private keys or config files over unencrypted channels.** Use QR codes, `scp`, or another encrypted method.
+
+## References
+
+- [WireGuard conceptual overview](https://www.wireguard.com/)
+- [WireGuard quick start](https://www.wireguard.com/quickstart/)
+- [WireGuard protocol and cryptography](https://www.wireguard.com/protocol/)
+- [WireGuard technical whitepaper](https://www.wireguard.com/papers/wireguard.pdf)
+- [`wg(8)`](https://man.archlinux.org/man/wg.8.en)
+- [`wg-quick(8)`](https://man.archlinux.org/man/wg-quick.8.en)
+- [WireGuard — ArchWiki](https://wiki.archlinux.org/title/WireGuard)
+- [nftables NAT documentation](https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_%28NAT%29)

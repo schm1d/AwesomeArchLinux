@@ -164,3 +164,12 @@ sudo nft list ruleset
 ```
 
 fail2ban creates its own table (`f2b-table`) and chains dynamically. They appear only when at least one IP is banned.
+
+## References
+
+- [Fail2ban upstream repository and documentation](https://github.com/fail2ban/fail2ban)
+- [`jail.conf(5)` upstream manual](https://github.com/fail2ban/fail2ban/blob/master/man/jail.conf.5)
+- [Fail2ban upstream nftables action](https://github.com/fail2ban/fail2ban/blob/master/config/action.d/nftables.conf)
+- [Fail2ban — ArchWiki](https://wiki.archlinux.org/title/Fail2ban)
+- [systemd service sandboxing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
+- [nftables documentation](https://wiki.nftables.org/wiki-nftables/index.php/Main_Page)

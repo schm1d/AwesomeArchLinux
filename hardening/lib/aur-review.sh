@@ -8,6 +8,8 @@
 # before evaluating PKGBUILD through makepkg. Builds run as a disposable,
 # unprivileged user; only the specifically requested package is handed to
 # pacman as root.
+# Reference: https://wiki.archlinux.org/title/Arch_User_Repository
+# Reference: https://man.archlinux.org/man/makepkg.8.en
 
 _aal_aur_error() { printf '[AUR REVIEW ERROR] %s\n' "$*" >&2; }
 _aal_aur_info()  { printf '[AUR REVIEW] %s\n' "$*"; }

@@ -22,6 +22,10 @@ unprivileged builds, exact artifact selection, and persistent commit/hash audit
 records. The repository-native nftables path remains the lower-supply-chain-risk
 alternative to FireHOL.
 
+The dependency links in the high-risk table point to the AUR records inspected
+for this snapshot; maintainer and popularity data can therefore be rechecked
+against the dated report rather than treated as timeless claims.
+
 ### Counts by Risk Factor
 
 | Risk Factor | Dependencies | Total |
@@ -37,11 +41,11 @@ The following dependencies have two or more risk factors.
 
 | Dependency Name | Risk Factors | Notes | Suggested Alternative |
 |-----------------|--------------|-------|-----------------------|
-| crowdsec | Single AUR maintainer; low AUR popularity; high-risk security function | The AUR recipe builds a privileged IDS/LAPI service from upstream source. | **Reviewed exact AUR commit** — no official Arch package was found; require recipe review, upstream checksum verification, and an unprivileged build. |
-| crowdsec-firewall-bouncer-nftables | Single AUR maintainer; low AUR popularity; high-risk security function | A split AUR package installs a privileged firewall enforcement daemon. | **Reviewed exact split-package commit** — install only the nftables artifact and retain the installer-native nftables firewall as the simpler fallback. |
-| crowdsec-nginx-bouncer | Single AUR maintainer; low AUR popularity; high-risk security function | The package runs in the web request path and pulls additional AUR Lua dependencies. | **Omit the optional nginx bouncer** — use the reviewed CrowdSec engine and nftables bouncer unless layer-7 enforcement justifies reviewing the complete Lua dependency chain. |
-| firehol | Single AUR maintainer; low AUR popularity; high-risk security function | The package generates and activates host firewall policy as root. | **Arch nftables package** — the repository-native nftables configuration avoids this AUR dependency and is the default project path. |
-| iprange | Single AUR maintainer; low AUR popularity | FireHOL uses this range-processing utility when constructing firewall sets. | **Arch nftables sets** — staying on the native nftables path removes the FireHOL/iprange AUR chain. |
+| [crowdsec](https://aur.archlinux.org/packages/crowdsec) | Single AUR maintainer; low AUR popularity; high-risk security function | The AUR recipe builds a privileged IDS/LAPI service from upstream source. | **Reviewed exact AUR commit** — no official Arch package was found; require recipe review, upstream checksum verification, and an unprivileged build. |
+| [crowdsec-firewall-bouncer-nftables](https://aur.archlinux.org/packages/crowdsec-firewall-bouncer-nftables) | Single AUR maintainer; low AUR popularity; high-risk security function | A split AUR package installs a privileged firewall enforcement daemon. | **Reviewed exact split-package commit** — install only the nftables artifact and retain the installer-native nftables firewall as the simpler fallback. |
+| [crowdsec-nginx-bouncer](https://aur.archlinux.org/packages/crowdsec-nginx-bouncer) | Single AUR maintainer; low AUR popularity; high-risk security function | The package runs in the web request path and pulls additional AUR Lua dependencies. | **Omit the optional nginx bouncer** — use the reviewed CrowdSec engine and nftables bouncer unless layer-7 enforcement justifies reviewing the complete Lua dependency chain. |
+| [firehol](https://aur.archlinux.org/packages/firehol) | Single AUR maintainer; low AUR popularity; high-risk security function | The package generates and activates host firewall policy as root. | **Arch nftables package** — the repository-native nftables configuration avoids this AUR dependency and is the default project path. |
+| [iprange](https://aur.archlinux.org/packages/iprange) | Single AUR maintainer; low AUR popularity | FireHOL uses this range-processing utility when constructing firewall sets. | **Arch nftables sets** — staying on the native nftables path removes the FireHOL/iprange AUR chain. |
 
 ## Suggested Alternatives
 

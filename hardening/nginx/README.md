@@ -169,6 +169,10 @@ After running the script:
 
 ## References
 
+- [nginx HTTPS configuration](https://nginx.org/en/docs/http/configuring_https_servers.html)
+- [nginx HTTP headers module](https://nginx.org/en/docs/http/ngx_http_headers_module.html)
+- [nginx request limiting module](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html)
+- [nginx reverse-proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
 - [SSL Labs Server Test](https://www.ssllabs.com/ssltest/)
 - [securityheaders.com](https://securityheaders.com/)
 - [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/)
@@ -176,3 +180,4 @@ After running the script:
 - [Let's Encrypt — Ending OCSP Support (2025)](https://letsencrypt.org/2024/12/05/ending-ocsp)
 - [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)
 - [Certbot — Arch Wiki](https://wiki.archlinux.org/title/Certbot)
+- [systemd service sandboxing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)

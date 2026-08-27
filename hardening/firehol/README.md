@@ -88,6 +88,9 @@ should be tested against the machine's actual dependencies.
 
 ## References
 
+- [Arch User Repository security guidance](https://wiki.archlinux.org/title/Arch_User_Repository)
+- [`makepkg(8)`](https://man.archlinux.org/man/makepkg.8.en)
 - [FireHOL configuration reference](https://firehol.org/firehol-manual/firehol-conf/)
 - [FireHOL blacklist reference](https://firehol.org/firehol-manual/firehol-blacklist/)
 - [FireHOL command reference](https://firehol.org/firehol-manual/firehol/)
+- [nftables — ArchWiki](https://wiki.archlinux.org/title/Nftables)

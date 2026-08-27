@@ -5,6 +5,7 @@ set -euo pipefail
 #              monitoring automation script for Arch Linux. Installs AIDE,
 #              generates a comprehensive configuration, creates systemd timers
 #              for daily integrity checks, and provides init/check/update modes.
+# References: https://aide.github.io/doc/
 # Author: Bruno Schmid @brulliant
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
@@ -295,6 +296,7 @@ create_systemd_units() {
     cat > "${AIDE_SERVICE}" <<EOF
 [Unit]
 Description=AIDE file integrity check
+Documentation=https://aide.github.io/ man:aide(1)
 After=local-fs.target
 
 [Service]
