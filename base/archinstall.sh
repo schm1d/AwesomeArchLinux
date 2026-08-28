@@ -899,7 +899,7 @@ pacstrap /mnt base base-devel archlinux-keyring \
     apparmor audit rng-tools \
     lynis arch-audit rkhunter \
     firejail bubblewrap \
-    git wget curl rsync \
+    git wget curl rsync reflector \
     neovim vim nano nano-syntax-highlighting \
     zsh zsh-completions \
     unzip unrar p7zip zip unarj arj cabextract xz pbzip2 pixz lrzip cpio \
