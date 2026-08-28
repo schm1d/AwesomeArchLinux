@@ -524,12 +524,8 @@ log_action "Selected boot profile: $INSTALL_BOOTLOADER"
 
 # Select mirrors - avoid SIGPIPE from head
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
-cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
-MIRROR_TMP="/tmp/mirrorlist.tmp"
-curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
-    sed -e 's/^#Server/Server/' -e '/^#/d' > "$MIRROR_TMP"
-head -20 "$MIRROR_TMP" > /etc/pacman.d/mirrorlist
-rm -f "$MIRROR_TMP"
+pacman -Sy --noconfirm reflector
+reflector --protocol https --latest 20 --sort rate --save /etc/pacman.d/mirrorlist
 
 # Detect and setup TPM
 detect_tpm || true
