@@ -18,7 +18,13 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/../lib/nftables.sh"
+if [[ -f "$SCRIPT_DIR/../lib/nftables.sh" ]]; then
+    source "$SCRIPT_DIR/../lib/nftables.sh"
+elif [[ -f "$SCRIPT_DIR/nftables.sh" ]]; then
+    source "$SCRIPT_DIR/nftables.sh"
+else
+    echo "WARNING: nftables helper not found; rate-limit persistence disabled." >&2
+fi
 
 BBlue='\033[1;34m'
 BRed='\033[1;31m'
