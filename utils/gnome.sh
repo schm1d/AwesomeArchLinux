@@ -57,7 +57,7 @@ pacman -S --noconfirm \
   gnome-calculator gnome-console gnome-disk-utility gnome-epub-thumbnailer gnome-firmware eog \
   gnome-keyring networkmanager-openvpn nautilus seahorse gnome-control-center chromium \
   baobab deja-dup sushi xdg-desktop-portal-gnome gnome-font-viewer gnome-nettool gnome-session \
-  gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin \
+  gnome-screenshot gnome-shell gnome-software gnome-tweaks onionshare ublock-origin secrets\
   gsettings-desktop-schemas gsettings-system-schemas gedit gedit-plugins \
   xdg-user-dirs-gtk xorg-server xorg-xwayland xdg-utils xorg-xinit xorg-xinput libinput torbrowser-launcher \
   networkmanager-openconnect networkmanager-strongswan \
