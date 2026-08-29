@@ -1258,15 +1258,15 @@ install_nvidia_driver_for_installed_kernels() {
     local found_prebuilt_kernel=false
 
     if pacman -Qq linux &>/dev/null; then
-        driver_packages+=(nvidia)
+        driver_packages+=(nvidia-open)
         found_prebuilt_kernel=true
     fi
     if pacman -Qq linux-lts &>/dev/null; then
-        driver_packages+=(nvidia-lts)
+        driver_packages+=(nvidia-open-lts)
         found_prebuilt_kernel=true
     fi
     if [[ "$found_prebuilt_kernel" == false ]]; then
-        driver_packages+=(dkms nvidia-dkms)
+        driver_packages+=(dkms nvidia-open-dkms)
     fi
 
     echo "Installing NVIDIA packages for the installed kernel(s): ${driver_packages[*]}"
@@ -1314,7 +1314,7 @@ if [[ "$NVIDIA_CARD" == true ]]; then
         *)
             echo "No matching NVIDIA driver found for: $gpu_model"
             echo "Installing standard nvidia driver as a fallback..."
-            pacman -S --noconfirm nvidia nvidia-utils
+            pacman -S --noconfirm nvidia-open nvidia-utils
             ;;
     esac
 
