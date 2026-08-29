@@ -1050,6 +1050,11 @@ if [ -f ../hardening/ssh/ssh.sh ]; then
     chmod +x /mnt/ssh.sh
 fi
 
+if [ -f ../hardening/lib/nftables.sh ]; then
+    cp ../hardening/lib/nftables.sh /mnt/nftables.sh
+    chmod 0644 /mnt/nftables.sh
+fi
+
 # Create AUR installation script
 cat > /mnt/root/install-aur-packages.sh <<'AURSCRIPT'
 #!/bin/bash
