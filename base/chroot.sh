@@ -1181,74 +1181,74 @@ sleep 1
 
 # --- Bluetooth Configuration ---
  # Radio profile for BlueZ (hardware-agnostic):                                                                                       
-    #   dual  - default. Classic audio (A2DP) + BLE keyboards/mice/tags                                                                  
-    #   bredr - classic only; use if you want no BLE                                                                                     
-    #   le    - BLE only; A2DP headphones/speakers will not work                                                                         
-    : "${BLUETOOTH_CONTROLLER_MODE:=dual}"                                                                                               
-                                                                                                                                         
-    configure_bluetooth() {                                                                                                              
-      # Detection is basic but sufficient for most USB/PCI adapters                                                                      
-      if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
-        echo -e "${BBlue}Bluetooth hardware detected.${NC}"
-        
-        if ! pacman -Qi bluez bluez-utils &>/dev/null; then
-          pacman -S --noconfirm bluez bluez-utils
-        fi
+     #   dual  - default. Classic audio (A2DP) + BLE keyboards/mice/tags
+  #   bredr - classic only; use if you want no BLE
+  #   le    - BLE only; A2DP headphones/speakers will not work
+  : "${BLUETOOTH_CONTROLLER_MODE:=dual}"
   
-        case "${BLUETOOTH_CONTROLLER_MODE}" in
-          dual|bredr|le) ;;
-          *)
-            echo -e "${BRed}Invalid BLUETOOTH_CONTROLLER_MODE=${BLUETOOTH_CONTROLLER_MODE} (use dual, bredr, or le).${NC}"
-            return 1
-            ;;
-        esac
+  configure_bluetooth() {
+    if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
+      echo -e "${BBlue}Bluetooth hardware detected.${NC}"
   
-        install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true
-  
-        cat <<EOF >/etc/bluetooth/main.conf
-    [General]
-    # BlueZ ignores unknown keys and does not support inline comments on option lines.
-    Name=Bluetooth
-    DiscoverableTimeout=90
-    AlwaysPairable=false
-    PairableTimeout=90
-    DebugKeys=false
-    ControllerMode=${BLUETOOTH_CONTROLLER_MODE}
-    FastConnectable=true
-    Privacy=device
-    JustWorksRepairing=confirm
-    SecureConnections=on
-    Experimental=false
-    Testing=false
-    KernelExperimental=false
-    FilterDiscoverable=true
-    TemporaryTimeout=30
-  
-    [GATT]
-    KeySize=16
-  
-    [Policy]
-    AutoEnable=true
-    # Merged defaults + additions: Headset, Handsfree, Audio Source, Audio Sink, AVRCP, HID
-    ReconnectUUIDs=00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,       
-  0000110b-0000-1000-8000-00805f9b34fb,0000110e-0000-1000-8000-00805f9b34fb,00001124-0000-1000-8000-00805f9b34fb
-    EOF
-  
-        mkdir -p /etc/systemd/system/bluetooth.service.d
-        cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
-    [Service]
-    ProtectHome=true
-    RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-    EOF
-  
-        # Do not use --now inside an arch-chroot as systemd is not PID 1
-        systemctl daemon-reload
-        systemctl enable bluetooth
-        
-        echo -e "${BBlue}Bluetooth configured (ControllerMode=${BLUETOOTH_CONTROLLER_MODE}).${NC}"
-      else
-        echo -e "${BBlue}No Bluetooth hardware detected.${NC}"
+      if ! pacman -Qi bluez bluez-utils &>/dev/null; then
+        pacman -S --noconfirm bluez bluez-utils
       fi
+  
+      case "${BLUETOOTH_CONTROLLER_MODE}" in
+        dual|bredr|le) ;;
+        *)
+          echo -e "${BRed}Invalid BLUETOOTH_CONTROLLER_MODE=${BLUETOOTH_CONTROLLER_MODE} (use dual, bredr, or le).${NC}"
+          return 1
+          ;;
+      esac
+  
+      install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true
+  
+      cat <<EOF >/etc/bluetooth/main.conf
+  [General]
+  # BlueZ ignores unknown keys and does not support inline comments on option lines.
+  Name=Bluetooth
+  DiscoverableTimeout=90
+  AlwaysPairable=false
+  PairableTimeout=90
+  DebugKeys=false
+  ControllerMode=${BLUETOOTH_CONTROLLER_MODE}
+  FastConnectable=true
+  Privacy=device
+  JustWorksRepairing=confirm
+  SecureConnections=on
+  Experimental=false
+  Testing=false
+  KernelExperimental=false
+  FilterDiscoverable=true
+  TemporaryTimeout=30
+  
+  [GATT]
+  KeySize=16
+  
+  [Policy]
+  AutoEnable=true
+  # BlueZ defaults (Headset AG, Handsfree AG, A2DP Source) plus Audio Sink, AVRCP, HID
+  ReconnectUUIDs=00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-00
+  00-1000-8000-00805f9b34fb,0000110e-0000-1000-8000-00805f9b34fb,00001124-0000-1000-8000-00805f9b34fb
+  EOF
+  
+      mkdir -p /etc/systemd/system/bluetooth.service.d
+      cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
+  [Service]
+  ProtectHome=true
+  RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+  EOF
+  
+  
+  # Do not use --now inside an arch-chroot as systemd is not PID 1
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable bluetooth
+  
+  echo -e "${BBlue}Bluetooth configured (ControllerMode=${BLUETOOTH_CONTROLLER_MODE}).${NC}"
+    else
+      echo -e "${BBlue}No Bluetooth hardware detected.${NC}"
+    fi
     }
     configure_bluetooth # Call the function
 
