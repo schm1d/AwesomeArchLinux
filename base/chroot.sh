@@ -1180,57 +1180,56 @@ install_cpu_microcode # Call the function
 sleep 1
 
 # --- Bluetooth Configuration ---
- # Radio profile for BlueZ (hardware-agnostic):                                                                                       
-     #   dual  - default. Classic audio (A2DP) + BLE keyboards/mice/tags
-  #   bredr - classic only; use if you want no BLE
-  #   le    - BLE only; A2DP headphones/speakers will not work
-  : "${BLUETOOTH_CONTROLLER_MODE:=dual}"
-  
-  configure_bluetooth() {
-    if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
-      echo -e "${BBlue}Bluetooth hardware detected.${NC}"
-  
-      if ! pacman -Qi bluez bluez-utils &>/dev/null; then
-        pacman -S --noconfirm bluez bluez-utils
-      fi
-  
-      case "${BLUETOOTH_CONTROLLER_MODE}" in
-        dual|bredr|le) ;;
-        *)
-          echo -e "${BRed}Invalid BLUETOOTH_CONTROLLER_MODE=${BLUETOOTH_CONTROLLER_MODE} (use dual, bredr, or le).${NC}"
-          return 1
-          ;;
-      esac
-  
-      install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true
-  
-      cat <<EOF >/etc/bluetooth/main.conf
-  [General]
-  # BlueZ ignores unknown keys and does not support inline comments on option lines.
-  Name=Bluetooth
-  DiscoverableTimeout=90
-  AlwaysPairable=false
-  PairableTimeout=90
-  DebugKeys=false
-  ControllerMode=${BLUETOOTH_CONTROLLER_MODE}
-  FastConnectable=true
-  Privacy=device
-  JustWorksRepairing=confirm
-  SecureConnections=on
-  Experimental=false
-  Testing=false
-  KernelExperimental=false
-  FilterDiscoverable=true
-  TemporaryTimeout=30
-  
-  [GATT]
-  KeySize=16
+# Radio profile for BlueZ (hardware-agnostic):
+#   dual  - default. Classic audio (A2DP) + BLE keyboards/mice/tags
+#   bredr - classic only; use if you want no BLE
+#   le    - BLE only; A2DP headphones/speakers will not work
+: "${BLUETOOTH_CONTROLLER_MODE:=dual}"
+
+configure_bluetooth() {
+  if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
+    echo -e "${BBlue}Bluetooth hardware detected.${NC}"
+
+    if ! pacman -Qi bluez bluez-utils &>/dev/null; then
+      pacman -S --noconfirm bluez bluez-utils
+    fi
+
+    case "${BLUETOOTH_CONTROLLER_MODE}" in
+      dual|bredr|le) ;;
+      *)
+        echo -e "${BRed}Invalid BLUETOOTH_CONTROLLER_MODE=${BLUETOOTH_CONTROLLER_MODE} (use dual, bredr, or le).${NC}"
+        return 1
+        ;;
+    esac
+
+    install -Dm644 /etc/bluetooth/main.conf{,.bak} 2>/dev/null || true
+
+    cat <<EOF >/etc/bluetooth/main.conf
+[General]
+# BlueZ ignores unknown keys and does not support inline comments on option lines.
+Name=Bluetooth
+DiscoverableTimeout=90
+AlwaysPairable=false
+PairableTimeout=90
+DebugKeys=false
+ControllerMode=${BLUETOOTH_CONTROLLER_MODE}
+FastConnectable=true
+Privacy=device
+JustWorksRepairing=confirm
+SecureConnections=on
+Experimental=false
+Testing=false
+KernelExperimental=false
+FilterDiscoverable=true
+TemporaryTimeout=30
+
+[GATT]
+KeySize=16
   
   [Policy]
   AutoEnable=true
   # BlueZ defaults (Headset AG, Handsfree AG, A2DP Source) plus Audio Sink, AVRCP, HID
-  ReconnectUUIDs=00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-00
-  00-1000-8000-00805f9b34fb,0000110e-0000-1000-8000-00805f9b34fb,00001124-0000-1000-8000-00805f9b34fb
+  ReconnectUUIDs=00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-0000-1000-8000-00805f9b34fb,0000110e-0000-1000-8000-00805f9b34fb,00001124-0000-1000-8000-00805f9b34fb
   EOF
   
       mkdir -p /etc/systemd/system/bluetooth.service.d
