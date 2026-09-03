@@ -146,10 +146,10 @@ bl_set_hooks() {
 
     if [[ "$INSTALL_BOOTLOADER" == "uki" || "$INSTALL_TPM" == "true" ]]; then
         for hook in "${!HOOKS[@]}"; do
-            case "${HOOKS[$hook]}" in
-                udev) HOOKS[$hook]="systemd" ;;
-                keymap|consolefont) HOOKS[$hook]="sd-vconsole" ;;
-                encrypt) HOOKS[$hook]="sd-encrypt" ;;
+            case "${HOOKS[hook]}" in
+                udev) HOOKS[hook]="systemd" ;;
+                keymap|consolefont) HOOKS[hook]="sd-vconsole" ;;
+                encrypt) HOOKS[hook]="sd-encrypt" ;;
             esac
         done
         bl_array_deduplicate HOOKS
@@ -176,10 +176,10 @@ bl_set_hooks() {
         bl_array_append_unique MODULES tpm tpm_tis tpm_crb
     else
         for hook in "${!HOOKS[@]}"; do
-            case "${HOOKS[$hook]}" in
-                systemd) HOOKS[$hook]="udev" ;;
-                sd-vconsole) HOOKS[$hook]="keymap" ;;
-                sd-encrypt) HOOKS[$hook]="encrypt" ;;
+            case "${HOOKS[hook]}" in
+                systemd) HOOKS[hook]="udev" ;;
+                sd-vconsole) HOOKS[hook]="keymap" ;;
+                sd-encrypt) HOOKS[hook]="encrypt" ;;
             esac
         done
         bl_array_deduplicate HOOKS

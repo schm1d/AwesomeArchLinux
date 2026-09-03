@@ -968,8 +968,7 @@ set +e # Disable 'exit on error' temporarily
 while true; do
     echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
     echo -e "${BBlue}Password should be at least 12 characters long, contain 1 symbol, 1 number, upper and lowercase letters.${NC}"
-    passwd "$USERNAME"
-    if [ $? -eq 0 ]; then
+    if passwd "$USERNAME"; then
         break # Exit loop if password change successful
     else
         echo -e "${BBlue}Password change failed. Please try again.${NC}"
@@ -980,8 +979,7 @@ done
 # Set password for root (with loop for incorrect input)
 while true; do
     echo -e "${BBlue}Setting root password...${NC}"
-    passwd root
-    if [ $? -eq 0 ]; then
+    if passwd root; then
         break # Exit loop if password change successful
     else
         echo -e "${BBlue}Root password change failed. Please try again.${NC}"
@@ -1230,14 +1228,14 @@ KeySize=16
   AutoEnable=true
   # BlueZ defaults (Headset AG, Handsfree AG, A2DP Source) plus Audio Sink, AVRCP, HID
   ReconnectUUIDs=00001112-0000-1000-8000-00805f9b34fb,0000111f-0000-1000-8000-00805f9b34fb,0000110a-0000-1000-8000-00805f9b34fb,0000110b-0000-1000-8000-00805f9b34fb,0000110e-0000-1000-8000-00805f9b34fb,00001124-0000-1000-8000-00805f9b34fb
-  EOF
+EOF
   
       mkdir -p /etc/systemd/system/bluetooth.service.d
       cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
   [Service]
   ProtectHome=true
   RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
-  EOF
+EOF
   
   
   # Do not use --now inside an arch-chroot as systemd is not PID 1

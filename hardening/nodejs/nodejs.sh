@@ -527,7 +527,7 @@ profile $APP_NAME /usr/bin/node flags=(enforce) {
   # Node.js binary
   /usr/bin/node                    mr,
 
-  # Application directory — read only
+  # Application directory — read -r only
   $APP_PATH/**                     r,
   $APP_PATH/node_modules/**        mr,
 

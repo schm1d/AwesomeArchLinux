@@ -523,7 +523,7 @@ echo -e "${C_BLUE}--- Phase 4: Tool Policy & Execution Security ---${C_NC}"
 # -----------------------------------------------------------------------------
 
 msg "Step 6: Tool profile set to 'messaging' (minimal)"
-info "The 'messaging' profile allows AI to read and reply to messages"
+info "The 'messaging' profile allows AI to read -r and reply to messages"
 info "Shell execution, file writes, and code execution are blocked by default"
 
 # -----------------------------------------------------------------------------
@@ -1795,7 +1795,7 @@ echo
 
 echo -e "${C_BLUE}systemd Hardening Summary:${C_NC}"
 echo "  - ProtectSystem=strict (read-only /usr, /boot, /etc)"
-echo "  - ProtectHome=read-only (needs read access to ~/.openclaw)"
+echo "  - ProtectHome=read-only (needs read -r access to ~/.openclaw)"
 echo "  - ReadWritePaths=$OC_DIR only"
 echo "  - PrivateTmp=yes, PrivateDevices=yes"
 echo "  - NoNewPrivileges=yes, LockPersonality=yes"

@@ -60,7 +60,7 @@ ask_yes_no() {
     local prompt_msg="$1"
     local choice
     while true; do
-        read -p "$prompt_msg (y/n): " choice
+        read -r -p "$prompt_msg (y/n): " choice
         case "$choice" in
             [Yy]) echo "y"; return 0 ;;
             [Nn]) echo "n"; return 0 ;;
@@ -85,7 +85,7 @@ recommended_tmp_size_gb() {
 ask_for_disk() {
     local disk
     while true; do
-        read -p "Select the target disk (e.g., sda, vda, nvme0n1): " disk
+        read -r -p "Select the target disk (e.g., sda, vda, nvme0n1): " disk
         if [[ -b "/dev/$disk" ]]; then
             echo "$disk"
             return 0
@@ -99,7 +99,7 @@ ask_for_numeric() {
     local prompt_msg="$1"
     local input_val
     while true; do
-        read -p "$prompt_msg " input_val
+        read -r -p "$prompt_msg " input_val
         if [[ "$input_val" =~ ^[0-9]+$ ]]; then
             echo "$input_val"
             return 0
@@ -112,7 +112,7 @@ ask_for_numeric() {
 ask_for_username() {
     local username
     while true; do
-        read -p "Enter the new username: " username
+        read -r -p "Enter the new username: " username
         if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#username} -le 32 ]]; then
             echo "$username"
             return 0
@@ -125,7 +125,7 @@ ask_for_username() {
 ask_for_hostname() {
     local hostname
     while true; do
-        read -p "Enter the new hostname: " hostname
+        read -r -p "Enter the new hostname: " hostname
         if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]*$ ]] && [[ ${#hostname} -le 64 ]]; then
             echo "$hostname"
             return 0
@@ -142,7 +142,7 @@ ask_for_sysctl_profile() {
         echo "1) workstation - compatible security baseline (recommended)" >&2
         echo "2) strict      - disables unprivileged user namespaces, io_uring, kexec, and debugging" >&2
         echo "3) performance - workstation baseline plus fq + BBR" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "workstation"; return 0 ;;
@@ -159,7 +159,7 @@ ask_for_ipv6_policy() {
         echo -e "${BBlue}Select IPv6 policy:${NC}" >&2
         echo "1) enabled and hardened (recommended; preserves SLAAC)" >&2
         echo "2) disabled by explicit sysctl overlay" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "false"; return 0 ;;
@@ -185,7 +185,7 @@ ask_for_timezone() {
         echo -e "${BBlue}Select timezone:${NC}" >&2
         echo "Common: UTC, US/Eastern, US/Pacific, Europe/London, Europe/Berlin," >&2
         echo "        Europe/Zurich, Asia/Tokyo, Asia/Shanghai, Australia/Sydney" >&2
-        read -p "Timezone [UTC]: " tz
+        read -r -p "Timezone [UTC]: " tz
         tz="${tz:-UTC}"
         if [ -f "/usr/share/zoneinfo/$tz" ]; then
             echo "$tz"
@@ -219,10 +219,10 @@ ask_for_locale() {
             ((i++))
         done
         echo "   0) Other -- type a locale name" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -p "Enter locale (e.g. nl_NL.UTF-8): " loc
+            read -r -p "Enter locale (e.g. nl_NL.UTF-8): " loc
             if grep -q "^#\?${loc} " /etc/locale.gen 2>/dev/null; then
                 echo "$loc"
                 return 0
@@ -266,10 +266,10 @@ ask_for_keymap() {
             ((i++))
         done
         echo "   0) Other -- type a keymap name" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -p "Enter keymap name: " km
+            read -r -p "Enter keymap name: " km
             if localectl list-keymaps 2>/dev/null | grep -qx "$km"; then
                 loadkeys "$km" 2>/dev/null || true
                 echo "$km"
@@ -368,7 +368,7 @@ LOCALE=$(ask_for_locale)
 KEYMAP=$(ask_for_keymap)
 
 # Ask for SSH port
-read -p "SSH port (default 22): " SSH_PORT_INPUT
+read -r -p "SSH port (default 22): " SSH_PORT_INPUT
 SSH_PORT="${SSH_PORT_INPUT:-22}"
 
 # Ask for SSH public key (critical: password auth will be disabled)

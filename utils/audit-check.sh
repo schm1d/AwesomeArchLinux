@@ -243,7 +243,7 @@ check_kernel_hardening() {
     elif [[ "$ip_fwd" == "1" ]]; then
         result_warn "IP forwarding is enabled — may be intentional for VPN/Docker" "$ip_fwd"
     else
-        result_fail "Could not read net.ipv4.ip_forward" "$ip_fwd"
+        result_fail "Could not read -r net.ipv4.ip_forward" "$ip_fwd"
     fi
 
     if [[ -f /etc/sysctl.d/90-awesome-ipv6-disabled.conf ]]; then

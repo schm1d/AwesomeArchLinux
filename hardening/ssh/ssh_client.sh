@@ -53,7 +53,7 @@ generate_ssh_key() {
 copy_public_key() {
     echo -e "${BBlue}Attempting to copy public key to the server...${NC}"
 
-    read -p "Do you have existing SSH access to the server? (y/n): " HAS_ACCESS
+    read -r -p "Do you have existing SSH access to the server? (y/n): " HAS_ACCESS
     if [ "$HAS_ACCESS" == "y" ]; then
         # Use ssh-copy-id
         ssh-copy-id -i "$KEY_FILE.pub" -p "$SSH_PORT" "$USERNAME@$SERVER_IP"
@@ -126,7 +126,7 @@ echo "Current settings:"
 echo "SSH_PORT = $SSH_PORT"
 echo "SERVER_IP = $SERVER_IP"
 echo "USERNAME = $USERNAME"
-read -p "Have you updated the variables accordingly? (y/n): " VAR_CONFIRM
+read -r -p "Have you updated the variables accordingly? (y/n): " VAR_CONFIRM
 if [ "$VAR_CONFIRM" != "y" ]; then
     echo -e "${BBlue}Please edit the script to set the correct SERVER_IP, USERNAME, and SSH_PORT.${NC}"
     exit 1
@@ -140,7 +140,7 @@ hash_known_hosts
 
 echo -e "${BBlue}Client configuration complete.${NC}"
 
-read -p "Do you want to test the SSH connection now? (y/n): " TEST_CONN
+read -r -p "Do you want to test the SSH connection now? (y/n): " TEST_CONN
 if [ "$TEST_CONN" == "y" ]; then
     test_connection
 else

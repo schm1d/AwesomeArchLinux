@@ -87,7 +87,7 @@ ask_yes_no() {
     local prompt_msg="$1"
     local choice
     while true; do
-        read -p "$prompt_msg (y/n): " choice
+        read -r -p "$prompt_msg (y/n): " choice
         case "$choice" in
             [Yy]) echo "y"; return 0 ;;
             [Nn]) echo "n"; return 0 ;;
@@ -113,7 +113,7 @@ recommended_tmp_size_gb() {
 ask_for_disk() {
     local disk
     while true; do
-        read -p "Select the target disk (e.g., sda, nvme0n1): " disk
+        read -r -p "Select the target disk (e.g., sda, nvme0n1): " disk
         if [[ -b "/dev/$disk" ]]; then
             echo "$disk"
             return 0
@@ -128,7 +128,7 @@ ask_for_numeric() {
     local prompt_msg="$1"
     local input_val
     while true; do
-        read -p "$prompt_msg " input_val
+        read -r -p "$prompt_msg " input_val
         if [[ "$input_val" =~ ^[0-9]+$ ]]; then
             echo "$input_val"
             return 0
@@ -142,7 +142,7 @@ ask_for_numeric() {
 ask_for_username() {
     local username
     while true; do
-        read -p "Enter the new username: " username
+        read -r -p "Enter the new username: " username
         if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#username} -le 32 ]]; then
             echo "$username"
             return 0
@@ -156,7 +156,7 @@ ask_for_username() {
 ask_for_hostname() {
     local hostname
     while true; do
-        read -p "Enter the new hostname: " hostname
+        read -r -p "Enter the new hostname: " hostname
         if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]*$ ]] && [[ ${#hostname} -le 64 ]]; then
             echo "$hostname"
             return 0
@@ -173,7 +173,7 @@ ask_for_sysctl_profile() {
         echo "1) workstation - compatible security baseline (recommended)" >&2
         echo "2) strict      - disables unprivileged user namespaces, io_uring, kexec, and debugging" >&2
         echo "3) performance - workstation baseline plus fq + BBR" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "workstation"; return 0 ;;
@@ -190,7 +190,7 @@ ask_for_ipv6_policy() {
         echo -e "${BBlue}Select IPv6 policy:${NC}" >&2
         echo "1) enabled and hardened (recommended; preserves SLAAC)" >&2
         echo "2) disabled by explicit sysctl overlay" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "false"; return 0 ;;
@@ -206,7 +206,7 @@ ask_for_bootloader_profile() {
         echo -e "${BBlue}Select the boot profile:${NC}" >&2
         echo "1) grub - encrypted /boot, PBKDF2 LUKS, embedded boot key" >&2
         echo "2) uki  - signed UKIs on the ESP, Argon2id LUKS, no embedded key" >&2
-        read -p "Choice (1 or 2): " choice
+        read -r -p "Choice (1 or 2): " choice
         case "$choice" in
             1) echo "grub"; return 0 ;;
             2) echo "uki"; return 0 ;;
@@ -231,7 +231,7 @@ ask_for_timezone() {
         echo -e "${BBlue}Select timezone:${NC}" >&2
         echo "Common: UTC, US/Eastern, US/Pacific, Europe/London, Europe/Berlin," >&2
         echo "        Europe/Zurich, Asia/Tokyo, Asia/Shanghai, Australia/Sydney" >&2
-        read -p "Timezone [UTC]: " tz
+        read -r -p "Timezone [UTC]: " tz
         tz="${tz:-UTC}"
         if [ -f "/usr/share/zoneinfo/$tz" ]; then
             echo "$tz"
@@ -265,10 +265,10 @@ ask_for_locale() {
             ((i++))
         done
         echo "   0) Other -- type a locale name" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -p "Enter locale (e.g. nl_NL.UTF-8): " loc
+            read -r -p "Enter locale (e.g. nl_NL.UTF-8): " loc
             if grep -q "^#\?${loc} " /etc/locale.gen 2>/dev/null; then
                 echo "$loc"
                 return 0
@@ -312,10 +312,10 @@ ask_for_keymap() {
             ((i++))
         done
         echo "   0) Other -- type a keymap name" >&2
-        read -p "Choice [1]: " choice
+        read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -p "Enter keymap name: " km
+            read -r -p "Enter keymap name: " km
             if localectl list-keymaps 2>/dev/null | grep -qx "$km"; then
                 loadkeys "$km" 2>/dev/null || true
                 echo "$km"
@@ -363,7 +363,7 @@ validate_disk_space() {
     local required=$(((swap + root + var + tmp + 10) * 1073741824))
     
     if [[ $disk_size -lt $required ]]; then
-        echo -e "${BRed}Error: Insufficient disk space. Need at least $(($required / 1073741824))GB${NC}" >&2
+        echo -e "${BRed}Error: Insufficient disk space. Need at least $((required / 1073741824))GB${NC}" >&2
         return 1
     fi
     return 0
@@ -398,7 +398,7 @@ detect_device_type() {
     device_name=$(basename "$disk")
     
     if [ -f "/sys/block/$device_name/queue/rotational" ]; then
-        if [ "$(cat /sys/block/$device_name/queue/rotational)" = "0" ]; then
+        if [ "$(cat /sys/block/"$device_name"/queue/rotational)" = "0" ]; then
             echo "SSD"
         else
             echo "HDD"
@@ -544,7 +544,7 @@ if [ "$TPM_AVAILABLE" = true ]; then
             echo "  0+1+4+7+9 - Plus firmware config, bootloader, and kernel"
             
             while true; do
-                read -p "Enter PCRs (default: 7): " TPM_PCRS
+                read -r -p "Enter PCRs (default: 7): " TPM_PCRS
                 TPM_PCRS=${TPM_PCRS:-"7"}
                 if [[ "$TPM_PCRS" =~ ^([0-9]|1[0-9]|2[0-3])(\+([0-9]|1[0-9]|2[0-3]))*$ ]]; then
                     break
@@ -732,7 +732,7 @@ log_action "Creating LUKS container"
 
 LUKS_PBKDF_ARGS=()
 if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
-    # GRUB can read LUKS2 but cannot derive Argon2id keys.
+    # GRUB can read -r LUKS2 but cannot derive Argon2id keys.
     LUKS_PBKDF_ARGS=(--pbkdf pbkdf2)
 else
     LUKS_PBKDF_ARGS=(--pbkdf argon2id)
@@ -768,7 +768,7 @@ cryptsetup -v luksAddKey "$PARTITION3" ./boot.key --key-slot 1
 cryptsetup -v luksAddKey "$PARTITION3" ./recovery.key --key-slot 2
 
 echo -e "${BGreen}IMPORTANT: Save recovery.key externally NOW!${NC}"
-read -p "Press Enter after saving recovery.key..."
+read -r -p "Press Enter after saving recovery.key..."
 
 # TPM2 enrollment (if selected)
 if [ "$USE_TPM_LUKS" = true ]; then
@@ -791,7 +791,7 @@ fi
 echo -e "${BBlue}Backing up LUKS header...${NC}"
 cryptsetup luksHeaderBackup "$PARTITION3" --header-backup-file ./luks-header-backup.img
 echo -e "${BGreen}IMPORTANT: Also save luks-header-backup.img externally!${NC}"
-read -p "Press Enter after saving header backup..."
+read -r -p "Press Enter after saving header backup..."
 
 # Open LUKS container
 echo -e "${BBlue}Opening LUKS container...${NC}"

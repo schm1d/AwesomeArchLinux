@@ -44,7 +44,7 @@ unmount_all() {
     umount /mnt 2>/dev/null || true
     
     # Deactivate swap
-    swapoff /dev/mapper/${VG_NAME}-swap 2>/dev/null || true
+    swapoff /dev/mapper/"${VG_NAME}"-swap 2>/dev/null || true
 
     # Deactivate LVM
     echo -e "${BBlue}Deactivating LVM...${NC}"
@@ -63,7 +63,7 @@ remount_all() {
     echo -e "${BBlue}Available disks:${NC}"
     lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
     echo
-    read -p "Enter disk device (e.g., sda, nvme0n1): " DISK_NAME
+    read -r -p "Enter disk device (e.g., sda, nvme0n1): " DISK_NAME
     DISK="/dev/$DISK_NAME"
     
     # Determine partition suffix
@@ -106,19 +106,19 @@ remount_all() {
 
     # Mount filesystems
     echo -e "${BBlue}Mounting filesystems...${NC}"
-    mount /dev/mapper/${VG_NAME}-root /mnt
-    mount /dev/mapper/${VG_NAME}-home /mnt/home
+    mount /dev/mapper/"${VG_NAME}"-root /mnt
+    mount /dev/mapper/"${VG_NAME}"-home /mnt/home
 
     # Check if var exists
-    if [ -b /dev/mapper/${VG_NAME}-var ]; then
+    if [ -b /dev/mapper/"${VG_NAME}"-var ]; then
         mkdir -p /mnt/var
-        mount /dev/mapper/${VG_NAME}-var /mnt/var
+        mount /dev/mapper/"${VG_NAME}"-var /mnt/var
     fi
 
     # Newer installations use a dedicated encrypted /tmp logical volume.
-    if [ -b /dev/mapper/${VG_NAME}-tmp ]; then
+    if [ -b /dev/mapper/"${VG_NAME}"-tmp ]; then
         mkdir -p /mnt/tmp
-        mount -o rw,nosuid,nodev,noexec /dev/mapper/${VG_NAME}-tmp /mnt/tmp
+        mount -o rw,nosuid,nodev,noexec /dev/mapper/"${VG_NAME}"-tmp /mnt/tmp
     fi
 
     # Mount EFI
@@ -126,7 +126,7 @@ remount_all() {
     mount "$EFI_PART" /mnt/efi
 
     # Activate swap
-    swapon /dev/mapper/${VG_NAME}-swap 2>/dev/null || true
+    swapon /dev/mapper/"${VG_NAME}"-swap 2>/dev/null || true
     
     echo -e "${BGreen}Everything mounted successfully${NC}"
 }
@@ -157,7 +157,7 @@ while true; do
     echo "4) Continue installation (after remount)"
     echo "5) Exit"
     echo
-    read -p "Select option [1-5]: " choice
+    read -r -p "Select option [1-5]: " choice
     
     case $choice in
         1)
@@ -182,5 +182,5 @@ while true; do
     esac
     
     echo
-    read -p "Press Enter to continue..."
+    read -r -p "Press Enter to continue..."
 done

@@ -646,7 +646,7 @@ acl step1 at_step SslBump1
 acl step2 at_step SslBump2
 acl step3 at_step SslBump3
 
-# Peek at ClientHello to read SNI
+# Peek at ClientHello to read -r SNI
 ssl_bump peek step1
 
 # Splice (pass-through) by default — no decryption

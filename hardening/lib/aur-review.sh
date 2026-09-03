@@ -223,7 +223,7 @@ aal_aur_install_reviewed() (
     _aal_aur_show_review "$builddir" "$package" "$pkgbase" "$commit"
     printf 'Type exactly: INSTALL %s %s\n> ' "$package" "$commit" >&"$review_fd"
     IFS= read -r -u "$review_fd" confirmation || {
-        _aal_aur_error "Could not read review confirmation."
+        _aal_aur_error "Could not read -r review confirmation."
         return 1
     }
     if [[ "$confirmation" != "INSTALL $package $commit" ]]; then

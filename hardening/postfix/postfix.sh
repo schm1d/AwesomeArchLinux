@@ -201,7 +201,7 @@ if [[ -n "$RELAY_PASSWORD_FILE" ]]; then
     [[ -f "$RELAY_PASSWORD_FILE" && ! -L "$RELAY_PASSWORD_FILE" && -r "$RELAY_PASSWORD_FILE" ]] || \
         err "Relay password file must be a readable regular file, not a symlink: $RELAY_PASSWORD_FILE"
     PASSWORD_FILE_MODE=$(stat -c '%a' -- "$RELAY_PASSWORD_FILE") || \
-        err "Could not read relay password file mode"
+        err "Could not read -r relay password file mode"
     (( (8#$PASSWORD_FILE_MODE & 8#077) == 0 )) || \
         err "Relay password file must not be accessible by group or others: $RELAY_PASSWORD_FILE"
     mapfile -t RELAY_PASSWORD_LINES < "$RELAY_PASSWORD_FILE"
@@ -237,9 +237,9 @@ if [[ "$DRY_RUN" == false ]]; then
         err "TLS certificate does not cover $MAIL_HOSTNAME"
     CERT_PUBLIC_KEY=$(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -pubkey | \
         openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}') || \
-        err "Could not read the TLS certificate public key"
+        err "Could not read -r the TLS certificate public key"
     PRIVATE_PUBLIC_KEY=$(openssl pkey -in "$CERT_DIR/privkey.pem" -pubout -outform DER 2>/dev/null | \
-        sha256sum | awk '{print $1}') || err "Could not read the TLS private key"
+        sha256sum | awk '{print $1}') || err "Could not read -r the TLS private key"
     [[ -n "$CERT_PUBLIC_KEY" && "$CERT_PUBLIC_KEY" == "$PRIVATE_PUBLIC_KEY" ]] || \
         err "TLS certificate and private key do not match"
     PRIVATE_KEY_MODE=$(stat -Lc '%a' -- "$CERT_DIR/privkey.pem") || \
@@ -1060,7 +1060,7 @@ reporting {
 }
 EOF
 
-    # ARC signing — rspamd runs as its dedicated user and cannot read the OpenDKIM
+    # ARC signing — rspamd runs as its dedicated user and cannot read -r the OpenDKIM
     # private key (mode 0600, owned opendkim:opendkim). Stage a copy that
     # the rspamd service account owns so ARC signing succeeds at runtime.
     if [[ "$DKIM_CONFIGURED" == true ]]; then

@@ -426,17 +426,17 @@ pacman -S --noconfirm clamav
 echo -e "${BBlue}Configuring ClamAV...${NC}"
 
 if [ ! -f /etc/clamav/freshclam.conf ]; then
-  clamconf -g freshclam.conf > freshclam.conf
+  clamconf -g freshclam.conf
   mv freshclam.conf /etc/clamav/freshclam.conf
 fi
 
 if [ ! -f /etc/clamav/clamd.conf ]; then
-  clamconf -g clamd.conf > clamd.conf
+  clamconf -g clamd.conf
   mv clamd.conf /etc/clamav/clamd.conf
 fi
 
 if [ ! -f /etc/clamav/clamav-milter.conf ]; then
-  clamconf -g clamav-milter.conf > clamav-milter.conf
+  clamconf -g clamav-milter.conf
   mv clamav-milter.conf /etc/clamav/clamav-milter.conf
 fi
 
@@ -595,9 +595,7 @@ if ! command -v wget &> /dev/null; then
 fi
 
 echo "Downloading auditd rules from $RULES_URL..."
-wget -O "$LOCAL_RULES_FILE" "$RULES_URL"
-
-if [ $? -ne 0 ]; then
+if ! wget -O "$LOCAL_RULES_FILE" "$RULES_URL"; then
     echo "Failed to download auditd rules."
     exit 1
 else
@@ -803,8 +801,7 @@ set +e
 while true; do
     echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
     echo -e "${BBlue}Password should be at least 12 characters long, contain 1 symbol, 1 number, upper and lowercase letters.${NC}"
-    passwd "$USERNAME"
-    if [ $? -eq 0 ]; then
+    if passwd "$USERNAME"; then
         break
     else
         echo -e "${BBlue}Password change failed. Please try again.${NC}"
@@ -814,8 +811,7 @@ done
 
 while true; do
     echo -e "${BBlue}Setting root password...${NC}"
-    passwd root
-    if [ $? -eq 0 ]; then
+    if passwd root; then
         break
     else
         echo -e "${BBlue}Root password change failed. Please try again.${NC}"

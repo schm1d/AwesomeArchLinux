@@ -372,7 +372,7 @@ profile fail2ban-server /usr/bin/fail2ban-server flags=(enforce) {
   /var/lib/fail2ban/**             rw,
   owner /var/lib/fail2ban/**       rwk,
 
-  # Logs — read to detect intrusions, write own log
+  # Logs — read -r to detect intrusions, write own log
   /var/log/**                      r,
   owner /var/log/fail2ban.log      rw,
 
@@ -493,7 +493,7 @@ profile clamd /usr/bin/clamd flags=(enforce) {
   owner /run/clamav/clamd.ctl      rw,
   owner /run/clamav/clamd.pid      rw,
 
-  # Scan targets — needs read access to files submitted for scanning
+  # Scan targets — needs read -r access to files submitted for scanning
   /tmp/**                          r,
   /home/**                         r,
   /var/**                          r,
