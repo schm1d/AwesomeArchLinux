@@ -82,7 +82,7 @@ restore_tmp() {
 }
 
 install_deps() {
-  local pkgs=(base-devel dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils linux-headers)
+  local pkgs=(base-devel dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils linux-headers pipewire-alsa)
   if pacman -Qq linux-lts >/dev/null 2>&1; then
     pkgs+=(linux-lts-headers)
   fi
@@ -104,17 +104,30 @@ install_package() {
 #   .so files are ELF     → need +r or AppLoader: cannot open shared object
 # Recurse the whole VMware tree; do not stop at /usr/bin.
 fix_permissions() {
-  log "fixing modes under /usr/lib/vmware (dirs 755, binaries/libs 755, data 644)"
+  log "fixing modes under /usr/lib/vmware (restricting to ${REAL_USER} and restoring SUID bits)"
 
   [[ -d /usr/lib/vmware ]] || die "/usr/lib/vmware missing — package not installed?"
 
-  sudo_run find /usr/lib/vmware -type d -exec chmod 755 {} +
-  # ELF libs live in odd paths like /usr/lib/vmware/lib/libvmware.so/libvmware.so
-  sudo_run find /usr/lib/vmware -type f \( \
-      -name '*.so' -o -name '*.so.*' -o -name 'lib*' \
-    \) -exec chmod 755 {} +
-  sudo_run find /usr/lib/vmware/bin /usr/lib/vmware/sbin \
-    -type f -exec chmod 755 {} + 2>/dev/null || true
+  local rgroup
+  rgroup="$(id -gn "${REAL_USER}")"
+
+  # Change group ownership to the user's primary group so they can access it
+  sudo_run chown -R root:"${rgroup}" /usr/lib/vmware
+
+  # Allow root and the user's group to read/execute, but block all other users
+  sudo_run chmod -R g+rX,o-rwx /usr/lib/vmware
+
+  # Restore SUID bits for core binaries (CRITICAL for power-on)
+  # 4750 means: SUID set (4), root rwx (7), group rx (5), others none (0)
+  local suid_bins=(
+    /usr/lib/vmware/bin/vmware-vmx
+    /usr/lib/vmware/bin/vmware-vmx-debug
+    /usr/lib/vmware/bin/vmware-vmx-stats
+  )
+  local b
+  for b in "${suid_bins[@]}"; do
+    [[ -e ${b} ]] && sudo_run chmod 4750 "${b}"
+  done
 
   local wrappers=(
     /usr/bin/vmware
@@ -130,15 +143,14 @@ fix_permissions() {
   )
   local p
   for p in "${wrappers[@]}"; do
-    [[ -e ${p} ]] && sudo_run chmod 755 "${p}"
+    if [[ -e ${p} ]]; then
+      sudo_run chown root:"${rgroup}" "${p}"
+      sudo_run chmod 750 "${p}"
+    fi
   done
 
-  sudo_run find /usr/share/applications -maxdepth 1 -iname '*vmware*' -type f -exec chmod 644 {} + 2>/dev/null || true
-  sudo_run find /usr/share/icons /usr/share/pixmaps -iname '*vmware*' -type f -exec chmod 644 {} + 2>/dev/null || true
-  sudo_run find /usr/lib/vmware -type f \( \
-      -name '*.png' -o -name '*.svg' -o -name '*.desktop' \
-      -o -name '*.xml' -o -name '*.txt' -o -name '*.vmsg' \
-    \) -exec chmod 644 {} + 2>/dev/null || true
+  sudo_run find /usr/share/applications -maxdepth 1 -iname '*vmware*' -type f -exec chown root:"${rgroup}" {} + -exec chmod 640 {} + 2>/dev/null || true
+  sudo_run find /usr/share/icons /usr/share/pixmaps -iname '*vmware*' -type f -exec chown root:"${rgroup}" {} + -exec chmod 640 {} + 2>/dev/null || true
 
   if [[ -e /usr/lib/vmware/lib/libvmware.so/libvmware.so ]]; then
     log "libvmware.so mode: $(stat -c '%a %n' /usr/lib/vmware/lib/libvmware.so/libvmware.so)"
@@ -147,7 +159,9 @@ fix_permissions() {
     log "wrapper mode: $(stat -c '%a %n' /usr/bin/vmware)"
   fi
 }
-
+ 
+}
+ 
 pick_icon() {
   local f
   local candidates=(
