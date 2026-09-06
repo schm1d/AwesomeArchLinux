@@ -267,29 +267,20 @@ dns=systemd-resolved
 EOF
 fi
 
-echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
-# Drop any previous immutable flag from a prior run before overwriting.
-chattr -i /etc/resolv.conf 2>/dev/null || true
-# Inside arch-chroot, /etc/resolv.conf is bind-mounted from the host.
-# Unmount it first so we can replace it with our symlink.
-umount /etc/resolv.conf 2>/dev/null || true
-rm -f /etc/resolv.conf
-ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-
 echo -e "${BBlue}Enabling systemd-resolved...${NC}"
 systemctl daemon-reload
-# vps-chroot.sh is invoked from two contexts:
-#   1. vps-install.sh via arch-chroot — no running systemd, only enable.
-#   2. vps-harden.sh on a live system — start/restart is expected.
-# _INSTALL_TYPE=vps-harden is exported by vps-harden.sh; use it to pick
-# the right activation verb.
 if [ "${_INSTALL_TYPE:-}" = "vps-harden" ]; then
+    echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     systemctl enable --now systemd-resolved
-    # Ensure NetworkManager picks up the new dns= backend if it is running.
     if systemctl is-active --quiet NetworkManager 2>/dev/null; then
         systemctl restart NetworkManager
     fi
 else
+    # In chroot, keep the working resolv.conf so pacman and downloads succeed.
+    # The symlink to stub-resolv.conf will be placed right before exiting chroot.
     systemctl enable systemd-resolved
 fi
 
@@ -324,6 +315,10 @@ table inet filter {
 
         # Drop invalid connections
         ct state invalid drop
+
+        # Allow ICMP & ICMPv6 (Path MTU Discovery & IPv6 Neighbor Discovery)
+        ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
 
         # Allow SSH with rate limiting (burst allows legitimate reconnects)
         tcp dport $SSH_PORT ct state new limit rate 4/minute burst 8 packets accept
@@ -370,6 +365,11 @@ elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
 
     # Drop invalid connections
     iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+    # Allow essential ICMP (ping, PMTUD)
+    iptables -A INPUT -p icmp -m icmp --icmp-type echo-request -j ACCEPT
+    iptables -A INPUT -p icmp -m icmp --icmp-type destination-unreachable -j ACCEPT
+    iptables -A INPUT -p icmp -m icmp --icmp-type time-exceeded -j ACCEPT
 
     # Allow SSH with rate limiting (matches nftables: 4/min burst 8)
     iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
@@ -545,7 +545,6 @@ sed -i 's/^#YESCRYPT_COST_FACTOR[[:space:]]\+.*$/YESCRYPT_COST_FACTOR 7/' /etc/l
 sed -i 's/^#MAX_MEMBERS_PER_GROUP[[:space:]]\+0/MAX_MEMBERS_PER_GROUP\t100/' /etc/login.defs
 sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/login.defs
 sed -i '/^PASS_MAX_DAYS/c\PASS_MAX_DAYS 730' /etc/login.defs
-sed -i '/^PASS_MIN_DAYS/c\PASS_MIN_DAYS 2' /etc/login.defs
 
 # HOME_MODE 0700 so new user homes aren't world-readable.
 # The value is replaced in-place if present, appended otherwise.
@@ -655,6 +654,7 @@ cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 enabled = true
 port    = ${SSH_PORT}
 maxretry = 5
+banaction = nftables-multiport
 # OpenSSH 10.x splits into sshd, sshd-auth, sshd-session — match all via journal
 backend = systemd
 journalmatch = _SYSTEMD_UNIT=sshd.service
@@ -897,39 +897,6 @@ echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
 /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
 shred -u /ssh.sh 2>/dev/null || true
 
-sleep 2
-
-# SSH key rotation script (FIXED: private key chmod 600 not overwritten)
-echo -e "${BBlue}Setting up SSH key rotation...${NC}"
-cat <<EOF > /usr/local/bin/rotate-ssh-keys.sh
-#!/bin/bash
-AUTH_KEYS="/home/$USERNAME/.ssh/authorized_keys"
-
-# Save old public key before rotation
-OLD_PUBKEY=""
-if [ -f "$SSH_KEY_FILE.pub" ]; then
-    OLD_PUBKEY=\$(cat "$SSH_KEY_FILE.pub")
-fi
-
-# Generate new key pair
-ssh-keygen -t "$SSH_KEY_TYPE" -f "$SSH_KEY_FILE" -q -N "" -C "$USERNAME@$HOSTNAME-\$(date +%Y%m%d)"
-chown "$USERNAME:$USERNAME" "$SSH_KEY_FILE" "$SSH_KEY_FILE.pub"
-chmod 600 "$SSH_KEY_FILE"
-chmod 644 "$SSH_KEY_FILE.pub"
-
-# Update authorized_keys: remove old pubkey, add new one
-if [ -f "\$AUTH_KEYS" ]; then
-    if [ -n "\$OLD_PUBKEY" ]; then
-        grep -vF "\$OLD_PUBKEY" "\$AUTH_KEYS" > "\$AUTH_KEYS.tmp" || true
-        mv "\$AUTH_KEYS.tmp" "\$AUTH_KEYS"
-    fi
-    cat "$SSH_KEY_FILE.pub" >> "\$AUTH_KEYS"
-    chown "$USERNAME:$USERNAME" "\$AUTH_KEYS"
-    chmod 600 "\$AUTH_KEYS"
-fi
-EOF
-chmod +x /usr/local/bin/rotate-ssh-keys.sh
-echo "0 0 1 */3 * root /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
 
 sleep 1
 
@@ -941,7 +908,7 @@ echo -e "${BBlue}Applying hardened compiler flags...${NC}"
 sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
 sed -i '/^CXXFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
 sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
-sed -i '/^OPTIONS=/ s/!/!pie /' /etc/makepkg.conf
+sed -i '/^OPTIONS=/ s/!pie/pie/' /etc/makepkg.conf
 
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
 groupadd compilers 2>/dev/null || true
@@ -1008,28 +975,6 @@ else
     grub-install --target=i386-pc "$DISK" --recheck
 fi
 
-# GRUB password
-set +e
-GRUB_PASS_TMPFILE=$(mktemp /tmp/grubpass.XXXXXX)
-chmod 600 "$GRUB_PASS_TMPFILE"
-while true; do
-  echo -e "${BBlue}Setting GRUB password...${NC}"
-  grub-mkpasswd-pbkdf2 | tee "$GRUB_PASS_TMPFILE"
-  GRUB_PASS=$(grep 'grub.pbkdf2' "$GRUB_PASS_TMPFILE" | awk '{print $NF}')
-  rm -f "$GRUB_PASS_TMPFILE"
-  if [[ -n "$GRUB_PASS" ]]; then
-     break
-  else
-      echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
-      sleep 1
-  fi
-done
-set -e
-
-cat <<EOF >> /etc/grub.d/40_custom
-set superusers="$USERNAME"
-password_pbkdf2 "$USERNAME" "$GRUB_PASS"
-EOF
 
 grub-mkconfig -o /boot/grub/grub.cfg
 
@@ -1427,6 +1372,14 @@ harden_sysctl() {
 harden_sysctl
 
 sleep 2
+
+if [ "${_INSTALL_TYPE:-}" != "vps-harden" ]; then
+    echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub for first boot...${NC}"
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    umount /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+fi
 
 echo -e "${BGreen}VPS chroot configuration completed! You can reboot the system now.${NC}"
 shred -u /vps-chroot.sh 2>/dev/null || true

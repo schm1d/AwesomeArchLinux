@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Color variables (all used in echo -e strings) ---
 # shellcheck disable=SC2034
 BBlue='\033[1;34m'
@@ -51,6 +53,11 @@ else
   BOOT_MODE="uefi"
 fi
 log_action "Boot mode: $BOOT_MODE"
+
+if [[ ! -r "$SCRIPT_DIR/vps-chroot.sh" ]]; then
+    echo -e "${BRed}Missing required installer component: $SCRIPT_DIR/vps-chroot.sh${NC}" >&2
+    exit 1
+fi
 
 # -----------------------
 # 1. HELPER FUNCTIONS
@@ -560,12 +567,12 @@ export _INSTALL_KEYMAP="$KEYMAP"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
-cp ./vps-chroot.sh /mnt/
+cp "$SCRIPT_DIR/vps-chroot.sh" /mnt/
 chmod +x /mnt/vps-chroot.sh
 
 # Stage the complete sysctl bundle. The chroot helper selects and installs the
 # requested layers without applying them to the live ISO kernel.
-SYSCTL_SOURCE_DIR="../hardening/sysctl"
+SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
 SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
 SYSCTL_BUNDLE_FILES=(
     sysctl.sh
@@ -586,8 +593,8 @@ for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
 done
 chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
-if [ -f ../hardening/ssh/ssh.sh ]; then
-    cp ../hardening/ssh/ssh.sh /mnt/
+if [ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]; then
+    cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/
     chmod +x /mnt/ssh.sh
 fi
 
