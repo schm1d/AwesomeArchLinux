@@ -185,11 +185,17 @@ disable_sme() {
     fi
 }
 
-probe
-echo
+if [[ "$DO_STATUS" == true ]]; then
+    probe
+    echo
+fi
 if [[ "$DO_ENABLE" == true ]]; then
+    probe
+    echo
     enable_sme
 fi
 if [[ "$DO_DISABLE" == true ]]; then
+    probe
+    echo
     disable_sme
 fi
