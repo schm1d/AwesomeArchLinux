@@ -395,7 +395,7 @@ fi
 echo -e "${BBlue}Installing and configuring logrotate...${NC}"
 pacman -S --noconfirm logrotate
 cat <<EOF > /etc/logrotate.d/custom
-/var/log/*.log {
+/var/log/messages /var/log/secure /var/log/auth.log /var/log/boot.log /var/log/sudo.log /var/log/pacman-updates.log {
     daily
     rotate 7
     compress
@@ -506,6 +506,7 @@ Description=Run rkhunter daily check
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/rkhunter --check --cronjob --rwo
+SuccessExitStatus=0 1
 EOF
 cat <<EOF > /etc/systemd/system/rkhunter-check.timer
 [Unit]
@@ -1099,6 +1100,8 @@ EOF
 cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.service
 [Unit]
 Description=Check for available package updates (notification only)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot

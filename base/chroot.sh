@@ -404,7 +404,7 @@ echo -e "${BBlue}Installing and configuring logrotate...${NC}"
 pacman -S --noconfirm logrotate
 echo -e "${BBlue}Enhancing logging configuration...${NC}"
 cat <<EOF > /etc/logrotate.d/custom
-/var/log/*.log {
+/var/log/messages /var/log/secure /var/log/auth.log /var/log/boot.log /var/log/sudo.log /var/log/pacman-updates.log {
     daily
     rotate 7
     compress
@@ -551,6 +551,7 @@ Description=Run rkhunter daily check
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/rkhunter --check --cronjob --rwo
+SuccessExitStatus=0 1
 EOF
 cat <<EOF > /etc/systemd/system/rkhunter-check.timer
 [Unit]
@@ -577,13 +578,11 @@ pacman -S --noconfirm smartmontools nvme-cli
 # -o on       enable automatic offline data collection
 # -S on       enable attribute autosave
 # -s ...      short self-test daily 02:00, long self-test Saturday 03:00
-# -W 4,45,55  DIFF,INFO,CRIT: log on 4C swings, log an advisory at 45C,
-#             and treat 55C as critical. Only the CRIT threshold invokes
-#             the -M exec handler; INFO events are journal-only.
-# -m <nomailer> -M exec  route alerts through the script below instead of an
-#             MTA, which this system does not guarantee is configured
+# -W 4,50,70  DIFF,INFO,CRIT: log on 4C swings, log an advisory at 50C,
+#             and treat 70C as critical (NVMe operating range).
+#             Only the CRIT threshold invokes the -M exec handler.
 cat <<'SMARTD' > /etc/smartd.conf
-DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,45,55 -m <nomailer> -M exec /usr/local/bin/smart-alert
+DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,50,70 -m <nomailer> -M exec /usr/local/bin/smart-alert
 SMARTD
 
 install -Dm0755 /dev/stdin /usr/local/bin/smart-alert <<'SMARTALERT'
@@ -1559,6 +1558,8 @@ EOF
 cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.service
 [Unit]
 Description=Check for available package updates (notification only)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
