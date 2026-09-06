@@ -14,7 +14,13 @@ IFS=$'\n\t'
 
 # Defaults
 KEY_DIR="/etc/efi-keys"
-EFI_MOUNT="/boot/efi"
+if [[ -d "/efi" ]]; then
+  EFI_MOUNT="/efi"
+elif [[ -d "/boot/efi" ]]; then
+  EFI_MOUNT="/boot/efi"
+else
+  EFI_MOUNT="/boot"
+fi
 KEY_SIZE=2048
 VALID_DAYS=3650
 UPDATE_ONLY=false
@@ -120,13 +126,24 @@ for var in PK KEK db dbx; do
   fi
 done
 
-# Sign GRUB binary
-GRUB_EFI="${EFI_MOUNT}/EFI/arch/grubx64.efi"
-if [[ -f "$GRUB_EFI" ]]; then
-  echo_log "Signing GRUB binary: $GRUB_EFI"
-  sbsign --key db.key --cert db.crt --output "$GRUB_EFI" "$GRUB_EFI"
-else
-  echo_err "GRUB EFI not found at $GRUB_EFI"
+# Sign bootloader and kernel binaries
+signed_any=false
+for efi_candidate in \
+    "${EFI_MOUNT}/EFI/GRUB/grubx64.efi" \
+    "${EFI_MOUNT}/EFI/BOOT/BOOTX64.EFI" \
+    "${EFI_MOUNT}/EFI/arch/grubx64.efi" \
+    "${EFI_MOUNT}/EFI/systemd/systemd-bootx64.efi" \
+    "${EFI_MOUNT}/vmlinuz-linux" \
+    "/boot/vmlinuz-linux"; do
+  if [[ -f "$efi_candidate" ]]; then
+    echo_log "Signing binary: $efi_candidate"
+    sbsign --key db.key --cert db.crt --output "$efi_candidate" "$efi_candidate"
+    signed_any=true
+  fi
+done
+
+if [[ "$signed_any" == false ]]; then
+  echo_err "No candidate EFI binaries found to sign in $EFI_MOUNT or /boot"
 fi
 
 # Verify enrollment
