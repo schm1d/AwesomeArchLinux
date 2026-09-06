@@ -261,6 +261,11 @@ if [ -d /etc/NetworkManager ]; then
 # Use systemd-resolved
 systemd-resolved=true
 
+[device]
+# Randomize the source MAC on probe requests only. This does not
+# rotate the associated (cloned) MAC, so DHCP reservations survive.
+wifi.scan-rand-mac-address=yes
+
 [connection]
 # MAC address policy: "stable" derives a deterministic MAC from
 # stable-id + SSID (Wi-Fi) or interface name (Ethernet). Same network
@@ -277,9 +282,9 @@ ethernet.cloned-mac-address=stable
 connection.stable-id=\${CONNECTION}
 EOF
 
-    # Wi-Fi probe-request randomization stays on (default) — that is
-    # a separate setting that randomizes only during scans, not during
-    # connections, so it has no effect on DHCP lease stability.
+    # WPA3-only is intentionally NOT set globally. Hotel, printer, and
+    # IoT APs still speak WPA2. Use hardening/wifi/wifi.sh to flip a
+    # named connection to SAE.
 fi
 
 
@@ -332,17 +337,8 @@ fi
 systemctl disable wpa_supplicant.service 2>/dev/null || true
 systemctl enable iwd.service
 
-echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
-# Force the symlink; overwrite whatever pacstrap / chroot left behind so
-# first-boot resolution uses resolved's 127.0.0.53 stub instead of stale
-# nameservers baked into a regular file. Drop any stale immutable flag
-# first — older Stubby-era runs may have set chattr +i out of band.
-chattr -i /etc/resolv.conf 2>/dev/null || true
-# Inside arch-chroot, /etc/resolv.conf is bind-mounted from the host.
-# Unmount it first so we can replace it with our symlink.
-umount /etc/resolv.conf 2>/dev/null || true
-rm -f /etc/resolv.conf
-ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+# Keep working /etc/resolv.conf in chroot so pacman can resolve mirror domains.
+# The symlink to stub-resolv.conf will be created right before exiting chroot.
 
 echo -e "${BBlue}Enabling systemd-resolved...${NC}"
 # chroot cannot start services — only enable. The unit will come up on
@@ -378,6 +374,10 @@ table inet filter {
 
         # Drop invalid connections
         ct state invalid drop
+
+        # Allow ICMP & ICMPv6 (Path MTU Discovery & IPv6 Neighbor Discovery)
+        ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
 
         # Allow SSH with rate limiting (burst allows legitimate reconnects)
         tcp dport ${SSH_PORT} ct state new limit rate 4/minute burst 8 packets accept
@@ -694,7 +694,6 @@ sed -i 's/^#HMAC_CRYPTO_ALGO[[:space:]]\+.*$/HMAC_CRYPTO_ALGO SHA512/' /etc/logi
 
 echo -e "${BBlue}Setting password expiring dates...${NC}"
 sed -i '/^PASS_MAX_DAYS/c\PASS_MAX_DAYS 730' /etc/login.defs # modify here the amount of MAX days
-sed -i '/^PASS_MIN_DAYS/c\PASS_MIN_DAYS 2' /etc/login.defs
 
 # HOME_MODE 0700 so new user homes aren't world-readable.
 # The value is replaced in-place if present, appended otherwise.
@@ -814,6 +813,7 @@ cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 enabled = true
 port    = ${SSH_PORT}
 maxretry = 5
+banaction = nftables-multiport
 # OpenSSH 10.x splits into sshd, sshd-auth, sshd-session — match all via journal
 backend = systemd
 journalmatch = _SYSTEMD_UNIT=sshd.service
@@ -863,7 +863,6 @@ Defaults passwd_tries=3
 Defaults loglinelen=0
 Defaults insults
 Defaults lecture=once
-Defaults requiretty
 Defaults logfile=/var/log/sudo.log
 Defaults log_input, log_output
 
@@ -942,12 +941,10 @@ if ! id -u "$USERNAME" >/dev/null 2>&1; then
   #                    Without it, GTK4 GSK falls back to software renderer,
   #                    Wayland apps render slowly, and dma-buf screen share
   #                    fails.
-  #   audio         -> ALSA (/dev/snd/*). PipeWire usually routes via logind,
-  #                    but this is the safe fallback.
-  #   input         -> raw input devices (/dev/input/event*). Some games and
-  #                    accessibility tools need this.
+  #   audio         -> ALSA (/dev/snd/*). PipeWire routes via logind.
   #   storage       -> removable media mount access under polkit fallback
-  useradd -m -G sudo,wheel,uucp,proc,video,render,audio,input,storage -s /bin/zsh "$USERNAME"
+  # NOTE: input group is omitted — logind assigns seat ACLs; static input membership allows keyloggers
+  useradd -m -G sudo,wheel,uucp,proc,video,render,audio,storage -s /bin/zsh "$USERNAME"
   chown "$USERNAME:$USERNAME" /home/"$USERNAME"  # Fix home dir ownership right away.
   chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"
@@ -1083,42 +1080,6 @@ else
 fi
 shred -u /ssh.sh 2>/dev/null || true
 
-sleep 2
-
-echo -e "${BBlue}Setting up SSH key rotation...${NC}"
-# Heredoc uses 'EOF' (quoted) to prevent expansion of $(date) at write time
-cat > /usr/local/bin/rotate-ssh-keys.sh <<'ROTATE_EOF'
-#!/bin/bash
-set -euo pipefail
-KEY_TYPE="ed25519"
-KEY_FILE="/home/REPLACE_USER/.ssh/id_${KEY_TYPE}"
-AUTH_KEYS="/home/REPLACE_USER/.ssh/authorized_keys"
-USERNAME="REPLACE_USER"
-HOSTNAME="REPLACE_HOST"
-# Save the old public key before overwriting
-OLD_PUBKEY=""
-if [[ -f "$KEY_FILE.pub" ]]; then
-    OLD_PUBKEY=$(cat "$KEY_FILE.pub")
-fi
-ssh-keygen -t "$KEY_TYPE" -f "$KEY_FILE" -q -N "" -C "${USERNAME}@${HOSTNAME}-$(date +%Y%m%d)"
-chown "$USERNAME:$USERNAME" "$KEY_FILE" "$KEY_FILE.pub"
-chmod 600 "$KEY_FILE"
-chmod 644 "$KEY_FILE.pub"
-# Update authorized_keys: remove old pubkey, add new one
-if [[ -f "$AUTH_KEYS" ]]; then
-    if [[ -n "$OLD_PUBKEY" ]]; then
-        grep -vF "$OLD_PUBKEY" "$AUTH_KEYS" > "$AUTH_KEYS.tmp" || true
-        mv "$AUTH_KEYS.tmp" "$AUTH_KEYS"
-    fi
-    cat "$KEY_FILE.pub" >> "$AUTH_KEYS"
-    chown "$USERNAME:$USERNAME" "$AUTH_KEYS"
-    chmod 600 "$AUTH_KEYS"
-fi
-ROTATE_EOF
-# Substitute placeholders with actual values (sed is safe here — controlled values)
-sed -i "s/REPLACE_USER/${USERNAME}/g; s/REPLACE_HOST/${HOSTNAME}/g" /usr/local/bin/rotate-ssh-keys.sh
-chmod +x /usr/local/bin/rotate-ssh-keys.sh
-echo "0 0 1 */3 * root /usr/local/bin/rotate-ssh-keys.sh" >> /etc/crontab
 
 sleep 1
 
@@ -1326,7 +1287,7 @@ if [[ "$NVIDIA_CARD" == true ]]; then
 
     # Ensure egl-wayland is installed (Wayland-EGL adapter; usually pulled
     # in by nvidia-utils but belt + braces).
-    pacman -S --needed --noconfirm egl-wayland || true
+    pacman -S --needed --noconfirm egl-wayland libva-nvidia-driver libva-utils || true
 
     # Adjust mkinitcpio.conf
     echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
@@ -1381,26 +1342,51 @@ if [[ "$NVIDIA_CARD" == false ]]; then
         # A simple case for AMD/Radeon
         case "$gpu_model" in
             *"Radeon"*|*"RX 500"*|*"RX Vega"*|*"RDNA"*|*"RX 6000"*|*"RX 7000"*)
-                pacman -S --noconfirm xf86-video-amdgpu mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon
+                pacman -S --noconfirm xf86-video-amdgpu mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon libva-mesa-driver mesa-vdpau libva-utils
                 ;;
             *"APU"*|*"Ryzen"*|*"Athlon"*|*"PRO"*)
                 # Typically these APUs work fine with mesa + integrated AMD driver
-                pacman -S --noconfirm mesa lib32-mesa
+                pacman -S --noconfirm mesa lib32-mesa libva-mesa-driver mesa-vdpau libva-utils
                 ;;
             *)
                 echo "Unknown AMD GPU. Installing default AMD drivers (xf86-video-amdgpu, mesa)."
-                pacman -S --noconfirm xf86-video-amdgpu mesa
+                pacman -S --noconfirm xf86-video-amdgpu mesa libva-mesa-driver libva-utils
                 ;;
         esac
     fi
 fi
 
-# --- If neither NVIDIA nor AMD/Radeon was found, install basic drivers ---
+# --- Intel iGPU (was previously falling through to vesa) ---
+INTEL_CARD=false
 if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
-    echo -e "${BBlue}No supported NVIDIA or AMD GPU detected. Installing basic drivers...${NC}"
+    if lspci | grep -E "VGA|3D|Display" | grep -qi intel &>/dev/null; then
+        INTEL_CARD=true
+        echo -e "${BBlue}Found an Intel GPU...${NC}"
+        gpu_model=$(lspci | grep -Ei 'vga|3d|display' | grep -i intel | cut -d ':' -f3)
+        echo "Detected GPU: $gpu_model"
+        # xf86-video-intel is deprecated and fights modesetting. mesa +
+        # intel-media-driver (iHD) + libva-intel-driver (i965 fallback)
+        # covers Gen5 through current Arc.
+        pacman -S --noconfirm mesa vulkan-intel intel-media-driver libva-intel-driver libva-utils intel-gpu-tools
+    fi
+fi
+
+# --- If neither NVIDIA, AMD, nor Intel was found, install basic drivers ---
+if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false && "$INTEL_CARD" == false ]]; then
+    echo -e "${BBlue}No supported NVIDIA, AMD, or Intel GPU detected. Installing basic drivers...${NC}"
     pacman -S --noconfirm xf86-video-vesa mesa
     # Do NOT touch mkinitcpio or grub in this fallback.
 fi
+
+# I/O scheduler policy: BFQ for HDDs, mq-deadline for SATA/virtio SSD, none
+# for NVMe. Live systems can refresh this with utils/iosched.sh.
+mkdir -p /etc/udev/rules.d
+cat > /etc/udev/rules.d/60-awesome-ioschedulers.rules <<'EOF'
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]|vd[a-z]|xvd[a-z]|hd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]|vd[a-z]|xvd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", ATTR{queue/scheduler}="bfq"
+EOF
 
 sleep 2
 
@@ -1845,6 +1831,12 @@ harden_sysctl() {
 harden_sysctl
 
 sleep 2
+
+echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub for first boot...${NC}"
+chattr -i /etc/resolv.conf 2>/dev/null || true
+umount /etc/resolv.conf 2>/dev/null || true
+rm -f /etc/resolv.conf
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 # Securely remove sensitive files

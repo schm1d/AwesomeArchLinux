@@ -6,6 +6,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Cleanup on failure ---
 CLEANUP_ENABLED=0
 
@@ -68,7 +70,7 @@ if [ ! -d "/sys/firmware/efi/efivars" ]; then
   exit 1
 fi
 
-for installer_component in ./chroot.sh ./bootloader.sh; do
+for installer_component in "$SCRIPT_DIR/chroot.sh" "$SCRIPT_DIR/bootloader.sh"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
         exit 1
@@ -1017,14 +1019,14 @@ export _INSTALL_BOOTLOADER="$INSTALL_BOOTLOADER"
 EOF
 
 chmod +x /mnt/set-install-vars.sh
-cp ./chroot.sh /mnt/
+cp "$SCRIPT_DIR/chroot.sh" /mnt/
 chmod +x /mnt/chroot.sh
-cp ./bootloader.sh /mnt/
+cp "$SCRIPT_DIR/bootloader.sh" /mnt/
 chmod +x /mnt/bootloader.sh
 
 # Stage the complete sysctl bundle. The chroot helper selects and installs the
 # requested layers without applying them to the live ISO kernel.
-SYSCTL_SOURCE_DIR="../hardening/sysctl"
+SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
 SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
 SYSCTL_BUNDLE_FILES=(
     sysctl.sh
@@ -1045,13 +1047,13 @@ for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
 done
 chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
-if [ -f ../hardening/ssh/ssh.sh ]; then
-    cp ../hardening/ssh/ssh.sh /mnt/
+if [ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]; then
+    cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/
     chmod +x /mnt/ssh.sh
 fi
 
-if [ -f ../hardening/lib/nftables.sh ]; then
-    cp ../hardening/lib/nftables.sh /mnt/nftables.sh
+if [ -f "$SCRIPT_DIR/../hardening/lib/nftables.sh" ]; then
+    cp "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
     chmod 0644 /mnt/nftables.sh
 fi
 
