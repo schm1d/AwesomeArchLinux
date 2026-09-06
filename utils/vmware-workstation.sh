@@ -160,7 +160,6 @@ fix_permissions() {
   fi
 }
  
-}
  
 pick_icon() {
   local f
