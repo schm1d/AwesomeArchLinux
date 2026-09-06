@@ -311,7 +311,7 @@ fi
 
 # Rate limiting — prefer the installer-owned nftables ruleset
 echo -e "${BBlue}Rate Limiting to avoid brute-forcing...${NC}"
-if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; then
+if command -v nft &>/dev/null && { nft list chain inet filter input &>/dev/null || [[ -f /etc/nftables.conf ]]; }; then
     # insert places each rule at the head, so persist/apply the drop first and
     # the limited accept second. The final live order is accept-then-drop,
     # before the installer's terminal drop rule.
@@ -319,11 +319,11 @@ if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; t
 insert rule inet filter input tcp dport $SSH_PORT ct state new drop comment "awesome-ssh-rate-drop"
 insert rule inet filter input tcp dport $SSH_PORT ct state new limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
 EOF
-    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-accept
-    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-drop
-    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop"
+    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-accept 2>/dev/null || true
+    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-drop 2>/dev/null || true
+    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop" 2>/dev/null || true
     nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new \
-        limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
+        limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept" 2>/dev/null || true
     echo -e "${BGreen}nftables SSH rate limit applied and persisted without replacing unrelated rules.${NC}"
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
     # Persist only the owned rules through an idempotent oneshot unit. Saving
