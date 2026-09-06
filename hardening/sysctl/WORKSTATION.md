@@ -27,7 +27,7 @@ Do not run a large workstation swapless.
 
 Recommended baseline:
 - Keep a real swap partition or swap file.
-- Optionally add zram for burst absorption on developer workstations.
+- Optionally add zram for burst absorption on developer workstations (`utils/zram.sh`).
 - Pair low swap pressure with enough swap capacity rather than setting `vm.swappiness=0`.
 
 Why:
@@ -223,9 +223,14 @@ Good companion components for a hardened Arch workstation:
 - microcode package (`amd-ucode` or `intel-ucode`)
 
 Optional, depending on workflow:
-- `zram-generator`
+- `utils/zram.sh` (`zram-generator`)
+- `utils/cpufreq.sh` (`linux-cpupower`)
+- `utils/iosched.sh` (udev BFQ / mq-deadline / none)
+- `utils/vaapi.sh` (VA-API / VDPAU)
+- `hardening/browser/browser.sh` (enterprise policies)
+- `hardening/wifi/wifi.sh` (scan MAC randomization, per-SSID WPA3)
+- `hardening/u2f/u2f.sh` (FIDO2 local login)
 - `powertop`
-- `cpupower`
 - `ethtool`
 - `sysstat`
 

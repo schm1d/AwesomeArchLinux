@@ -97,6 +97,18 @@ AwesomeArchLinux/
 |   +-- totp/
 |   |   +-- totp.sh          # TOTP two-factor authentication for SSH
 |   |   +-- README.md
+|   +-- u2f/
+|   |   +-- u2f.sh           # FIDO2/U2F hardware keys for local login (opt-in)
+|   |   +-- README.md
+|   +-- wifi/
+|   |   +-- wifi.sh          # Wi-Fi scan MAC randomization + opt-in WPA3
+|   |   +-- README.md
+|   +-- browser/
+|   |   +-- browser.sh       # Firefox/Chromium enterprise policies + Firejail
+|   |   +-- README.md
+|   +-- memcrypt/
+|   |   +-- memcrypt.sh      # AMD SME / Intel TME probe and opt-in enable
+|   |   +-- README.md
 |   +-- wireguard/
 |   |   +-- wireguard.sh     # WireGuard VPN server with client config generation
 |   |   +-- README.md
@@ -117,6 +129,10 @@ AwesomeArchLinux/
 |   +-- zsh.sh               # Zsh configuration & hardening
 |   +-- yay.sh               # yay AUR helper installation
 |   +-- theme.sh             # Desktop theming
+|   +-- zram.sh              # zram-generator compressed RAM swap
+|   +-- cpufreq.sh           # CPU governor via linux-cpupower
+|   +-- iosched.sh           # udev I/O scheduler by device type
+|   +-- vaapi.sh             # VA-API / VDPAU packages and driver pin
 ```
 
 ---
@@ -132,7 +148,7 @@ AwesomeArchLinux/
 - **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), optionally separates `/var`, generates rollback script, and runs software hardening — all on a live, running system without reformatting.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
 - **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images, systemd-boot, and fwupd's EFI capsule updater with `sbctl`, then re-signs them after package and kernel updates.
-- **NVIDIA & AMD GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages (bare-metal only).
+- **NVIDIA, AMD, and Intel GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages plus VA-API userspace (bare-metal only). Intel iGPUs no longer fall through to `xf86-video-vesa`.
 - **Mainline kernel** &mdash; Installs the standard `linux` kernel. We previously shipped `linux-hardened` alongside it, but its stricter module signing and syscall hardening break the NVIDIA proprietary driver (XWayland/DRI3 path stops bridging, gnome-shell loops on `Failed to init X11 display`) and several other proprietary kmods. Users who need `linux-hardened` for non-NVIDIA hardening can install it manually with `pacman -S linux-hardened linux-hardened-headers`.
 - **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
 - **Firmware and mobile broadband** &mdash; Installs fwupd with automatic metadata refresh and ModemManager for NetworkManager WWAN support. The UKI profile configures fwupd for the locally generated Secure Boot keys.
@@ -254,6 +270,31 @@ AwesomeArchLinux/
 - **Emergency scratch codes** &mdash; Backup codes generated for account recovery.
 - See [`hardening/totp/README.md`](hardening/totp/README.md) for compatible apps and setup guide.
 
+#### Hardware Security Keys (FIDO2 / U2F)
+
+- **Local login** (`u2f.sh`) &mdash; Enrolls YubiKey / any CTAP2 token with `pamu2fcfg` and wires `pam_u2f` into local login stacks.
+- **SSH stays on OpenSSH native `ed25519-sk` keys** &mdash; the script refuses to stack `pam_u2f` on top of the existing publickey + TOTP path.
+- **Fail-closed enrollment** &mdash; PAM is not changed until a mapping exists, unless `--allow-missing` is passed for a staged rollout.
+- See [`hardening/u2f/README.md`](hardening/u2f/README.md) for lockout and origin gotchas.
+
+#### Wi-Fi Privacy
+
+- **Scan-time MAC randomization** is now explicit in the bare-metal NetworkManager drop-in (`wifi.scan-rand-mac-address=yes`). Associated MACs stay `stable` per SSID so home DHCP reservations keep working.
+- **WPA3/SAE is per-network**, never global. `hardening/wifi/wifi.sh --wpa3-connection NAME` flips one saved profile.
+- See [`hardening/wifi/README.md`](hardening/wifi/README.md).
+
+#### Browser Hardening
+
+- **Enterprise policies** for Firefox and Chromium/Chrome (telemetry off, HTTPS-Only, site isolation, third-party cookies blocked).
+- **Optional Firejail wrappers** (`--firejail`) and optional [arkenfox](https://github.com/arkenfox/user.js) overlay (`--arkenfox`). A stale vendored `user.js` is not shipped.
+- Custom AppArmor browser profiles are omitted; they rot against GPU, portals, and downloads. The sysctl `strict` profile's `kernel.unprivileged_userns_clone=0` degrades Chromium's sandbox — desktops should stay on `workstation`.
+- See [`hardening/browser/README.md`](hardening/browser/README.md).
+
+#### Memory Encryption (opt-in)
+
+- **AMD SME / Intel TME** probe and staged enable live in [`hardening/memcrypt/`](hardening/memcrypt/). `mem_encrypt=on` is never injected by the installer.
+- Intel TME is firmware-controlled; the script reports the `tme` flag and stops.
+
 #### Extended Intrusion Prevention (fail2ban)
 
 - **7 jails** &mdash; SSH (24h ban, 3 retries), SSH-aggressive (7d ban, 1 retry for invalid users), nginx-http-auth, nginx-botsearch (7d ban), nginx-limit-req, and recidive (4-week ban for repeat offenders).
@@ -292,7 +333,16 @@ IPv6 remains enabled and hardened by default so SLAAC works. The installer offer
 
 #### Kernel Boot Parameters
 
-Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`, `page_alloc.shuffle=1`, `pti=on`, `randomize_kstack_offset=on`, `vsyscall=none`.
+Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`, `page_alloc.shuffle=1`, `pti=on`, `randomize_kstack_offset=on`, `vsyscall=none`. AMD SME (`mem_encrypt=on`) is **not** in this baseline; enable it with [`hardening/memcrypt/memcrypt.sh`](hardening/memcrypt/memcrypt.sh) after the firmware switch is on.
+
+#### Workstation Performance (opt-in)
+
+These are companion utilities, not silent installer defaults (except the I/O scheduler udev rule, which is low-risk and now written by `chroot.sh`):
+
+- **zram** (`utils/zram.sh`) &mdash; `zram-generator` at 50% RAM / zstd / priority 100, disk swap kept as overflow. zswap is disabled if found; stacking zswap + zram double-compresses pages.
+- **CPU governor** (`utils/cpufreq.sh`) &mdash; `linux-cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
+- **I/O scheduler** (`utils/iosched.sh`) &mdash; BFQ for HDDs, `mq-deadline` for SATA/virtio SSD, `none` for NVMe.
+- **VA-API** (`utils/vaapi.sh`) &mdash; vendor-correct packages and a pinned `LIBVA_DRIVER_NAME` only when the GPU is unambiguous. Hybrid Intel+NVIDIA laptops are left unpinned on purpose.
 
 #### DNS Security
 
@@ -473,7 +523,7 @@ units; hardware daemons also require representative hot-plug coverage.
 #### Hardening Compliance Checker
 
 - **audit-check.sh** &mdash; Validates that all AwesomeArchLinux hardening has been correctly applied.
-- **Profile-aware checks** across 8 categories: kernel hardening (sysctl), filesystem security, authentication, SSH, network, services, boot security, and disabled modules.
+- **Profile-aware checks** across 9 categories: kernel hardening (sysctl), filesystem security, authentication, SSH, network, services, boot security, disabled modules, and optional workstation modules (WARN if missing).
 - **Output modes** &mdash; Color-coded terminal output (`[PASS]`/`[FAIL]`/`[WARN]`), `--verbose` for actual values, `--json` for machine-readable output.
 - **Scoring** &mdash; Final pass/fail score with percentage.
 
@@ -543,7 +593,7 @@ recovery-aware migration.
 | Script | Description |
 |--------|-------------|
 | `utils/aide-config.sh` | AIDE file integrity monitoring with custom rules and daily systemd timer |
-| `utils/audit-check.sh` | Profile-aware hardening compliance checker (dynamic service validation, 8 categories, JSON output) |
+| `utils/audit-check.sh` | Profile-aware hardening compliance checker (dynamic service validation, 9 categories, JSON output) |
 | `utils/backup.sh` | Encrypted borg backups with configurable retention and systemd timer |
 | `utils/docker.sh` | Docker/Podman hardening (rootless Podman default, hardened Docker option) |
 | `utils/monitoring.sh` | Prometheus node_exporter + optional Prometheus server + Grafana |
@@ -690,6 +740,10 @@ sudo ./hardening/apparmor/apparmor.sh          # AppArmor profiles for 7 service
 # --- Network ---
 sudo ./hardening/ssh/ssh.sh -u myuser           # Harden SSH server
 sudo ./hardening/totp/totp.sh -u myuser        # Add TOTP 2FA to SSH
+sudo ./hardening/u2f/u2f.sh --enroll           # FIDO2/U2F for local login
+sudo ./hardening/wifi/wifi.sh                  # Wi-Fi scan MAC randomization
+sudo ./hardening/browser/browser.sh            # Firefox/Chromium enterprise policies
+sudo ./hardening/memcrypt/memcrypt.sh          # Probe AMD SME / Intel TME
 sudo ./hardening/wireguard/wireguard.sh        # WireGuard VPN server
 sudo ./hardening/fail2ban/fail2ban.sh          # Extended fail2ban jails
 
@@ -735,6 +789,10 @@ sudo ./utils/monitoring.sh --with-prometheus --with-grafana  # Full monitoring s
 sudo ./utils/docker.sh --podman -u myuser      # Rootless Podman containers
 sudo ./utils/audit-check.sh                    # Check hardening compliance
 sudo ./utils/audit-check.sh --json             # Machine-readable compliance report
+sudo ./utils/zram.sh                           # Compressed RAM swap (keeps disk swap)
+sudo ./utils/cpufreq.sh                        # CPU governor (schedutil)
+sudo ./utils/iosched.sh                        # I/O scheduler udev rules
+sudo ./utils/vaapi.sh                          # Hardware video decode stack
 ```
 
 ---
