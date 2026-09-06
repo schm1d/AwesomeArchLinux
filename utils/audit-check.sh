@@ -6,7 +6,8 @@
 #              Validates that AwesomeArchLinux security hardening has been
 #              correctly applied by checking sysctl parameters, filesystem
 #              permissions, authentication config, SSH hardening, network
-#              security, service status, boot security, and disabled modules.
+#              security, service status, boot security, disabled modules,
+#              and optional workstation modules (WARN if missing).
 #              Outputs a pass/fail/warn report with a final score.
 #
 # Author:      Bruno Schmid @brulliant
@@ -822,6 +823,83 @@ check_disabled_modules() {
 }
 
 # =============================================================================
+# 9. OPTIONAL WORKSTATION / DESKTOP HARDENING
+#     These modules are opt-in. Missing them is a WARN, not a FAIL.
+# =============================================================================
+check_optional_hardening() {
+    category_header "Optional Workstation Hardening"
+
+    if grep -Rlq 'pam_u2f' /etc/pam.d 2>/dev/null; then
+        result_pass "pam_u2f is wired into at least one PAM stack"
+    else
+        result_warn "No pam_u2f mapping — hardware keys are not required for local login" \
+            "run hardening/u2f/u2f.sh --enroll"
+    fi
+
+    if grep -Eq 'pam_google_authenticator' /etc/pam.d/sshd 2>/dev/null; then
+        result_pass "SSH TOTP (pam_google_authenticator) is configured"
+    else
+        result_warn "SSH TOTP is not configured" "run hardening/totp/totp.sh"
+    fi
+
+    local scan_rand=""
+    scan_rand=$(grep -hR '^[[:space:]]*wifi.scan-rand-mac-address=' /etc/NetworkManager/conf.d/ 2>/dev/null | tail -1 || true)
+    if echo "$scan_rand" | grep -q '=yes'; then
+        result_pass "NetworkManager randomizes Wi-Fi scan MAC addresses"
+    elif [[ ! -d /etc/NetworkManager ]]; then
+        result_warn "NetworkManager is not installed — skipping Wi-Fi privacy checks" "no NM"
+    else
+        result_warn "wifi.scan-rand-mac-address is not explicit" "${scan_rand:-unset}"
+    fi
+
+    if [[ -f /etc/firefox/policies/policies.json ]]; then
+        result_pass "Firefox enterprise policies are present"
+    else
+        result_warn "No Firefox enterprise policies" "run hardening/browser/browser.sh"
+    fi
+    if [[ -f /etc/chromium/policies/managed/awesome-hardening.json ]]; then
+        result_pass "Chromium managed policies are present"
+    else
+        result_warn "No Chromium managed policies" "run hardening/browser/browser.sh"
+    fi
+
+    if grep -qw sme /proc/cpuinfo 2>/dev/null && grep -qw 'mem_encrypt=on' /proc/cmdline 2>/dev/null; then
+        result_pass "AMD SME is advertised and mem_encrypt=on is on the cmdline"
+    elif grep -qw tme /proc/cpuinfo 2>/dev/null || grep -qw tme_en /proc/cpuinfo 2>/dev/null; then
+        result_warn "Intel TME flag present — confirm it is enabled in firmware" "firmware-controlled"
+    else
+        result_warn "No SME/TME memory encryption active (opt-in via hardening/memcrypt/)" "not configured"
+    fi
+
+    if [[ -f /etc/systemd/zram-generator.conf ]] || swapon --show=NAME 2>/dev/null | grep -q zram; then
+        result_pass "zram is configured"
+    else
+        result_warn "zram-generator is not configured" "run utils/zram.sh"
+    fi
+
+    if [[ -f /etc/udev/rules.d/60-awesome-ioschedulers.rules ]]; then
+        result_pass "I/O scheduler udev rule is installed"
+    else
+        result_warn "No I/O scheduler udev rule" "run utils/iosched.sh"
+    fi
+
+    if [[ -f /etc/environment.d/20-vaapi.conf ]]; then
+        result_pass "VA-API environment drop-in is present"
+    else
+        result_warn "No VA-API environment drop-in" "run utils/vaapi.sh"
+    fi
+
+    local userns
+    userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo "")
+    if [[ "$userns" == "0" ]]; then
+        result_warn "unprivileged user namespaces disabled — Chromium/Firejail sandboxes will degrade" \
+            "kernel.unprivileged_userns_clone=0"
+    elif [[ "$userns" == "1" ]]; then
+        result_pass "unprivileged user namespaces enabled (browser sandbox can work)"
+    fi
+}
+
+# =============================================================================
 # OUTPUT: JSON
 # =============================================================================
 print_json() {
@@ -916,6 +994,7 @@ main() {
     check_service_security
     check_boot_security
     check_disabled_modules
+    check_optional_hardening
 
     if [[ "$JSON_OUTPUT" == true ]]; then
         print_json
