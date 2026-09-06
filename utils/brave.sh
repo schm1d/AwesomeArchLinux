@@ -234,14 +234,27 @@ apply_policy() {
   "BraveRewardsDisabled": true,
   "BraveWalletDisabled": true,
   "BraveVPNDisabled": true,
-  "BraveAIChatEnabled": false
+  "BraveAIChatEnabled": false,
+  "ExtensionInstallForcelist": [
+    "ddkjiahefjhfhefomlbhegpnlnlpeicp;https://clients2.google.com/service/update2/crx"
+  ]
 }
 EOP
 
     sudo_run chown -R root:root "/etc/brave"
     sudo_run find "/etc/brave" -type d -exec chmod 755 {} +
     sudo_run chmod 644 "$pol_dir/10-security.json"
-    msg "Enterprise policy installed to $pol_dir/10-security.json (mode 0644)"
+
+    # External extension registration for Brave
+    local ext_dir="/usr/share/brave/extensions"
+    sudo_run mkdir -p "$ext_dir"
+    sudo_run tee "$ext_dir/ddkjiahefjhfhefomlbhegpnlnlpeicp.json" >/dev/null <<'EOP'
+{
+  "external_update_url": "https://clients2.google.com/service/update2/crx"
+}
+EOP
+    sudo_run chmod 644 "$ext_dir/ddkjiahefjhfhefomlbhegpnlnlpeicp.json"
+    msg "Enterprise policy and uBlock Origin Lite installed for Brave (mode 0644)"
 }
 
 install_brave() {

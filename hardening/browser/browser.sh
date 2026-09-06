@@ -132,7 +132,11 @@ EOF
 }
 
 write_chromium_policies() {
-    local roots=("/etc/chromium/policies/managed" "/etc/opt/chrome/policies/managed")
+    local roots=(
+        "/etc/chromium/policies/managed"
+        "/etc/opt/chrome/policies/managed"
+        "/etc/brave/policies/managed"
+    )
     local dir
     for dir in "${roots[@]}"; do
         mkdir -p "$dir"
@@ -156,11 +160,30 @@ write_chromium_policies() {
   "PasswordManagerEnabled": true,
   "BrowserSignin": 0,
   "SyncDisabled": true,
-  "DefaultBrowserSettingEnabled": false
+  "DefaultBrowserSettingEnabled": false,
+  "ExtensionInstallForcelist": [
+    "ddkjiahefjhfhefomlbhegpnlnlpeicp;https://clients2.google.com/service/update2/crx"
+  ]
 }
 EOF
         chmod 644 "$dir/awesome-hardening.json"
         msg "Wrote $dir/awesome-hardening.json"
+    done
+
+    # External extension registration for Chromium and Brave
+    local ext_dirs=(
+        "/usr/share/chromium/extensions"
+        "/usr/share/brave/extensions"
+    )
+    for ext_dir in "${ext_dirs[@]}"; do
+        mkdir -p "$ext_dir"
+        cat > "$ext_dir/ddkjiahefjhfhefomlbhegpnlnlpeicp.json" <<'EOF'
+{
+  "external_update_url": "https://clients2.google.com/service/update2/crx"
+}
+EOF
+        chmod 644 "$ext_dir/ddkjiahefjhfhefomlbhegpnlnlpeicp.json"
+        msg "Registered uBlock Origin Lite in $ext_dir"
     done
 }
 
