@@ -783,19 +783,27 @@ create_var_filesystem() {
                 info "[DRY-RUN] Would create partition and format for /var"
                 return 0
             fi
-            # Find next partition number by counting existing partitions (not the disk itself)
-            local last_part
-            last_part=$(lsblk -ln -o TYPE "$PARENT_DISK" | grep -c '^part$' || echo 0)
-            local next_part=$((last_part + 1))
-            # Determine partition suffix
-            local part_suffix=""
-            if [[ "$PARENT_DISK" =~ [0-9]$ ]]; then
-                part_suffix="p"
-            fi
-            sgdisk -n "0:0:+${VAR_LOOP_SIZE}G" -t "0:8300" -c "0:var" "$PARENT_DISK"
+            # GPT numbers can contain gaps. Select an unused number explicitly,
+            # then identify the created partition by a fresh GUID, never by count.
+            local partition_table next_part=1 partition_guid actual_guid
+            partition_table=$(LC_ALL=C sgdisk --print "$PARENT_DISK")
+            while awk -v number="$next_part" '$1 == number { found = 1 } END { exit !found }' <<< "$partition_table"; do
+                ((next_part += 1))
+            done
+            partition_guid=$(uuidgen)
+            partition_guid=${partition_guid,,}
+            [[ "$partition_guid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+                err "Could not generate a partition GUID"
+            sgdisk -n "${next_part}:0:+${VAR_LOOP_SIZE}G" \
+                -t "${next_part}:8300" -c "${next_part}:var" \
+                -u "${next_part}:${partition_guid}" "$PARENT_DISK"
             partprobe "$PARENT_DISK"
-            sleep 2
-            VAR_DEVICE="${PARENT_DISK}${part_suffix}${next_part}"
+            udevadm settle
+            VAR_DEVICE="/dev/disk/by-partuuid/$partition_guid"
+            [[ -b "$VAR_DEVICE" ]] || err "New partition has not appeared: $VAR_DEVICE"
+            actual_guid=$(blkid -s PARTUUID -o value "$VAR_DEVICE")
+            [[ "${actual_guid,,}" == "$partition_guid" ]] ||
+                err "Partition GUID mismatch; refusing to format $VAR_DEVICE"
             mkfs.ext4 -F -m 1 -L var "$VAR_DEVICE"
             msg "Created and formatted $VAR_DEVICE"
             ;;
