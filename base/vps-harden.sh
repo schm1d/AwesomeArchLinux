@@ -4,13 +4,13 @@
 # Script:      vps-harden.sh
 # Description: Filesystem hardening for a live, running Arch Linux VPS.
 #              Creates hardened mount points (/tmp, /dev/shm, /proc, /var/tmp),
-#              optionally separates /var onto its own filesystem, hardens
+#              prepares storage for offline /var migration, hardens
 #              existing fstab entries, and generates a rollback script.
 #              Can optionally invoke vps-chroot.sh for software hardening.
 #
-#              Unlike vps-install.sh, this script does NOT reformat the disk.
-#              It works on a booted system — safe for VPS providers that
-#              pre-install Arch Linux (Hostinger, Linode, etc.).
+#              Runs on the installed OS. Optional /var storage preparation
+#              formats the selected destination, but data migration must be
+#              completed offline from a rescue environment.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
@@ -62,6 +62,7 @@ DRY_RUN=false
 SYSCTL_PROFILE="workstation"
 SYSCTL_DISABLE_IPV6=false
 ROLLBACK_SCRIPT="/root/undo-vps-harden.sh"
+VAR_MIGRATION_GUIDE="/root/MIGRATE_VAR_OFFLINE.txt"
 FSTAB_BACKUP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -94,7 +95,7 @@ usage() {
 Usage: sudo $0 [OPTIONS]
 
 Harden filesystem mount points on a live, running Arch Linux VPS.
-Unlike vps-install.sh, this does NOT reformat or repartition the disk.
+Optional /var preparation formats selected storage; migration requires rescue downtime.
 
 Options:
   -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
@@ -103,7 +104,7 @@ Options:
   -u USER     Username for vps-chroot.sh (prompted if not given)
   -H HOST     Hostname to set (prompted if not given)
   -p PORT     SSH port for vps-chroot.sh (default: $SSH_PORT)
-  --skip-var  Skip /var separation (only harden virtual mounts)
+  --skip-var  Skip storage preparation for offline /var migration
   --skip-sw   Skip software hardening (only do filesystem mounts)
   --sysctl-profile PROFILE
               Select workstation, strict, or performance (default: workstation)
@@ -310,7 +311,8 @@ show_plan() {
     if [[ "$SKIP_VAR" == false ]]; then
         echo
         echo -e "${C_OK}/var separation:${C_NC}"
-        echo "  Strategy will be auto-detected (partition > volume > loop > skip)"
+        echo "  Prepare an empty destination (volume, partition, or loop image)"
+        echo "  Copy and cutover must be performed offline from rescue media"
     else
         echo
         echo -e "${C_WARN}/var separation:${C_NC} SKIPPED"
@@ -393,6 +395,13 @@ if [[ $(id -u) -ne 0 ]]; then
     exit 1
 fi
 
+# A migrated /var must be reconciled in rescue mode before restoring fstab.
+# Never swap live directories or silently revert to an outdated /var.old.
+if [[ -e /var.old ]]; then
+    echo "Refusing live rollback: /var.old exists. Use rescue mode to reconcile /var data and fstab." >&2
+    exit 1
+fi
+
 echo
 echo -e "${C_WARN}This will undo VPS filesystem hardening.${C_NC}"
 echo
@@ -428,51 +437,6 @@ fi
 # /tmp tmpfs
 if findmnt -n -o FSTYPE /tmp 2>/dev/null | grep -q "tmpfs"; then
     umount /tmp && msg "Unmounted /tmp tmpfs" || warn "Failed to unmount /tmp (files may be in use)"
-fi
-EOF
-
-    # Add /var rollback if applicable
-    cat >> "$ROLLBACK_SCRIPT" <<'EOF'
-
-# --- /var rollback ---
-if findmnt -n /var &>/dev/null && [[ -d /var.old ]]; then
-    info "Rolling back /var migration..."
-    # Stop services that write to /var
-    for svc in clamav-daemon clamav-freshclam fail2ban; do
-        systemctl stop "$svc" 2>/dev/null || true
-    done
-
-    if findmnt -n /var &>/dev/null; then
-        if ! umount /var 2>/dev/null; then
-            warn "Failed to unmount /var — refusing to remove the live /var directory"
-            warn "Manual recovery required: inspect /var and /var.old before restoring"
-        elif ! rmdir /var 2>/dev/null; then
-            warn "/var is not empty after unmount — refusing automatic deletion"
-            warn "Manual recovery required: inspect /var and /var.old before restoring"
-        else
-            mv /var.old /var
-            msg "/var restored from /var.old"
-        fi
-    elif rmdir /var 2>/dev/null; then
-        mv /var.old /var
-        msg "/var restored from /var.old"
-    else
-        warn "/var is not an empty rollback mountpoint — refusing automatic deletion"
-        warn "Manual recovery required: inspect /var and /var.old before restoring"
-    fi
-
-    # Detach any loop devices for var.img
-    if [[ -f /root/var.img ]]; then
-        losetup -j /root/var.img | cut -d: -f1 | while read -r loop; do
-            losetup -d "$loop" 2>/dev/null || true
-        done
-        info "Loop device detached (var.img preserved at /root/var.img)"
-    fi
-
-    # Restart services
-    for svc in clamav-daemon clamav-freshclam fail2ban; do
-        systemctl start "$svc" 2>/dev/null || true
-    done
 fi
 EOF
 
@@ -702,8 +666,8 @@ choose_var_strategy() {
         local disk_size
         disk_size=$(lsblk -d -n -o SIZE "$first_disk" 2>/dev/null)
         echo
-        info "Found unused disk: $first_disk ($disk_size)"
-        if ask_yes_no "Use $first_disk for /var?"; then
+        info "Found unmounted disk: $first_disk ($disk_size)"
+        if ask_yes_no "Erase $first_disk to prepare storage for offline /var migration?"; then
             VAR_STRATEGY="volume"
             VAR_DEVICE="$first_disk"
             return 0
@@ -814,11 +778,8 @@ create_var_filesystem() {
                 info "[DRY-RUN] Would create /root/var.img and mount as /var"
                 return 0
             fi
-            # Remove leftover image from a previous failed attempt
-            if [[ -f /root/var.img ]]; then
-                chattr -i /root/var.img 2>/dev/null || true
-                rm -f /root/var.img
-            fi
+            # A previous preparation or offline migration may contain data.
+            [[ ! -e /root/var.img ]] || err "Refusing to overwrite existing /root/var.img; inspect it in rescue mode"
 
             # Create image file — try fallocate, then dd (truncate often blocked on VPS)
             if fallocate -l "${VAR_LOOP_SIZE}G" /root/var.img 2>/dev/null; then
@@ -832,8 +793,9 @@ create_var_filesystem() {
             mkfs.ext4 -F -m 1 -L var /root/var.img
             VAR_DEVICE="/root/var.img"
 
-            # Protect from accidental deletion (only after successful format)
-            chattr +i /root/var.img 2>/dev/null || true
+            # The loop backing file must stay writable for the offline copy.
+            # Reruns refuse to overwrite it; restrict direct access to root.
+            chmod 0600 /root/var.img
 
             # Ensure loop module loads on boot
             echo "loop" > /etc/modules-load.d/loop.conf
@@ -848,140 +810,90 @@ create_var_filesystem() {
 }
 
 ###############################################################################
-# /var DATA MIGRATION (the hard part)
+# OFFLINE /var MIGRATION INSTRUCTIONS
 ###############################################################################
 
-migrate_var_data() {
-    if [[ "$VAR_STRATEGY" == "skip" ]]; then
-        return 0
-    fi
-
+prepare_var_migration() {
+    [[ "$VAR_STRATEGY" != "skip" ]] || return 0
     if [[ "$DRY_RUN" == true ]]; then
-        info "[DRY-RUN] Would migrate /var data to new filesystem"
+        info "[DRY-RUN] Would write rescue instructions for offline /var migration"
         return 0
     fi
 
-    info "Migrating /var data to new filesystem..."
-
-    # Step 1: Stop non-critical services that write to /var
-    local stopped_services=()
-    for svc in clamav-daemon clamav-freshclam fail2ban; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            info "Stopping $svc..."
-            systemctl stop "$svc"
-            stopped_services+=("$svc")
-        fi
-    done
-    # NEVER stop: sshd, systemd-journald, networking
-
-    # Step 2: Mount new filesystem at /mnt/newvar
-    mkdir -p /mnt/newvar
+    # Never copy or switch a live /var. Unknown services, containers, timers and
+    # open file descriptors make a fixed stop-list insufficient for consistency.
+    local root_uuid var_uuid target mount_options="nosuid,nodev"
+    root_uuid=$(blkid -s UUID -o value "$ROOT_DEVICE")
+    var_uuid=$(blkid -s UUID -o value "$VAR_DEVICE")
+    [[ "$root_uuid" =~ ^[0-9a-fA-F-]+$ && "$var_uuid" =~ ^[0-9a-fA-F-]+$ ]] ||
+        err "Could not identify the source and destination filesystems"
+    [[ "$root_uuid" != "$var_uuid" ]] || err "Source and destination must be different filesystems"
+    target="/dev/disk/by-uuid/$var_uuid"
     if [[ "$VAR_STRATEGY" == "loop" ]]; then
-        mount -o loop /root/var.img /mnt/newvar
-    else
-        mount "$VAR_DEVICE" /mnt/newvar
+        target="/mnt/awesome-root/root/var.img"
+        mount_options="loop,nosuid,nodev"
     fi
 
-    # Step 3: rsync data
-    info "Syncing /var data (this may take a while)..."
-    rsync -aAXv --delete /var/ /mnt/newvar/ 2>&1 | tail -5
+    (umask 077; cat <<EOF
+OFFLINE /var MIGRATION — destination prepared, live /var unchanged
 
-    # Step 4: Verify — compare file counts on key subdirs
-    local orig_count new_count
-    orig_count=$(find /var -type f 2>/dev/null | wc -l)
-    new_count=$(find /mnt/newvar -type f 2>/dev/null | wc -l)
-    info "File count — original: $orig_count, new: $new_count"
+Copy these notes externally. Schedule downtime, shut down the installed OS,
+and boot a rescue ISO (or attach its disk to a rescue machine). Do not run
+these commands on the installed system or inside a chroot. Ensure no other
+machine, container or process is using either filesystem. Back up your data.
 
-    if [[ $((orig_count - new_count)) -gt 10 ]]; then
-        warn "File count mismatch > 10, proceeding anyway (services were writing)"
-    fi
+Root UUID: $root_uuid
+Destination UUID: $var_uuid
+Strategy: $VAR_STRATEGY
 
-    # Step 5: Swap directories and mount — with rollback on failure
-    #
-    # Once we move /var to /var.old, any failure must undo the swap.
-    # We use a helper function so set -e doesn't exit mid-rollback.
-    umount /mnt/newvar
+Run the following in a separate root Bash shell in the rescue environment.
+Stop on any error; do not bypass the guards or the checksum comparison.
 
-    _rollback_var() {
-        warn "Rolling back /var migration..."
-
-        if findmnt -n /var &>/dev/null; then
-            if ! umount /var 2>/dev/null; then
-                warn "Failed to unmount /var — leaving the live /var directory untouched"
-                cp "$FSTAB_BACKUP" /etc/fstab
-                return 1
-            fi
-        fi
-
-        # Remove only the empty rollback mountpoint created during migration.
-        if ! rmdir /var 2>/dev/null; then
-            warn "/var is not an empty rollback mountpoint — refusing automatic deletion"
-            cp "$FSTAB_BACKUP" /etc/fstab
-            return 1
-        fi
-
-        mv /var.old /var
-        cp "$FSTAB_BACKUP" /etc/fstab
-        warn "/var restored from /var.old and fstab reverted."
-        return 0
-    }
-
-    mv /var /var.old
-    mkdir /var
-
-    # Step 6: Mount new /var
+set -euo pipefail
+[[ \$(id -u) -eq 0 ]]
+[[ \$(findmnt -n -o UUID /) != '$root_uuid' ]]
+[[ -z \$(findmnt -rn -S '/dev/disk/by-uuid/$root_uuid') ]]
+[[ -z \$(findmnt -rn -S '/dev/disk/by-uuid/$var_uuid') ]]
+[[ ! -e /mnt/awesome-root && ! -e /mnt/awesome-var ]]
+mkdir /mnt/awesome-root /mnt/awesome-var
+mount '/dev/disk/by-uuid/$root_uuid' /mnt/awesome-root
+mount -o '$mount_options' '$target' /mnt/awesome-var
+[[ \$(findmnt -n -o UUID /mnt/awesome-var) == '$var_uuid' ]]
+[[ ! -e /mnt/awesome-root/var.old ]]
+[[ ! -e /mnt/awesome-root/etc/fstab.before-var-migration ]]
+# This procedure supports /var currently residing on the root filesystem.
+awk '\$1 !~ /^#/ && \$2 == "/var" { found=1 } END { exit found }' /mnt/awesome-root/etc/fstab
+# The destination must still be empty except for ext4's lost+found directory.
+[[ -z \$(find /mnt/awesome-var -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit) ]]
+rsync -aHAXx --numeric-ids --delete /mnt/awesome-root/var/ /mnt/awesome-var/
+changes=\$(rsync -aHAXxnc --numeric-ids --delete --itemize-changes /mnt/awesome-root/var/ /mnt/awesome-var/)
+[[ -z \$changes ]]
+cp -a /mnt/awesome-root/etc/fstab /mnt/awesome-root/etc/fstab.before-var-migration
+EOF
     if [[ "$VAR_STRATEGY" == "loop" ]]; then
-        if ! mount -o loop,defaults,nosuid,nodev /root/var.img /var; then
-            _rollback_var || true
-            err "Failed to mount loop device on /var"
-        fi
-        sed -i '\|^[^#].*[[:space:]]/var[[:space:]]|d' /etc/fstab
-        echo "/root/var.img /var ext4 loop,defaults,nosuid,nodev 0 2" >> /etc/fstab
+        echo "echo '/root/var.img /var ext4 loop,nosuid,nodev 0 2' >> /mnt/awesome-root/etc/fstab"
     else
-        if ! mount -o defaults,nosuid,nodev "$VAR_DEVICE" /var; then
-            _rollback_var || true
-            err "Failed to mount $VAR_DEVICE on /var"
-        fi
-        # Add fstab entry using UUID (fall back to device path if blkid fails)
-        local var_uuid
-        var_uuid=$(blkid -s UUID -o value "$VAR_DEVICE")
-        sed -i '\|^[^#].*[[:space:]]/var[[:space:]]|d' /etc/fstab
-        if [[ -n "$var_uuid" ]]; then
-            echo "UUID=$var_uuid /var ext4 defaults,nosuid,nodev 0 2" >> /etc/fstab
-        else
-            warn "blkid returned empty UUID for $VAR_DEVICE — using device path in fstab"
-            echo "$VAR_DEVICE /var ext4 defaults,nosuid,nodev 0 2" >> /etc/fstab
-        fi
+        echo "echo 'UUID=$var_uuid /var ext4 nosuid,nodev 0 2' >> /mnt/awesome-root/etc/fstab"
     fi
+    cat <<'EOF'
+mv /mnt/awesome-root/var /mnt/awesome-root/var.old
+mkdir -m 0755 /mnt/awesome-root/var
+sync
+umount /mnt/awesome-var
+umount /mnt/awesome-root
+rmdir /mnt/awesome-var /mnt/awesome-root
 
-    # Validate fstab — rollback the entire swap if it fails
-    info "Validating fstab with mount -a --fake..."
-    local fstab_err
-    if fstab_err=$(mount -a --fake 2>&1); then
-        msg "fstab validation passed"
-    else
-        warn "fstab validation FAILED: $fstab_err"
-        if _rollback_var; then
-            err "/var migration aborted — system restored to previous state."
-        else
-            err "/var migration aborted — automatic rollback could not safely restore /var. Manual recovery required."
-        fi
-    fi
-
-    # Step 7: Restart stopped services
-    for svc in "${stopped_services[@]}"; do
-        info "Restarting $svc..."
-        systemctl start "$svc" 2>/dev/null || warn "Failed to start $svc"
-    done
-
-    # Step 8: Verify services
-    if ! systemctl is-active --quiet sshd; then
-        err "CRITICAL: sshd is not running after /var migration!"
-    fi
-
-    msg "/var migrated successfully"
-    warn "/var.old preserved as safety net — remove after 48 hours if stable"
-    log_action "Migrated /var (strategy: $VAR_STRATEGY)"
+Boot the installed OS and verify /var mounts correctly and applications work.
+Keep /var.old and fstab.before-var-migration until the migration is verified.
+Rollback must also be offline. /var.old becomes stale once applications write
+to the new /var: preserve and reconcile newer data before reverting fstab or
+restoring the old directory. The live hardening rollback will refuse this case.
+EOF
+    ) > "$VAR_MIGRATION_GUIDE"
+    chmod 0600 "$VAR_MIGRATION_GUIDE"
+    msg "Prepared /var destination; offline migration instructions: $VAR_MIGRATION_GUIDE"
+    warn "Live /var has not been copied or switched. Rescue downtime is required."
+    log_action "Prepared offline /var migration (strategy: $VAR_STRATEGY)"
 }
 
 ###############################################################################
@@ -1218,11 +1130,8 @@ show_summary() {
     done
 
     if [[ "$VAR_STRATEGY" != "skip" ]]; then
-        if findmnt -n /var &>/dev/null; then
-            local var_src
-            var_src=$(findmnt -n -o SOURCE /var)
-            echo -e "  ${C_OK}[OK]${C_NC} /var  ($var_src, strategy: $VAR_STRATEGY)"
-        fi
+        echo "  /var destination prepared; migration requires rescue downtime"
+        echo "  Instructions: $VAR_MIGRATION_GUIDE"
     fi
 
     echo
@@ -1238,7 +1147,7 @@ show_summary() {
     echo "  [ ] Review fstab: cat /etc/fstab"
     echo "  [ ] Check mounts: findmnt --real"
     [[ "$VAR_STRATEGY" != "skip" ]] && \
-        echo "  [ ] Remove /var.old after 48 hours if stable: rm -rf /var.old"
+        echo "  [ ] Copy $VAR_MIGRATION_GUIDE externally and schedule offline /var migration"
     echo "  [ ] Run security audit: sudo lynis audit system"
 
     echo
@@ -1289,7 +1198,7 @@ main() {
     if [[ "$SKIP_VAR" == false ]]; then
         choose_var_strategy
         create_var_filesystem
-        migrate_var_data
+        prepare_var_migration
     fi
 
     # Harden existing fstab entries

@@ -188,7 +188,7 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 - Remounts `/dev/shm` with `noexec,nosuid,nodev`
 - Remounts `/proc` with `hidepid=2,gid=proc`
 - Bind-mounts `/var/tmp` to `/tmp` (inherits hardened options)
-- Optionally separates `/var` (auto-detects free space, attached volumes, or loop device)
+- Optionally prepares an empty `/var` destination (partition, attached volume, or loop image); the copy and cutover require a rescue environment
 - Hardens existing fstab entries (adds `nosuid,nodev` to `/home`, etc.)
 - Generates `/root/undo-vps-harden.sh` for rollback
 - Optionally runs `vps-chroot.sh` for full software hardening (SSH, nftables, sysctl, PAM, etc.)
@@ -200,7 +200,7 @@ sudo ./vps-harden.sh --skip-var --skip-sw
   -v SIZE     /var loop image size in GB (default: 10)
   -u USER     Username for vps-chroot.sh integration (auto-detected)
   -p PORT     SSH port (default: 22)
-  --skip-var  Skip /var separation (only harden virtual mounts)
+  --skip-var  Skip storage preparation for offline /var migration
   --skip-sw   Skip software hardening (only do filesystem mounts)
   --dry-run   Show planned changes without executing
   -h          Show help
@@ -212,15 +212,34 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 - `mount -a --fake` validation after every fstab change; reverts on failure
 - Auto-generated rollback script (`/root/undo-vps-harden.sh`)
 - SSH stays up throughout the entire process
-- `/var` migration: rsync + rename (keeps `/var.old` as safety net)
+- `/var` is never copied or replaced while the installed OS is running
 - fstab, mount state, and lsblk state backed up before changes
+
+### Completing /var Migration Offline
+
+Preparing a destination formats the selected storage. It does not change the
+live `/var` or add its new mount to fstab. The script writes device-specific
+commands to `/root/MIGRATE_VAR_OFFLINE.txt`; copy those notes externally before
+shutting down the VPS. If your provider offers no rescue environment or way to
+attach the stopped VPS disk to another machine, use `--skip-var`.
+
+Boot rescue media with the installed OS stopped, and follow the generated
+commands outside a chroot. They mount the root and empty destination filesystems,
+copy `/var` with ownership, ACLs, extended attributes and hard links preserved,
+verify the copy using checksums, then update the installed fstab and retain the
+original directory as `/var.old`. Reboot and verify the mount and applications.
+
+Rollback of a migrated `/var` also requires rescue downtime. Preserve any newer
+data in the destination before restoring the old directory and fstab;
+`/var.old` becomes stale once applications resume writing. The live rollback
+script refuses to proceed when `/var.old` exists.
 
 ### Differences from vps-install.sh
 
 | Feature          | vps-install.sh     | vps-harden.sh       |
 |------------------|--------------------|----------------------|
 | Runs from        | Live ISO           | Running system       |
-| Disk reformat    | Yes                | No                   |
+| Disk reformat    | Yes                | Optional destination storage only |
 | Base install     | Yes (pacstrap)     | No                   |
 | Mount hardening  | fstab generation   | Live remount + fstab |
 | Rollback         | No (fresh install) | Yes                  |

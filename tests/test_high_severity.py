@@ -72,5 +72,63 @@ DRY_RUN=false
         self.check_layout([2, 3], 1)
 
 
+class VarMigrationTests(unittest.TestCase):
+    def test_rollback_refuses_a_completed_var_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rollback = Path(tmp) / "rollback.sh"
+            old_var = Path(tmp) / "var.old"
+            old_var.mkdir()
+            script = "set -euo pipefail\ninfo() { :; }; msg() { :; }\n"
+            script += shell_function("base/vps-harden.sh", "create_rollback_script")
+            script += "\ncreate_rollback_script\n"
+            subprocess.run(["bash", "-c", script], check=True, capture_output=True,
+                           env=dict(os.environ, ROLLBACK_SCRIPT=str(rollback),
+                                    FSTAB_BACKUP=str(Path(tmp) / "fstab.backup")))
+            # Redirect only the /var.old sentinel to a fixture. The guard must
+            # exit before prompting or attempting any real restoration.
+            rollback.write_text(rollback.read_text().replace("/var.old", str(old_var)))
+            result = subprocess.run(["bash", "-c", 'id() { echo 0; }; source "$1"',
+                                     "test", str(rollback)], input="", text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Refusing live rollback", result.stderr)
+
+    def test_preparation_only_writes_offline_instructions(self):
+        for strategy in ("partition", "volume", "loop"):
+            with self.subTest(strategy=strategy), tempfile.TemporaryDirectory() as tmp:
+                guide = Path(tmp) / "migration.txt"
+                script = r'''set -euo pipefail
+info() { :; }; msg() { :; }; warn() { :; }; log_action() { :; }
+err() { echo "$*" >&2; exit 1; }
+blkid() {
+    if [[ "${!#}" == /dev/source ]]; then
+        echo aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    else
+        echo bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+    fi
+}
+rsync() { echo 'UNEXPECTED LIVE COPY' >&2; exit 99; }
+mv() { echo 'UNEXPECTED LIVE MOVE' >&2; exit 99; }
+mount() { echo 'UNEXPECTED LIVE MOUNT' >&2; exit 99; }
+umount() { exit 99; }; systemctl() { exit 99; }
+''' + shell_function("base/vps-harden.sh", "prepare_var_migration") + "\nprepare_var_migration\n"
+                result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                                        env=dict(os.environ, VAR_STRATEGY=strategy, DRY_RUN="false",
+                                                 VAR_MIGRATION_GUIDE=str(guide),
+                                                 ROOT_DEVICE="/dev/source", VAR_DEVICE="/dev/destination"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                notes = guide.read_text()
+                self.assertIn("boot a rescue ISO", notes)
+                self.assertIn("rsync -aHAXxnc", notes)
+                if strategy == "loop":
+                    self.assertIn("/mnt/awesome-root/root/var.img", notes)
+                    self.assertIn("loop,nosuid,nodev", notes)
+                else:
+                    self.assertIn("UUID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb /var", notes)
+                commands = notes[notes.index("set -euo pipefail"):notes.index("\nBoot the installed OS")]
+                result = subprocess.run(["bash", "-n"], input=commands, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(guide.stat().st_mode & 0o777, 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

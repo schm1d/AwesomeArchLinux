@@ -145,7 +145,7 @@ AwesomeArchLinux/
 - **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS2, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time. The key derivation function follows the boot profile: the **GRUB** profile uses `pbkdf2` (GRUB cannot read Argon2id) and keeps `/boot` encrypted; the **systemd-boot + UKI** profile uses the stronger `argon2id` default.
 - **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment. The GRUB profile offers configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9); the UKI profile pins **PCR 7** alone, so firmware updates do not invalidate the policy and strand an unattended reboot.
 - **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
-- **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), optionally separates `/var`, generates rollback script, and runs software hardening — all on a live, running system without reformatting.
+- **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), generates a rollback script, and runs software hardening. Optional `/var` preparation formats selected destination storage and writes instructions for copying and switching `/var` offline from rescue media.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
 - **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images, systemd-boot, and fwupd's EFI capsule updater with `sbctl`, then re-signs them after package and kernel updates.
 - **NVIDIA, AMD, and Intel GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages plus VA-API userspace (bare-metal only). Intel iGPUs no longer fall through to `xf86-video-vesa`.
@@ -666,6 +666,10 @@ sudo ./vps-harden.sh
 ```
 
 Preview changes first with `--dry-run`, or run filesystem-only hardening with `--skip-var --skip-sw`. A rollback script is generated at `/root/undo-vps-harden.sh`. See [`base/README.md`](base/README.md) for full options.
+
+Separating `/var` requires rescue downtime. Storage preparation writes
+`/root/MIGRATE_VAR_OFFLINE.txt`; the live script leaves `/var` in place.
+Use `--skip-var` if no rescue environment is available.
 
 #### Offline Installation
 
