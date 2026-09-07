@@ -142,6 +142,120 @@ class PasswordPolicyTests(unittest.TestCase):
                 self.assertEqual(rc == 0, succeeds, f"PAM returned {rc}: {messages_seen}")
 
 
+class JournalSealingTests(unittest.TestCase):
+    machine_id = "0123456789abcdef0123456789abcdef"
+    fake_key = "012345-6789ab-cdef01-234567/abcd-35a4e900"
+
+    def initialize(self, root, mode="success"):
+        script = '''set -euo pipefail
+source "$1"
+journalctl() {
+    printf '%s\\n' "$*" >> "$MOCK_ROOT/calls"
+    [[ "$*" == '--quiet --setup-keys' ]] || return 99
+    echo 'private setup diagnostic' >&2
+    [[ "$MOCK_MODE" != fail ]] || return 43
+    printf '%s\\n' "$MOCK_KEY"
+    if [[ "$MOCK_MODE" == success ]]; then
+        printf 'sealing state' > "$MOCK_ROOT/var/log/journal/$MOCK_ID/fss"
+    fi
+}
+initialize_journal_sealing "$2"
+'''
+        env = dict(os.environ, MOCK_ROOT=str(root), MOCK_MODE=mode,
+                   MOCK_KEY=self.fake_key, MOCK_ID=self.machine_id)
+        return subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(root)],
+                              text=True, capture_output=True, env=env)
+
+    def fixture(self, root):
+        (root / "etc").mkdir()
+        (root / "etc/machine-id").write_text(self.machine_id + "\n")
+        return (root / f"var/log/journal/{self.machine_id}/fss",
+                root / f"root/journal-sealing/verification-{self.machine_id}.txt")
+
+    def test_first_boot_captures_keys_privately_and_later_boots_preserve_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, verification = self.fixture(root)
+            result = self.initialize(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(verification.read_text(), self.fake_key + "\n")
+            for file in (state, verification):
+                self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(verification.parent.stat().st_mode & 0o777, 0o700)
+            self.assertNotIn(self.fake_key, result.stdout + result.stderr)
+            self.assertNotIn("private setup diagnostic", result.stdout + result.stderr)
+            self.assertIn("ACTION REQUIRED", result.stdout)
+            original = state.read_bytes()
+            for exported in (False, True):
+                if exported:
+                    verification.unlink()  # administrator moved it off the machine
+                result = self.initialize(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state.read_bytes(), original)
+                self.assertEqual((root / "calls").read_text().splitlines(), ["--quiet --setup-keys"])
+
+    def test_setup_failures_and_incomplete_output_do_not_claim_success_or_replace_keys(self):
+        for mode in ("fail", "no_state"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state, verification = self.fixture(root)
+                result = self.initialize(root, mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("keys initialized", result.stdout)
+                self.assertNotIn(self.fake_key, result.stdout + result.stderr)
+                self.assertTrue(verification.exists())
+                saved = verification.read_bytes()
+                result = self.initialize(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(verification.read_bytes(), saved)
+                self.assertEqual(len((root / "calls").read_text().splitlines()), 1)
+
+    def test_invalid_machine_id_prevents_key_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root)
+            for invalid in ("", "uninitialized", "0" * 32, "../../wrong"):
+                (root / "etc/machine-id").write_text(invalid)
+                result = self.initialize(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "calls").exists())
+
+    def test_offline_configuration_repairs_old_splitmode_without_creating_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "etc/systemd/journald.conf"
+            config.parent.mkdir(parents=True)
+            config.write_text("[Journal]\nSplitMode=login\nRateLimitBurst=2000\n")
+            for _ in range(2):
+                result = call_helper("configure_journal_sealing", root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(config.read_text(), "[Journal]\nSplitMode=uid\nRateLimitBurst=2000\n")
+                self.assertFalse((root / "root/journal-sealing").exists())
+
+    @unittest.skipUnless(shutil.which("systemd-analyze") and
+                         Path("/usr/lib/systemd/system/audit-rules.service").exists(),
+                         "Arch audit/systemd units unavailable")
+    def test_generated_units_have_valid_dependencies_with_upstream_boot_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for helper in ("configure_journal_sealing", "configure_audit_rules", "configure_vulnerability_check"):
+                result = call_helper(helper, root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            units = root / "etc/systemd/system"
+            for path in units.rglob("*"):
+                if path.is_file():
+                    # Verify dependency ordering against the real upstream units.
+                    # Point the executable checks at the staged scripts via bash
+                    # because the temporary filesystem may be mounted noexec.
+                    path.write_text(path.read_text().replace("ExecStart=/usr/local/",
+                                    f"ExecStart=/usr/bin/bash {root}/usr/local/"))
+            result = subprocess.run(["systemd-analyze", "verify", "--man=no",
+                "awesome-journal-sealing.service", "systemd-journal-flush.service", "audit-rules.service",
+                "arch-audit.service", "arch-audit-alert.service", "arch-audit.timer"],
+                env=dict(os.environ, SYSTEMD_UNIT_PATH=f"{units}:"), text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class VulnerabilityCheckTests(unittest.TestCase):
     def run_scan(self, root, output="", status=0):
         script = '''set -euo pipefail

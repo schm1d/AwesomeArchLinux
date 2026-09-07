@@ -1139,6 +1139,10 @@ CRITICAL POST-INSTALLATION STEPS:
    systemctl enable --now auditd
    systemctl enable --now rkhunter-check.timer
    systemctl enable --now arch-audit.timer
+   systemctl status audit-rules.service awesome-journal-sealing.service
+   - Move /root/journal-sealing/verification-*.txt to trusted off-machine storage.
+   - Verify the saved copy, then remove the local verification file.
+   - Keep /var/log/journal/*/fss on this machine; never regenerate with --force.
 
 3. BOOT SECURITY:
 $BOOT_PROFILE_GUIDANCE

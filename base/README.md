@@ -115,7 +115,7 @@ policy files are saved once with a `.before-awesome` suffix.
 - rkhunter rootkit detection (daily timer)
 - auditd with bundled MITRE ATT&CK-mapped rules, checked during boot loading
 - fail2ban with SSH jail
-- journald hardening (persistent, compressed, sealed)
+- journald hardening (persistent, compressed, sealing keys initialized at boot)
 - Sudoers hardening (I/O logging, env_reset, secure_path)
 - PAM faillock (5 attempts, 15-minute lockout)
 - Password quality enforcement (pam_pwquality, 12-char minimum)
@@ -307,6 +307,9 @@ After rebooting into your new system:
 8. Review fail2ban status: `sudo fail2ban-client status sshd`
 9. Verify AppArmor profiles: `sudo aa-status`
 10. Copy your SSH public key to `~/.ssh/authorized_keys` before relying on key-only auth
+11. Check `systemctl status awesome-journal-sealing.service` after the first boot. Move `/root/journal-sealing/verification-<machine-id>.txt` to trusted off-machine storage, verify the copy, then remove the local verification file. Keeping this key on the machine undermines tamper detection if the machine is compromised. Keep the evolving `/var/log/journal/<machine-id>/fss` sealing state on the installed machine; never use `journalctl --setup-keys --force` as a routine repair.
+
+Journal key setup runs before the persistent journal flush using the installed machine ID. A rotation after the flush starts new files with sealing; old logs are not retroactively sealed. Later boots preserve existing keys. If setup fails, logging continues and `awesome-journal-sealing.service` stays failed; inspect its journal and the private files in `/root/journal-sealing/` before attempting recovery. To verify archived journals on a trusted machine, use `journalctl --directory=<copied-journal-directory> --verify --verify-key=<saved-verification-key>` and inspect the reported authenticated time ranges. See the [journalctl FSS documentation](https://man.archlinux.org/man/journalctl.1.en) for key handling and verification.
 
 ---
 

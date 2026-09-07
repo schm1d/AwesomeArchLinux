@@ -579,7 +579,7 @@ recovery-aware migration.
 - **Prometheus + Grafana** &mdash; Full monitoring stack with security-focused textfile collector.
 - **sysstat** &mdash; System performance accounting.
 - **logrotate** &mdash; Daily rotation, 7-day retention, compressed.
-- **journald** &mdash; Persistent storage, compressed, sealed, 200MB max.
+- **journald** &mdash; Persistent storage, compression, 200MB max, and sealing keys initialized before the first boot's journal flush. Move the verification key from `/root/journal-sealing/` to trusted off-machine storage, verify the copy, then remove its local copy; see the [post-installation checklist](base/README.md#post-installation-checklist).
 - **Update notifications** &mdash; Daily `checkupdates` run against a temporary sync database via systemd timer (logs available updates to `/var/log/pacman-updates.log` without changing the live package database or auto-installing).
 
 #### GRUB Security

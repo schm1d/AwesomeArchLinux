@@ -808,16 +808,8 @@ EOF
 systemctl enable fail2ban
 
 echo -e "${BBlue}Improving journald configuration...${NC}"
-cat <<EOF > /etc/systemd/journald.conf
-[Journal]
-Storage=persistent
-Compress=yes
-Seal=yes
-SplitMode=login
-ForwardToSyslog=no
-SystemMaxUse=200M
-EOF
-# journald restart not possible in chroot — config applies on first boot
+configure_journal_sealing
+# Key setup and journal rotation run on the installed system at boot.
 
 # Configure sudo
 # Create local groups required by the hidepid /proc policy and sudo access.
@@ -1689,6 +1681,8 @@ SYSTEMD_HARDENING_CANDIDATES=(
     NetworkManager.service
     auditd.service
     audit-rules.service
+    awesome-journal-sealing.service
+    systemd-journal-flush.service
     clamav-daemon.service
     fail2ban.service
     chronyd.service

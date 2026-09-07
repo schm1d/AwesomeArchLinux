@@ -276,3 +276,121 @@ Persistent=true
 WantedBy=timers.target
 EOF
 )
+
+initialize_journal_sealing() (
+    set -euo pipefail
+    umask 077
+    local root="${1:-}" machine_id state keydir verification diagnostic rc
+    # PID 1 establishes the installed machine's ID before this boot service runs.
+    # Never generate keys in the installer chroot using the live ISO's identity.
+    machine_id=$(cat "$root/etc/machine-id")
+    [[ "$machine_id" =~ ^[0-9a-f]{32}$ && "$machine_id" != 00000000000000000000000000000000 ]] || {
+        echo "Journal sealing requires a valid machine-id from the installed system." >&2
+        return 1
+    }
+    state="$root/var/log/journal/$machine_id/fss"
+    keydir="$root/root/journal-sealing"
+    verification="$keydir/verification-$machine_id.txt"
+    diagnostic="$keydir/setup-$machine_id.log"
+    install -d -m 0700 "$keydir"
+    exec 9> "$keydir/.setup.lock"
+    flock -n 9 || { echo "Journal sealing setup is already running." >&2; return 1; }
+    if [[ -e "$state" || -L "$state" ]]; then
+        [[ -f "$state" && ! -L "$state" && -s "$state" ]] || {
+            echo "Invalid journal sealing state at $state; refusing to replace it." >&2
+            return 1
+        }
+        chmod 0600 "$state"
+        echo "Existing journal sealing key preserved."
+    else
+        # A saved verification key without its sealing state needs investigation,
+        # not automatic key replacement that would discard the verification chain.
+        if [[ -e "$verification" || -L "$verification" ]]; then
+            echo "Saved verification output exists without sealing state; inspect $verification and $diagnostic before retrying. No keys replaced." >&2
+            return 1
+        fi
+        install -d -m 0755 "$root/var/log/journal" "${state%/fss}"
+        # Capture directly in a private, durable location. Even an interruption
+        # after key creation must not delete the only copy of the verification key.
+        if (set -o noclobber
+            SYSTEMD_LOG_TARGET=console SYSTEMD_COLORS=0 journalctl --quiet --setup-keys \
+                > "$verification" 2>> "$diagnostic"); then
+            rc=0
+        else
+            rc=$?
+            echo "Journal sealing setup failed (exit $rc). Private output retained in $keydir for recovery." >&2
+            return "$rc"
+        fi
+        if [[ ! -s "$state" ]] || ! grep -Eq '^[0-9a-f-]+/[0-9a-f]+-[0-9a-f]+$' "$verification"; then
+            echo "Journal sealing setup did not produce both keys; inspect $keydir. No success assumed." >&2
+            return 1
+        fi
+        chmod 0600 "$state" "$verification" "$diagnostic"
+        sync -f "$verification"
+        sync -f "$state"
+        echo "Journal sealing keys initialized for this machine."
+    fi
+    if [[ -e "$verification" ]]; then
+        if ! grep -Eq '^[0-9a-f-]+/[0-9a-f]+-[0-9a-f]+$' "$verification"; then
+            echo "Incomplete verification output at $verification; recover it before relying on journal sealing. Existing keys preserved." >&2
+            return 1
+        fi
+        echo "ACTION REQUIRED: Move $verification to trusted off-machine storage, verify the copy, then remove the local copy. Never move the fss sealing state."
+    fi
+)
+
+configure_journal_sealing() (
+    set -euo pipefail
+    local root="${1:-}"
+    install -d -m 0755 "$root/etc/systemd/journald.conf.d" "$root/usr/local/sbin" \
+        "$root/etc/systemd/system/systemd-journal-flush.service.d"
+    # Repair the invalid value written by earlier versions, including on reruns.
+    if [[ -f "$root/etc/systemd/journald.conf" ]]; then
+        sed -i -E 's/^[[:space:]]*SplitMode[[:space:]]*=[[:space:]]*login[[:space:]]*$/SplitMode=uid/' \
+            "$root/etc/systemd/journald.conf"
+    fi
+    cat > "$root/etc/systemd/journald.conf.d/60-awesome.conf" <<'EOF'
+[Journal]
+Storage=persistent
+Compress=yes
+Seal=yes
+SplitMode=uid
+ForwardToSyslog=no
+SystemMaxUse=200M
+EOF
+    cat > "$root/usr/local/sbin/awesome-journal-sealing" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /usr/local/lib/awesomearchlinux/chroot-security.sh
+initialize_journal_sealing
+EOF
+    chmod 0755 "$root/usr/local/sbin/awesome-journal-sealing"
+    cat > "$root/etc/systemd/system/awesome-journal-sealing.service" <<'EOF'
+[Unit]
+Description=Initialize journal sealing keys for this machine
+DefaultDependencies=no
+Wants=systemd-journald.service
+After=systemd-remount-fs.service systemd-journald.service
+Before=systemd-journal-flush.service
+RequiresMountsFor=/var/log/journal /root
+ConditionPathExists=!/etc/initrd-release
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/awesome-journal-sealing
+UMask=0077
+TimeoutStartSec=2min
+EOF
+    cat > "$root/etc/systemd/system/systemd-journal-flush.service.d/60-awesome-sealing.conf" <<'EOF'
+[Unit]
+# Keep logging even if key setup fails; the sealing service remains visibly failed.
+Wants=awesome-journal-sealing.service
+After=awesome-journal-sealing.service
+
+[Service]
+# New persistent files pick up the key; old files cannot be retroactively sealed.
+ExecStartPost=/usr/bin/journalctl --rotate
+EOF
+    echo "Journal sealing staged for boot; export the verification key from /root/journal-sealing after setup."
+)
