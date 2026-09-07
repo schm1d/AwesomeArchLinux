@@ -17,7 +17,7 @@
 # Requirements:
 #   - Arch Linux with pacman
 #   - Root privileges
-#   - ext4 root filesystem with the 'encrypt' feature enabled
+#   - ext4 root and home filesystems with the 'encrypt' feature enabled
 #     (enable from a rescue environment: tune2fs -O encrypt <device>)
 #
 # What this script does:
@@ -26,7 +26,7 @@
 #                      in system-login and passwd PAM stacks.
 #   --encrypt-user     Move an existing user's home aside, create an empty
 #                      encrypted replacement tied to their login password,
-#                      and print/store a recovery passphrase.
+#                      and write recovery instructions.
 #   --status           Show current fscrypt state.
 #   --uninstall        Remove pam_fscrypt wiring. Does not decrypt data.
 # =============================================================================
@@ -72,8 +72,8 @@ Usage: sudo $0 [--setup] [--encrypt-user USER] [--status] [--uninstall] [-h]
   --setup                 Install fscrypt, verify ext4 'encrypt' feature,
                           create /etc/fscrypt.conf, wire up PAM (default).
   --encrypt-user USER     Encrypt USER's home directory with their login
-                          password as the protector. Saves a recovery key
-                          copy to /root/fscrypt-recovery-<user>.txt (0600).
+                          password as the protector. Saves recovery notes
+                          to /root/fscrypt-recovery-<user>.txt (0600).
   --status                Show current fscrypt state.
   --uninstall             Remove pam_fscrypt wiring (does NOT decrypt data).
   -h, --help              Show this help.
@@ -132,11 +132,7 @@ get_root_device() {
 }
 
 is_ext4() {
-    # stat -f returns 'ext2/ext3' for ext4 as well (shared magic). No other FS
-    # we care about reports that string.
-    local t
-    t="$(stat -f -c %T / 2>/dev/null || echo unknown)"
-    [[ "$t" == "ext2/ext3" ]]
+    [[ "$(findmnt -n -o FSTYPE -T "${1:-/}")" == ext4 ]]
 }
 
 has_encrypt_feature() {
@@ -147,6 +143,30 @@ has_encrypt_feature() {
         return 0
     fi
     return 1
+}
+
+validate_encryption_filesystem() {
+    local path="$1" dev
+    is_ext4 "$path" || err "The filesystem containing $path is not ext4."
+    dev=$(findmnt -n -o SOURCE -T "$path") || err "Cannot find the device containing $path."
+    [[ -n "$dev" ]] || err "Cannot find the device containing $path."
+    if ! has_encrypt_feature "$dev"; then
+        err "The ext4 'encrypt' feature is missing on $dev (containing $path). Boot rescue media, unmount that filesystem, run 'tune2fs -O encrypt $dev', then retry."
+    fi
+}
+
+prepare_encryption_filesystem() {
+    local path="$1" mountpoint metadata
+    mountpoint=$(findmnt -n -o TARGET -T "$path") || err "Cannot find the mount containing $path."
+    [[ "$mountpoint" == /* ]] || err "Invalid mount point for $path."
+    metadata="${mountpoint%/}/.fscrypt"
+    if [[ ! -e "$metadata" ]]; then
+        info "Initialising fscrypt metadata on $mountpoint ..."
+        fscrypt setup "$mountpoint" --quiet || err "fscrypt setup failed on $mountpoint; home directories have not been moved."
+    fi
+    [[ -d "$metadata/policies" && -d "$metadata/protectors" ]] || \
+        err "Incomplete fscrypt metadata on $mountpoint. Repair it before encrypting homes."
+    fscrypt status "$mountpoint" >/dev/null || err "Cannot read fscrypt metadata on $mountpoint."
 }
 
 pam_line_present() {
@@ -250,44 +270,17 @@ do_status() {
     # Encrypted users
     if command -v fscrypt >/dev/null 2>&1; then
         echo "---- fscrypt status ----"
-        fscrypt status / 2>&1 || warn "fscrypt status failed (not set up yet?)"
+        fscrypt status 2>&1 || warn "fscrypt status failed (not set up yet?)"
     fi
 }
 
 do_setup() {
     info "Starting fscrypt system-wide setup"
 
-    # 1. ext4 check
-    if ! is_ext4; then
-        err "Root filesystem is not ext4 (stat -f reports: $(stat -f -c %T / 2>/dev/null || echo unknown)). \
-This module only supports ext4. btrfs/xfs/f2fs have their own native encryption paths \
-(XFS has fscrypt support but this script does not manage it)."
-    fi
-    ok "Root filesystem is ext4"
-
-    # 2. encrypt feature on root device
-    local dev
-    dev="$(get_root_device)"
-    [[ -n "$dev" ]] || err "Could not determine root device via findmnt."
-    info "Root device: $dev"
-
-    if ! has_encrypt_feature "$dev"; then
-        warn "The ext4 'encrypt' feature is NOT enabled on $dev."
-        cat <<EOF
-
-    Enabling it requires the filesystem to be UNMOUNTED. You cannot do this
-    on a live, mounted root filesystem. Boot from an Arch ISO / rescue
-    environment and run:
-
-        tune2fs -O encrypt $dev
-
-    (Optionally run: e2fsck -f $dev  first.)
-    Then reboot and re-run: sudo $0 --setup
-
-EOF
-        err "Aborting setup — 'encrypt' feature missing."
-    fi
-    ok "ext4 'encrypt' feature is enabled on $dev"
+    # Validate both devices before installing packages or changing PAM.
+    # The base installer puts /home on a separate logical volume.
+    validate_encryption_filesystem /
+    validate_encryption_filesystem /home
 
     # 3. Install fscrypt
     require_cmd pacman
@@ -321,12 +314,9 @@ Check: pacman -Ql fscrypt | grep pam_fscrypt"
         ok "fscrypt setup complete"
     fi
 
-    # Make sure the root mount has fscrypt metadata initialised as well.
-    if ! fscrypt status / >/dev/null 2>&1; then
-        info "Initialising fscrypt metadata on / ..."
-        fscrypt setup / --quiet --force 2>/dev/null || \
-            warn "'fscrypt setup /' failed — you may need to run it manually."
-    fi
+    # Login protectors live on /; policies live on the home's filesystem.
+    prepare_encryption_filesystem /
+    prepare_encryption_filesystem /home
 
     # 6. PAM wiring
     info "Wiring pam_fscrypt into PAM stacks..."
@@ -386,44 +376,47 @@ do_encrypt_user() {
     local home
     home="$(getent passwd "$u" | cut -d: -f6)"
     [[ -n "$home" && -d "$home" ]] || err "Home directory for '$u' not found."
+    [[ "$home" == /* && ! -L "$home" ]] || err "Home must be an absolute, non-symlink directory."
+    mountpoint -q -- "$home" && err "Home is itself a mount point; this migration requires a directory below the mount."
 
     info "Target user : $u"
     info "Home        : $home"
 
     # Detect whether the home is already encrypted
-    if fscrypt status "$home" 2>/dev/null | grep -q 'Encrypted: *Yes'; then
+    if fscrypt status "$home" >/dev/null 2>&1; then
         warn "$home appears to already be encrypted. Nothing to do."
         return 0
     fi
 
     # Confirm the move-aside approach with the operator
     local moved="${home}.pre-encrypt"
-    if [[ -e "$moved" ]]; then
+    if [[ -e "$moved" || -L "$moved" ]]; then
         err "$moved already exists. Refusing to clobber. Remove or rename it first."
     fi
+
+    # Resolve the actual home, including homes outside /home, before moving
+    # any data or terminating the user's sessions. Setup errors are fatal.
+    validate_encryption_filesystem /
+    validate_encryption_filesystem "$home"
+    prepare_encryption_filesystem /
+    prepare_encryption_filesystem "$home"
 
     cat <<EOF
 
  About to encrypt $home for user '$u'.
 
  Plan:
-   1. Terminate any active sessions for '$u' (loginctl terminate-user).
-   2. Move $home aside to $moved  (YOUR DATA, preserved, NOT deleted).
-   3. Recreate an empty $home with mode 700, owned by '$u'.
-   4. Run 'fscrypt encrypt' on the new empty $home, using '$u''s login
-      passphrase as the protector.
-   5. Print a recovery passphrase you MUST save somewhere safe.
+   1. Encrypt an empty sibling directory using '$u''s login passphrase.
+   2. Terminate any active sessions for '$u' (loginctl terminate-user).
+   3. Move $home aside to $moved  (YOUR DATA, preserved, NOT deleted).
+   4. Put the encrypted directory at $home, mode 700, owned by '$u'.
+   5. Write instructions for adding a recovery protector.
 
- You will need the user's login password to complete step 4.
+ You will need the user's login password to complete step 1.
 
 EOF
     read -r -p "Type YES to proceed: " confirm
     [[ "$confirm" == "YES" ]] || err "Aborted by operator."
-
-    # 1. Terminate sessions
-    info "Terminating any active sessions for '$u'..."
-    loginctl terminate-user "$u" 2>/dev/null || true
-    sleep 1
 
     # Capture ownership/mode of existing home so we recreate faithfully.
     local owner group mode
@@ -432,27 +425,33 @@ EOF
     mode="$(stat -c %a "$home")"
     info "Current home ownership: ${owner}:${group} mode ${mode}"
 
-    # 2. Move aside
-    info "Moving $home -> $moved"
-    mv -- "$home" "$moved"
-
-    # 3. Recreate empty home
-    install -d -m 700 -o "$u" -g "$group" "$home"
-    ok "Recreated empty $home (mode 700, owner $u)"
-
-    # 4. fscrypt encrypt — uses the user's login passphrase as the protector.
-    #    We run it as the target user so fscrypt prompts for THEIR password,
-    #    not root's; otherwise pam_fscrypt on login won't know how to unlock.
+    # Encrypt before moving the original home. Root manages the metadata;
+    # --user selects the target user's login protector and keyring without
+    # requiring world-writable metadata directories.
+    local staged
+    staged=$(mktemp -d -- "${home}.encrypt.XXXXXX")
+    chown "$u:$group" "$staged"
     info "Running 'fscrypt encrypt' — the user's LOGIN PASSWORD will be requested."
-    info "(Answer 'pam_passphrase' if asked about source; then enter the login password.)"
-    if ! su -s /bin/sh -c "fscrypt encrypt '$home' --user='$u' --source=pam_passphrase" "$u"; then
-        warn "fscrypt encrypt as user failed. Attempting fallback with --source=custom_passphrase."
-        warn "NOTE: a custom_passphrase protector will NOT auto-unlock on login via PAM."
-        warn "      The user will have to run 'fscrypt unlock $home' manually after login."
-        if ! su -s /bin/sh -c "fscrypt encrypt '$home' --user='$u'" "$u"; then
-            err "fscrypt encrypt failed. The original data is still intact at $moved. \
-You can restore by: rmdir '$home' && mv '$moved' '$home'"
-        fi
+    if ! fscrypt encrypt "$staged" --user="$u" --source=pam_passphrase; then
+        rmdir -- "$staged" 2>/dev/null || warn "Inspect the failed encryption directory: $staged"
+        err "fscrypt encrypt failed. The original home remains at $home."
+    fi
+
+    # An account with no sessions is absent from logind; terminating it would
+    # fail even though it is already safe to proceed.
+    local active_users uid
+    uid=$(id -u "$u")
+    active_users=$(loginctl list-users --no-legend --no-pager) || err "Cannot check active sessions; original home remains at $home."
+    if awk -v uid="$uid" '$1 == uid { found=1 } END { exit !found }' <<< "$active_users"; then
+        info "Terminating active sessions for '$u'..."
+        loginctl terminate-user "$u" || err "Could not terminate sessions; original home remains at $home, encrypted directory at $staged."
+        sleep 1
+    fi
+    info "Moving $home -> $moved"
+    mv -T -- "$home" "$moved"
+    if ! mv -T -- "$staged" "$home"; then
+        mv -T -- "$moved" "$home" || err "Restore $moved to $home manually; encrypted directory is at $staged."
+        err "Could not activate encrypted home; the original home has been restored."
     fi
     ok "fscrypt encrypt succeeded on $home"
 

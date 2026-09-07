@@ -62,7 +62,7 @@ any process running as root.
 
 - **Arch Linux** (uses pacman, `/etc/pam.d/system-login`, `/usr/lib/security/`).
 - **Root privileges.**
-- **ext4 root filesystem** with the `encrypt` feature enabled.
+- **ext4 root and home filesystems** with the `encrypt` feature enabled.
 
 Verify current state:
 
@@ -84,6 +84,11 @@ If your root lives on LUKS + LVM, the device is something like
 `/dev/mapper/vg-root`. `findmnt -n -o SOURCE /` prints the right path; the
 script shows it in `--status`.
 
+The base installer creates a separate `/home` logical volume. Check its device
+with `findmnt -n -o SOURCE -T /home` and repeat the offline feature-enable steps
+for that device as well. Homes on other filesystems are checked individually
+by `--encrypt-user`.
+
 ---
 
 ## Usage
@@ -96,12 +101,14 @@ sudo ./fscrypt.sh [--setup] [--encrypt-user USER] [--status] [--uninstall] [-h]
 
 One-time system-wide setup:
 
-1. Verifies root is ext4.
-2. Verifies the `encrypt` feature is enabled on the root device; if not,
+1. Verifies the filesystems containing `/` and `/home` are ext4.
+2. Verifies the `encrypt` feature is enabled on both devices; if not,
    prints the exact `tune2fs` command you need to run from rescue and
    exits without half-configuring.
 3. Installs `fscrypt` via pacman.
-4. Runs `fscrypt setup` to create `/etc/fscrypt.conf` and metadata.
+4. Creates `/etc/fscrypt.conf` and prepares fscrypt metadata on both filesystems
+   (once if `/home` shares the root filesystem). Metadata setup failures stop
+   the script before PAM is changed.
 5. Wires `pam_fscrypt.so` into `/etc/pam.d/system-login` (auth + session)
    and `/etc/pam.d/passwd` (password). Each file is backed up first to
    `<file>.bak.<epoch>`; lines are only appended if not already present.
@@ -120,13 +127,17 @@ sudo ./fscrypt.sh --encrypt-user alice
 
 What happens:
 
-1. Active sessions for `alice` are terminated (`loginctl terminate-user`).
-2. `/home/alice` is **moved aside** to `/home/alice.pre-encrypt` — nothing
-   is deleted.
-3. A fresh empty `/home/alice` is created (mode 700, owner `alice`).
-4. `fscrypt encrypt` is run **as `alice`** with `--source=pam_passphrase`
-   so the protector is her login password. She is prompted for that
-   password interactively by fscrypt.
+1. The actual home filesystem and root filesystem are checked and their
+   metadata prepared before any sessions are terminated or data moved.
+   Symlink homes and homes that are themselves mount points are refused.
+2. An empty sibling directory is created (mode 700, owner `alice`) and
+   encrypted by root with `--user=alice --source=pam_passphrase`. This selects
+   Alice's login password while allowing metadata directories to remain writable
+   only by root. Encryption failure leaves the original home in place.
+3. Active sessions for `alice` are terminated (`loginctl terminate-user`).
+4. `/home/alice` is **moved aside** to `/home/alice.pre-encrypt`, and the
+   encrypted directory takes its place. If the second rename fails, the script
+   attempts to restore the original home and reports the recovery paths.
 5. A recovery notes file is written to
    `/root/fscrypt-recovery-alice.txt` (mode 600). **See the "Recovery
    keys" section below** — this script does NOT generate a fully
@@ -150,7 +161,7 @@ rollback path if anything goes wrong.
 
 Prints the current state: root device, FS type, encrypt feature, whether
 the `fscrypt` package is installed, `/etc/fscrypt.conf` presence, PAM
-wiring status, and `fscrypt status /` output (lists policies and protectors).
+wiring status, and `fscrypt status` output (lists all relevant filesystems).
 
 ```bash
 sudo ./fscrypt.sh --status
@@ -305,7 +316,8 @@ The `encrypt` ext4 feature itself stays enabled (there is no in-place
 
 - Installs: `fscrypt` package (provides `/usr/bin/fscrypt`,
   `/usr/lib/security/pam_fscrypt.so`).
-- Creates: `/etc/fscrypt.conf`, `/.fscrypt/` metadata directory.
+- Creates: `/etc/fscrypt.conf`, `/.fscrypt/`, and `.fscrypt/` metadata on each
+  separate home filesystem.
 - Edits (with timestamped `.bak.<epoch>` backups, idempotent line append):
   - `/etc/pam.d/system-login`
   - `/etc/pam.d/passwd`
