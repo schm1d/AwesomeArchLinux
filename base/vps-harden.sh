@@ -1008,6 +1008,26 @@ EOF
     msg "Created /root/.install-env (INSTALL_TYPE=vps-harden)"
 }
 
+stage_ssh_components() {
+    local target_root="$1"
+    # Stage both SSH components before vps-chroot.sh can change authentication.
+    # The single-file download workflow needs the same helper as a local clone.
+    local ssh_component ssh_target
+    for ssh_component in lib/nftables.sh ssh/ssh.sh; do
+        ssh_target="${target_root%/}/${ssh_component##*/}"
+        if [[ -r "$SCRIPT_DIR/../hardening/$ssh_component" ]]; then
+            install -m 0644 "$SCRIPT_DIR/../hardening/$ssh_component" "$ssh_target"
+        else
+            curl -fsSL \
+                "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/$ssh_component" \
+                -o "$ssh_target" || err "Could not fetch required SSH component: $ssh_component"
+            chmod 0644 "$ssh_target"
+        fi
+        bash -n "$ssh_target" || err "Invalid SSH component: $ssh_component"
+    done
+    chmod 0755 "${target_root%/}/ssh.sh"
+}
+
 run_software_hardening() {
     info "Running software hardening via vps-chroot.sh..."
 
@@ -1072,14 +1092,7 @@ run_software_hardening() {
     done
     chmod 0755 "$sysctl_stage/sysctl.sh"
 
-    if [[ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]]; then
-        cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /ssh.sh
-    else
-        curl -fsSL \
-            "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/ssh/ssh.sh" \
-            -o /ssh.sh || warn "Could not fetch ssh.sh"
-    fi
-    [[ -f /ssh.sh ]] && chmod +x /ssh.sh
+    stage_ssh_components /
 
     # Set up environment variables and run
     export _INSTALL_DISK="$PARENT_DISK"
@@ -1098,6 +1111,7 @@ run_software_hardening() {
     [[ "$chroot_script" == /tmp/* ]] && shred -zu "$chroot_script" 2>/dev/null || true
     shred -zu /sysctl.sh 2>/dev/null || true
     shred -zu /ssh.sh 2>/dev/null || true
+    shred -zu /nftables.sh 2>/dev/null || true
     rm -rf -- /sysctl-profile
 
     msg "Software hardening complete"

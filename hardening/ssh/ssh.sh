@@ -23,7 +23,12 @@ if [[ -f "$SCRIPT_DIR/../lib/nftables.sh" ]]; then
 elif [[ -f "$SCRIPT_DIR/nftables.sh" ]]; then
     source "$SCRIPT_DIR/nftables.sh"
 else
-    echo "WARNING: nftables helper not found; rate-limit persistence disabled." >&2
+    echo "ERROR: required nftables.sh helper not found; copy it beside ssh.sh before running." >&2
+    exit 1
+fi
+if ! declare -F aal_nft_persist_block >/dev/null || ! declare -F aal_nft_remove_live_rules >/dev/null; then
+    echo "ERROR: nftables.sh is missing required functions; refusing to change SSH configuration." >&2
+    exit 1
 fi
 
 BBlue='\033[1;34m'

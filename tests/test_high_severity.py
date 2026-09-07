@@ -130,5 +130,52 @@ umount() { exit 99; }; systemctl() { exit 99; }
                 self.assertEqual(guide.stat().st_mode & 0o777, 0o600)
 
 
+class SshStagingTests(unittest.TestCase):
+    def stage(self, tmp, download=False, fail_component=""):
+        script = r'''set -euo pipefail
+err() { echo "$*" >&2; exit 1; }
+curl() {
+    local component="${2##*/hardening/}"
+    [[ "$component" != "$FAIL_COMPONENT" ]] || return 22
+    cp "$REPO_ROOT/hardening/$component" "$4"
+}
+''' + shell_function("base/vps-harden.sh", "stage_ssh_components") + '\nstage_ssh_components "$STAGE_ROOT"\n'
+        source_dir = Path(tmp) / "download-only" if download else ROOT / "base"
+        return subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                              env=dict(os.environ, SCRIPT_DIR=str(source_dir), STAGE_ROOT=tmp,
+                                       REPO_ROOT=str(ROOT), FAIL_COMPONENT=fail_component))
+
+    def test_local_and_downloaded_bundles_load_the_helper(self):
+        for download in (False, True):
+            with self.subTest(download=download), tempfile.TemporaryDirectory() as tmp:
+                result = self.stage(tmp, download=download)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = subprocess.run(["bash", str(Path(tmp) / "ssh.sh"), "-h"],
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Usage:", result.stdout)
+                self.assertEqual(result.stderr, "")
+
+    def test_download_failure_stops_before_staging_ssh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.stage(tmp, download=True, fail_component="lib/nftables.sh")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Could not fetch required SSH component", result.stderr)
+            self.assertFalse((Path(tmp) / "ssh.sh").exists())
+
+    def test_missing_or_incomplete_helper_fails_before_root_check(self):
+        for helper in (None, "#!/bin/bash\n"):
+            with self.subTest(helper=helper), tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "ssh.sh"
+                shutil.copyfile(ROOT / "hardening/ssh/ssh.sh", script)
+                if helper is not None:
+                    (Path(tmp) / "nftables.sh").write_text(helper)
+                result = subprocess.run(["bash", str(script), "-h"], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("ERROR:", result.stderr)
+                self.assertIn("nftables.sh", result.stderr)
+                self.assertNotIn("root", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

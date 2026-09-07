@@ -54,10 +54,13 @@ else
 fi
 log_action "Boot mode: $BOOT_MODE"
 
-if [[ ! -r "$SCRIPT_DIR/vps-chroot.sh" ]]; then
-    echo -e "${BRed}Missing required installer component: $SCRIPT_DIR/vps-chroot.sh${NC}" >&2
-    exit 1
-fi
+for installer_component in "$SCRIPT_DIR/vps-chroot.sh" \
+    "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh"; do
+    if [[ ! -r "$installer_component" ]]; then
+        echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
+        exit 1
+    fi
+done
 
 # -----------------------
 # 1. HELPER FUNCTIONS
@@ -593,10 +596,9 @@ for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
 done
 chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
-if [ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]; then
-    cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/
-    chmod +x /mnt/ssh.sh
-fi
+# ssh.sh resolves the helper beside itself when staged at the chroot root.
+install -m 0644 "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
+install -m 0755 "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/ssh.sh
 
 # Create AUR installation script
 cat > /mnt/root/install-aur-packages.sh <<'AURSCRIPT'
@@ -698,7 +700,7 @@ echo -e "${BBlue}Performing cleanup...${NC}"
 log_action "Performing cleanup."
 
 # Clean up scripts copied into chroot
-for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/sysctl-profile.conf /mnt/ssh.sh; do
+for f in /mnt/vps-chroot.sh /mnt/set-install-vars.sh /mnt/sysctl.sh /mnt/sysctl-profile.conf /mnt/ssh.sh /mnt/nftables.sh; do
     [[ -f "$f" ]] && shred -vzu "$f" 2>/dev/null || true
 done
 rm -rf -- /mnt/sysctl-profile
