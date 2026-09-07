@@ -67,7 +67,7 @@ done
 [[ -d /sys/firmware/efi/efivars ]] || echo_err "UEFI not detected. Secure Boot requires UEFI."
 
 # Ensure dependencies
-for cmd in openssl efibootmgr sbsigntools efi-updatevar cert-to-efi-sig-list sign-efi-sig-list uuidgen; do
+for cmd in openssl efibootmgr sbsign efivar efi-updatevar cert-to-efi-sig-list sign-efi-sig-list uuidgen; do
   command -v "$cmd" >/dev/null || echo_err "Missing dependency: $cmd"
 done
 
