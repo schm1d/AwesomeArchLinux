@@ -96,6 +96,7 @@ install_package() {
   if [[ ${EUID} -eq 0 ]]; then
     die "do not run the AUR install as root; run this script as ${REAL_USER}"
   fi
+  "${AUR_HELPER}" vmware-keymaps --noconfirm --overwrite '/usr/lib/vmware/xkeymap/*'
   "${AUR_HELPER}" -S --needed --noconfirm "${PKG}"
 }
 
