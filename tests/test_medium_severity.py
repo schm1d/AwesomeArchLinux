@@ -9,6 +9,43 @@ import unittest
 from test_high_severity import ROOT, shell_function
 
 
+class NodeAuditTests(unittest.TestCase):
+    def test_two_apps_keep_independent_audits_after_reconfiguration(self):
+        source = (ROOT / "hardening/nodejs/nodejs.sh").read_text()
+        section = source.split('msg "Setting up automated npm security audit..."', 1)[1]
+        section = section.split('# 10. FILE PERMISSIONS', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("bin", "units", "logs"):
+                (root / name).mkdir()
+            section = section.replace("/usr/local/bin", str(root / "bin"))
+            section = section.replace("/etc/systemd/system", str(root / "units"))
+            section = section.replace("/var/log", str(root / "logs"))
+            apps = {}
+            for name, directory in (("first", "first app"), ("second", "second"),
+                                    ("first", 'updated $literal "app"')):
+                app = root / directory
+                app.mkdir()
+                apps[name] = app
+                result = subprocess.run(["bash", "-c", 'set -euo pipefail\n'
+                                         'msg() { :; }; systemctl() { :; }\n' + section],
+                                        text=True, capture_output=True,
+                                        env=dict(os.environ, APP_NAME=name, APP_PATH=str(app)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+            for name, app in apps.items():
+                service = (root / "units" / f"{name}-audit.service").read_text()
+                command = next(line.removeprefix("ExecStart=") for line in service.splitlines()
+                               if line.startswith("ExecStart="))
+                result = subprocess.run(["bash", "-c", '''set -euo pipefail
+npm() { printf '%s\\n' "$PWD" > "$AUDITED_PATH"; }
+source "$1"
+''', "test", command], text=True, capture_output=True,
+                                        env=dict(os.environ, AUDITED_PATH=str(root / "audited")))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root / "audited").read_text().strip(), str(app))
+                self.assertEqual(len(list((root / "logs" / name).glob("npm-audit-*.log"))), 1)
+
+
 class WipeTests(unittest.TestCase):
     def wipe(self, disk, size, source="/dev/zero"):
         script = '''set -euo pipefail

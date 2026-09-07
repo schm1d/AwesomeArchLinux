@@ -105,6 +105,10 @@ An enforce-mode AppArmor profile restricts the Node.js process to:
 
 A systemd timer runs `npm audit --production` weekly, logs results to `/var/log/<APP_NAME>/`, and optionally sends notifications via mail or webhook.
 
+Each application has a separate audit script. If upgrading from the shared
+`npm-security-audit.sh` script, rerun setup for each previously configured app
+using its original name and path to update its timer's service.
+
 ### 9. File Permissions
 
 | Path | Mode | Purpose |
@@ -124,7 +128,7 @@ A systemd timer runs `npm audit --production` weekly, logs results to `/var/log/
 | `/etc/nginx/sites-enabled/<APP_NAME>.conf` | nginx reverse proxy config |
 | `/etc/logrotate.d/<APP_NAME>` | Log rotation config |
 | `/etc/apparmor.d/usr.bin.<APP_NAME>` | AppArmor confinement profile |
-| `/usr/local/bin/npm-security-audit.sh` | Automated audit script |
+| `/usr/local/bin/<APP_NAME>-npm-security-audit.sh` | Application-specific audit script |
 | `/etc/systemd/system/<APP_NAME>-audit.timer` | Weekly audit timer |
 | `/var/log/<APP_NAME>/` | Application and audit logs |
 

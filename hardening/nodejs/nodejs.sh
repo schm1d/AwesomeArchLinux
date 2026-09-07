@@ -583,8 +583,10 @@ fi
 
 msg "Setting up automated npm security audit..."
 
-# Create the audit script
-cat > /usr/local/bin/npm-security-audit.sh <<EOF
+# Each timer needs its own script: a shared script would retain only the
+# most recently configured application's path.
+AUDIT_SCRIPT="/usr/local/bin/$APP_NAME-npm-security-audit.sh"
+cat > "$AUDIT_SCRIPT" <<EOF
 #!/usr/bin/env bash
 # =============================================================================
 # Automated npm security audit for $APP_NAME
@@ -596,8 +598,8 @@ cat > /usr/local/bin/npm-security-audit.sh <<EOF
 
 set -euo pipefail
 
-APP_PATH="$APP_PATH"
-APP_NAME="$APP_NAME"
+APP_PATH=$(printf '%q' "$APP_PATH")
+APP_NAME=$(printf '%q' "$APP_NAME")
 LOG_DIR="/var/log/\$APP_NAME"
 AUDIT_LOG="\$LOG_DIR/npm-audit-\$(date +%Y%m%d-%H%M%S).log"
 
@@ -634,8 +636,8 @@ echo "=== audit complete ===" >> "\$AUDIT_LOG"
 ls -1t "\$LOG_DIR"/npm-audit-*.log 2>/dev/null | tail -n +31 | xargs -r rm -f
 EOF
 
-chmod 755 /usr/local/bin/npm-security-audit.sh
-msg "Audit script created: /usr/local/bin/npm-security-audit.sh"
+chmod 755 "$AUDIT_SCRIPT"
+msg "Audit script created: $AUDIT_SCRIPT"
 
 # Create systemd service for the audit
 cat > "/etc/systemd/system/$APP_NAME-audit.service" <<EOF
@@ -646,7 +648,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/npm-security-audit.sh
+ExecStart=$AUDIT_SCRIPT
 User=root
 PrivateTmp=true
 EOF
@@ -754,7 +756,7 @@ echo "  Environment file:  $ENV_FILE"
 echo "  nginx config:      /etc/nginx/sites-enabled/$APP_NAME.conf"
 echo "  Logrotate:         /etc/logrotate.d/$APP_NAME"
 echo "  AppArmor profile:  $APPARMOR_PROFILE"
-echo "  Audit script:      /usr/local/bin/npm-security-audit.sh"
+echo "  Audit script:      $AUDIT_SCRIPT"
 echo "  Audit timer:       /etc/systemd/system/$APP_NAME-audit.timer"
 echo "  Log directory:     /var/log/$APP_NAME/"
 echo
