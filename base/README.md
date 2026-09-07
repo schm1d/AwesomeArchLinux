@@ -113,7 +113,7 @@ policy files are saved once with a `.before-awesome` suffix.
 - ModemManager for NetworkManager mobile-broadband support (D-Bus activated on demand)
 - ClamAV antivirus with scheduled definition updates
 - rkhunter rootkit detection (daily timer)
-- auditd with MITRE ATT&CK-mapped rules
+- auditd with bundled MITRE ATT&CK-mapped rules, checked during boot loading
 - fail2ban with SSH jail
 - journald hardening (persistent, compressed, sealed)
 - Sudoers hardening (I/O logging, env_reset, secure_path)
@@ -300,7 +300,7 @@ After rebooting into your new system:
 1. Verify DNS-over-TLS is working: `resolvectl status`
 2. Check firewall rules: `sudo nft list ruleset`
 3. Verify SSH is listening on the correct port: `ss -tlnp | grep ssh`
-4. Confirm auditd is running: `systemctl status auditd`
+4. Confirm both audit collection and rule loading: `systemctl status auditd audit-rules.service`; inspect `journalctl -b -u audit-rules.service` for omitted optional watches or errors, and `sudo auditctl -s` for `enabled 2` and dropped events (`lost`). The loader requires core account/PAM/package watches, includes optional paths present at each boot, and locks the policy only after every rule loads. Failures leave the unit failed and the policy unlocked for repair. Edit `/usr/local/share/awesomearchlinux/auditd-attack.rules` or add local `.rules` files, then reboot to apply changes to an immutable policy. Audit failures are reported (`-f 1`), rather than panicking the machine on a full backlog.
 5. Run a security audit: `sudo lynis audit system`
 6. Check for vulnerable packages: `arch-audit`
 7. Update ClamAV definitions: `sudo freshclam`

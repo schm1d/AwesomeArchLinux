@@ -52,8 +52,6 @@ esac
 source /usr/local/lib/awesomearchlinux/chroot-security.sh
 
 # --- Other Variables ---
-RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
-LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
 SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
@@ -591,21 +589,8 @@ systemctl enable sysstat
 
 echo -e "${BBlue}Enabling auditd...${NC}"
 pacman -S --noconfirm audit
-
-if ! command -v wget &> /dev/null; then
-    echo "wget could not be found, please install wget and try again."
-    exit 1
-fi
-
-echo "Downloading auditd rules from $RULES_URL..."
-if ! wget -O "$LOCAL_RULES_FILE" "$RULES_URL"; then
-    echo "Failed to download auditd rules."
-    exit 1
-else
-    echo "Auditd rules downloaded successfully."
-fi
-
-systemctl restart auditd || true
+configure_audit_rules
+# Loading audit rules here would change the live installer kernel.
 systemctl enable auditd
 
 ###############################################################################
@@ -1287,6 +1272,7 @@ SYSTEMD_HARDENING_CANDIDATES=(
     sshd.service
     NetworkManager.service
     auditd.service
+    audit-rules.service
     clamav-daemon.service
     fail2ban.service
     chronyd.service

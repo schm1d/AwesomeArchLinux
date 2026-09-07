@@ -5,6 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 import pwd
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -138,6 +139,106 @@ class PasswordPolicyTests(unittest.TestCase):
                 rc = lib.pam_chauthtok(handle, 0)
                 lib.pam_end(handle, rc)
                 self.assertEqual(rc == 0, succeeds, f"PAM returned {rc}: {messages_seen}")
+
+
+class AuditRuleTests(unittest.TestCase):
+    required = ("etc/audit", "etc/pam.d", "etc/pam.d/system-auth", "etc/passwd",
+                "etc/shadow", "etc/group", "etc/gshadow", "etc/sudoers", "usr/bin/sudo",
+                "usr/bin/pacman", "etc/pacman.conf")
+
+    def fixture(self, root):
+        for item in self.required:
+            path = root / item
+            if item in ("etc/audit", "etc/pam.d"):
+                path.mkdir(parents=True, exist_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+        (root / "etc/audit/rules.d").mkdir()
+        template = root / "usr/local/share/awesomearchlinux/auditd-attack.rules"
+        template.parent.mkdir(parents=True)
+        shutil.copy(ROOT / "utils/auditd-attack.rules", template)
+        return template
+
+    def test_render_requires_baseline_and_reports_missing_optional_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = self.fixture(root)
+            # Simulate Arch aliases; identical watches should occur only once.
+            (root / "usr/sbin").symlink_to("bin")
+            with template.open("a") as stream:
+                stream.write("-w /usr/bin/pacman -p x -k alias_test\n")
+                stream.write("-w /usr/sbin/pacman -p x -k alias_test\n")
+            result = call_helper("render_audit_rules", template, root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("path absent): /usr/bin/yay", result.stderr)
+            self.assertNotIn("-w /usr/bin/yay ", result.stdout)
+            self.assertIn("-w /etc/pam.d/system-auth ", result.stdout)
+            self.assertNotIn("subj_type=", result.stdout)
+            self.assertNotIn("msgtype=AVC", result.stdout)
+            self.assertEqual(result.stdout.count("-k alias_test"), 1)
+            (root / "etc/shadow").unlink()
+            result = call_helper("render_audit_rules", template, root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Required audit path is missing: /etc/shadow", result.stderr)
+
+    def run_loader(self, root, extra="", fail=False, immutable=False):
+        # Shell functions intercept ALL audit commands, including status queries.
+        script = '''set -euo pipefail
+source "$1"
+auditctl() {
+    printf '%s\\n' "$*" >> "$MOCK_CALLS"
+    case "$1" in
+        -s) printf 'enabled %s\\n' "$MOCK_ENABLED" ;;
+        -R)
+            if grep -q '^-e ' "$2"; then return 90; fi
+            [[ "$MOCK_FAIL" == 0 ]] ;;
+        -e) [[ "$2" == 2 ]] ;;
+        *) return 91 ;;
+    esac
+}
+augenrules() {
+    printf '%s' "$MOCK_EXTRA" > "$MOCK_ROOT/etc/audit/audit.rules"
+    cat "$MOCK_ROOT/etc/audit/rules.d/auditd-attack.rules" >> "$MOCK_ROOT/etc/audit/audit.rules"
+}
+load_audit_rules "$2"
+'''
+        env = dict(os.environ, MOCK_ROOT=str(root), MOCK_CALLS=str(root / "calls"),
+                   MOCK_EXTRA=extra, MOCK_FAIL=str(int(fail)), MOCK_ENABLED="2" if immutable else "1")
+        result = subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(root)],
+                                text=True, capture_output=True, env=env)
+        return result, (root / "calls").read_text().splitlines()
+
+    def test_load_failure_never_locks_partial_policy(self):
+        for fail, extra, immutable in ((False, "", False), (True, "", False),
+                                       (False, "-i\n", False), (False, "", True)):
+            with self.subTest(fail=fail, extra=extra, immutable=immutable), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.fixture(root)
+                result, calls = self.run_loader(root, extra, fail, immutable)
+                if not (fail or extra or immutable):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(calls[-2].startswith("-R "))
+                    self.assertEqual(calls[-1], "-e 2")
+                    self.assertEqual((root / "etc/audit/audit.rules").stat().st_mode & 0o777, 0o600)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("-e 2", calls)
+                    if extra or immutable:
+                        self.assertFalse(any(call.startswith("-R ") for call in calls))
+
+    @unittest.skipUnless(shutil.which("ausyscall"), "ausyscall unavailable")
+    def test_bundled_syscalls_exist_for_the_selected_x86_abi(self):
+        for line in (ROOT / "utils/auditd-attack.rules").read_text().splitlines():
+            if not line.startswith("-a ") or " -S " not in line:
+                continue
+            words = line.split()
+            arch = "i386" if "arch=b32" in words else "x86_64"
+            for i, word in enumerate(words):
+                if word == "-S":
+                    result = subprocess.run(["ausyscall", arch, words[i + 1], "--exact"],
+                                            text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, f"{line}: {result.stderr}")
 
 
 if __name__ == "__main__":

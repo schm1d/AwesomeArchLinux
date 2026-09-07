@@ -77,3 +77,125 @@ EOF
     chmod 0644 "$work/system-auth"
     mv -f -- "$work/system-auth" "$pam"
 )
+
+render_audit_rules() (
+    set -euo pipefail
+    local template="$1" root="${2:-}" line path resolved field i skip
+    local -a words
+    local -A seen=()
+    # These watches form the required baseline; other paths depend on packages
+    # and runtime files. Re-render at boot so newly installed tools are covered.
+    for path in /etc/audit /etc/pam.d /etc/pam.d/system-auth /etc/passwd \
+        /etc/shadow /etc/group /etc/gshadow /etc/sudoers /usr/bin/sudo \
+        /usr/bin/pacman /etc/pacman.conf; do
+        [[ -e "$root$path" ]] || {
+            echo "Required audit path is missing: $path" >&2
+            return 1
+        }
+    done
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        read -r -a words <<< "$line"
+        [[ ${#words[@]} -gt 0 && ${words[0]} != \#* ]] || continue
+        skip=0
+        for ((i=0; i<${#words[@]}; i++)); do
+            field=""
+            case "${words[i]}" in
+                -w) i=$((i + 1)); path="${words[i]:-}" ;;
+                path=*|dir=*) field="${words[i]%%=*}="; path="${words[i]#*=}" ;;
+                *) continue ;;
+            esac
+            [[ "$path" == /* && "$path" != *[\*\?\[]* ]] || {
+                echo "Invalid audit path: $path" >&2
+                return 1
+            }
+            if [[ ! -e "$root$path" ]]; then
+                echo "Audit watch omitted (path absent): $path" >&2
+                skip=1
+                break
+            fi
+            # Arch's /bin and /sbin aliases can otherwise create duplicate rules.
+            resolved=$(realpath -e -- "$root$path")
+            if [[ -n "$root" && "$resolved" != "$root/"* ]]; then
+                echo "Audit path escapes the target filesystem: $path" >&2
+                return 1
+            fi
+            words[i]="$field${resolved#"$root"}"
+        done
+        (( skip == 0 )) || continue
+        line="${words[*]}"
+        [[ -z "${seen[$line]:-}" ]] || continue
+        seen[$line]=1
+        printf '%s\n' "$line"
+    done < "$template"
+)
+
+audit_rules_without_lock() {
+    # Check the assembled policy too: another .rules file must not reintroduce
+    # ignored errors or lock a partially loaded policy. auditctl validates the
+    # actual rule syntax against the running kernel at boot, never in chroot.
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+            if (locked) bad=1
+            for (i=1; i<=NF; i++) if ($i == "-i" || $i == "-c") bad=1
+            if ($1 == "-e") {
+                if (NF != 2 || $2 != 2) bad=1
+                locked++
+                next
+            }
+            if ($1 !~ /^(-D|-b|-f|-r|-a|-A|-w|--backlog_wait_time|--loginuid-immutable)$/) bad=1
+            print
+        }
+        END {
+            if (bad || locked != 1) {
+                print "Invalid audit controls: require one final -e 2 and no ignored errors." > "/dev/stderr"
+                exit 1
+            }
+        }
+    ' "$1"
+}
+
+load_audit_rules() (
+    set -euo pipefail
+    local root="${1:-}" work status
+    status=$(auditctl -s)
+    if grep -Eq '^enabled[[:space:]]+2$' <<< "$status"; then
+        echo "Audit rules are already immutable; reboot to load policy changes." >&2
+        return 1
+    fi
+    work=$(mktemp -d "$root/etc/audit/.awesome-rules.XXXXXX")
+    trap 'rm -rf -- "$work"' EXIT
+    render_audit_rules "$root/usr/local/share/awesomearchlinux/auditd-attack.rules" "$root" > "$work/managed"
+    audit_rules_without_lock "$work/managed" > /dev/null
+    install -m 0600 "$work/managed" "$root/etc/audit/rules.d/auditd-attack.rules"
+    # Merge local administrator rules using audit's normal ordering semantics.
+    # augenrules queries the kernel even without --load, so this runs at boot.
+    augenrules
+    audit_rules_without_lock "$root/etc/audit/audit.rules" > "$work/load.rules"
+    chmod 0600 "$work/load.rules" "$root/etc/audit/audit.rules"
+    if ! auditctl -R "$work/load.rules"; then
+        echo "Audit rule loading failed; policy remains unlocked for repair. Check audit-rules.service." >&2
+        return 1
+    fi
+    auditctl -e 2
+)
+
+configure_audit_rules() (
+    set -euo pipefail
+    local root="${1:-}"
+    install -d -m 0755 "$root/etc/audit/rules.d" "$root/usr/local/sbin" \
+        "$root/etc/systemd/system/audit-rules.service.d"
+    cat > "$root/usr/local/sbin/awesome-load-audit-rules" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /usr/local/lib/awesomearchlinux/chroot-security.sh
+load_audit_rules
+EOF
+    chmod 0755 "$root/usr/local/sbin/awesome-load-audit-rules"
+    cat > "$root/etc/systemd/system/audit-rules.service.d/10-awesome.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/sbin/awesome-load-audit-rules
+EOF
+    echo "Bundled audit policy staged; audit-rules.service will render, load and lock it at boot."
+)

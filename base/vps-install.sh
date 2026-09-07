@@ -57,7 +57,8 @@ log_action "Boot mode: $BOOT_MODE"
 for installer_component in "$SCRIPT_DIR/vps-chroot.sh" \
     "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh" \
     "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
-    "$SCRIPT_DIR/../utils/aide-config.sh" "$SCRIPT_DIR/lib/chroot-security.sh"; do
+    "$SCRIPT_DIR/../utils/aide-config.sh" "$SCRIPT_DIR/lib/chroot-security.sh" \
+    "$SCRIPT_DIR/../utils/auditd-attack.rules"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
         exit 1
@@ -603,6 +604,7 @@ install -m 0644 "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
 install -m 0755 "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/ssh.sh
 
 install -Dm0644 "$SCRIPT_DIR/lib/chroot-security.sh" /mnt/usr/local/lib/awesomearchlinux/chroot-security.sh
+install -Dm0644 "$SCRIPT_DIR/../utils/auditd-attack.rules" /mnt/usr/local/share/awesomearchlinux/auditd-attack.rules
 
 # Stage reviewed AUR installation and AIDE configuration for root after reboot.
 install -m 0700 "$SCRIPT_DIR/install-aur-packages.sh" /mnt/root/install-aur-packages.sh

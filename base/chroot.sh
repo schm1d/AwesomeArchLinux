@@ -74,8 +74,6 @@ esac
 source /usr/local/lib/awesomearchlinux/chroot-security.sh
 
 # --- Other Variables ---
-RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
-LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
 SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
 SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
@@ -744,22 +742,8 @@ systemctl enable sysstat
 # System auditing tool
 echo -e "${BBlue}Enabling auditd to Collect Audit Information...${NC}"
 pacman -S --noconfirm audit
-
-# Download the auditd rules (prefer curl, fall back to wget)
-echo "Downloading auditd rules from $RULES_URL..."
-if command -v curl &>/dev/null; then
-    curl -fsSL -o "$LOCAL_RULES_FILE" "$RULES_URL"
-elif command -v wget &>/dev/null; then
-    wget -q -O "$LOCAL_RULES_FILE" "$RULES_URL"
-else
-    echo "ERROR: Neither curl nor wget found. Install one to download auditd rules." >&2
-    exit 1
-fi
-echo "Auditd rules downloaded successfully."
-
-# Enable auditd (restart not possible in chroot — rules apply on first boot)
-echo "Auditd rules installed. Will be active on first boot."
-
+configure_audit_rules
+# Loading audit rules here would change the live installer kernel.
 systemctl enable auditd
 
 # Enable and configure necessary services
@@ -1735,6 +1719,7 @@ SYSTEMD_HARDENING_CANDIDATES=(
     sshd.service
     NetworkManager.service
     auditd.service
+    audit-rules.service
     clamav-daemon.service
     fail2ban.service
     chronyd.service

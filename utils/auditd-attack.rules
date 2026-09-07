@@ -1,4 +1,7 @@
 # auditd-attack
+# Bundled template rendered by awesome-load-audit-rules at boot.
+# Missing optional paths are reported and omitted; baseline paths are required.
+# Edit /usr/local/share/awesomearchlinux/auditd-attack.rules, then reboot.
 # A Linux Auditd configuration mapped to MITRE's Attack Framework
 # Thanks to https://github.com/bfuzzy for the awesome audit rule!
 
@@ -18,12 +21,10 @@
 -b 8192
 
 # Failure Mode
-## 0 (silent), 1 (print failure), 2 (panic - halt system); use 2 for high-security setups
--f 2
+## Report failures; high-volume desktop activity must not panic the kernel.
+-f 1
 
-# Ignore errors
-## Ignores errors from missing users/files; validate paths during testing to avoid masking issues
--i
+# Errors stop loading; immutability is applied only after every rule succeeds.
 
 # Self Auditing ---------------------------------------------------------------
 
@@ -46,8 +47,8 @@
 
 ### Early filters because audit is a first-match-wins system
 
-## Ignore SELinux AVC records
--a always,exclude -F msgtype=AVC
+# Keep AVC records, including AppArmor denials when manually enabled.
+# No SELinux-specific subject filters on the Arch baseline.
 
 ## Ignore current working directory records
 -a always,exclude -F msgtype=CWD
@@ -55,19 +56,8 @@
 ## Ignore EOE records (End Of Event, not needed)
 -a always,exclude -F msgtype=EOE
 
-## Filter cron jobs to reduce noise (works with SELinux)
--a never,user -F subj_type=crond_t
--a exit,never -F subj_type=crond_t
-
-## Prevent chrony from overwhelming logs
--a never,exit -F arch=b64 -S adjtimex -F auid=unset -F uid=chrony -F subj_type=chronyd_t
-
 ## Ignore CRYPTO_KEY_USER messages (high volume, low value on public servers)
 -a always,exclude -F msgtype=CRYPTO_KEY_USER
-
-## VMWare tools filter
--a exit,never -F arch=b32 -S fork -F success=0 -F path=/usr/lib/vmware-tools -F subj_type=initrc_t -F exit=-2
--a exit,never -F arch=b64 -S fork -F success=0 -F path=/usr/lib/vmware-tools -F subj_type=initrc_t -F exit=-2
 
 ## High-volume event filters (common on workstations)
 -a exit,never -F arch=b32 -F dir=/dev/shm -k sharedmemaccess
@@ -78,13 +68,13 @@
 # Rules -----------------------------------------------------------------------
 
 ## Kernel Related Events
--w /etc/sysctl.conf -p wa -k sysctl
+-w /etc/sysctl.d/ -p wa -k sysctl
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/insmod -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/modprobe -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/rmmod -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F arch=b64 -S finit_module -S init_module -S delete_module -F auid!=-1 -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F arch=b32 -S finit_module -S init_module -S delete_module -F auid!=-1 -k T1215_Kernel_Modules_and_Extensions
--w /etc/modprobe.conf -p wa -k T1215_Kernel_Modules_and_Extensions
+-w /usr/lib/modprobe.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
 -w /etc/modules-load.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
 -w /etc/modprobe.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
 
@@ -136,52 +126,52 @@
 ## Privileged Command Execution Related Events
 -a exit,always -F arch=b64 -F euid=0 -S execve -k T1078_Valid_Accounts
 -a exit,always -F arch=b32 -F euid=0 -S execve -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/userdel -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/ping -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/umount -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/mount -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/su -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/chgrp -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/bin/ping6 -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/sbin/pam_timestamp_check -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/sbin/unix_chkpwd -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/sbin/pwck -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/suexec -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/newusers -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/groupdel -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/semanage -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/usernetctl -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/ccreds_validate -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/sbin/userhelper -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/Xorg -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/rlogin -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/sudoedit -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/at -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/rsh -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/kgrantpty -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/crontab -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/staprun -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/rcp -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/chfn -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/setfacl -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/chacl -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/chcon -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/newrole -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
--a always,exit -F path=/usr/bin/kpac_dhcp_helper -F perm=x -F auid>=500 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/userdel -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/ping -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/umount -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/mount -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/chgrp -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/bin/ping6 -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/sbin/pam_timestamp_check -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/sbin/unix_chkpwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/sbin/pwck -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/suexec -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/newusers -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/groupdel -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/semanage -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/usernetctl -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/ccreds_validate -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/sbin/userhelper -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/Xorg -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/rlogin -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/sudoedit -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/at -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/rsh -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/kgrantpty -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/crontab -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/staprun -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/rcp -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/chfn -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/setfacl -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/chacl -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/chcon -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/newrole -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
+-a always,exit -F path=/usr/bin/kpac_dhcp_helper -F perm=x -F auid>=1000 -F auid!=4294967295 -k T1078_Valid_Accounts
 
 ## Media Export Related Events
--a always,exit -F arch=b32 -S mount -F auid>=500 -F auid!=4294967295 -k T1052_Exfiltration_Over_Physical_Medium
--a always,exit -F arch=b64 -S mount -F auid>=500 -F auid!=4294967295 -k T1052_Exfiltration_Over_Physical_Medium
+-a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=4294967295 -k T1052_Exfiltration_Over_Physical_Medium
+-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k T1052_Exfiltration_Over_Physical_Medium
 
 ## Session Related Events
--w /var/run/utmp -p wa -k T1108_Redundant_Access
+-w /run/utmp -p wa -k T1108_Redundant_Access
 -w /var/log/wtmp -p wa -k T1108_Redundant_Access
 -w /var/log/btmp -p wa -k T1108_Redundant_Access
 
@@ -196,7 +186,7 @@
 -w /etc/security/pam_env.conf -p wa -k T1071_Standard_Application_Layer_Protocol
 -w /etc/security/namespace.conf -p wa -k T1071_Standard_Application_Layer_Protocol
 -w /etc/security/namespace.init -p wa -k T1071_Standard_Application_Layer_Protocol
--w /etc/pam.d/common-password -p wa -k T1201_Password_Policy_Discovery
+-w /etc/pam.d/system-auth -p wa -k T1201_Password_Policy_Discovery
 
 ## SSH Related Events
 -w /etc/ssh/sshd_config -k T1021_Remote_Services
@@ -212,32 +202,32 @@
 -w /usr/bin/sudo -p x -k T1169_Sudo
 -w /etc/sudoers -p rw -k T1169_Sudo
 -a always,exit -F dir=/home -F uid=0 -F auid>=1000 -F auid!=4294967295 -C auid!=obj_uid -k T1169_Sudo
--a always,exit -F arch=b32 -S chmod -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S chown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fchmod -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fchmodat -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fchown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fchownat -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fremovexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S fsetxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S lchown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S lremovexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S lsetxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S removexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S setxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S chmod -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S chown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fchmod -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fchmodat -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fchown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fchownat -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fremovexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S fsetxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S lchown -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S lremovexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S lsetxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S removexattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S setxattr -F auid>=500 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S chmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S chown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fchmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fchmodat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fchownat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fsetxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S lchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S lremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S lsetxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S removexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S setxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S chmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S chown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fchmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fchmodat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fchownat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fsetxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S lchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S lremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S lsetxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S removexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S setxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k T1166_Setuid_and_Setgid
@@ -309,8 +299,8 @@
 # -w /usr/bin/zypper -p x -k T1072_Third_Party_Software
 # -w /usr/bin/dpkg -p x -k T1072_Third_Party_Software
 # -w /usr/bin/apt-add-repository -p x -k T1072_Third_Party_Software
--w /usr/bin/apt-get -p x -k T1072_Third_Party_Software
--w /usr/bin/aptitude -p x -k T1072_Third_Party_Software
+# -w /usr/bin/apt-get -p x -k T1072_Third_Party_Software
+# -w /usr/bin/aptitude -p x -k T1072_Third_Party_Software
 
 ## Code Injection Related Events
 -a always,exit -F arch=b32 -S ptrace -k T1055_Process_Injection
@@ -326,7 +316,7 @@
 -w /etc/profile.d/ -k T1156_bash_profile_and_bashrc
 -w /etc/profile -k T1156_bash_profile_and_bashrc
 -w /etc/shells -k T1156_bash_profile_and_bashrc
--w /etc/bashrc -k T1156_bash_profile_and_bashrc
+-w /etc/bash.bashrc -k T1156_bash_profile_and_bashrc
 -w /etc/csh.cshrc -k T1156_bash_profile_and_bashrc
 -w /etc/csh.login -k T1156_bash_profile_and_bashrc
 
@@ -342,11 +332,11 @@
 -w /usr/bin/ftp -p x -k T1105_Remote_File_Copy
 
 ## File Deletion by User Related Events
--a always,exit -F arch=b32 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid>=500 -F auid!=4294967295 -k T1107_File_Deletion
--a always,exit -F arch=b64 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid>=500 -F auid!=4294967295 -k T1107_File_Deletion
+-a always,exit -F arch=b32 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k T1107_File_Deletion
+-a always,exit -F arch=b64 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k T1107_File_Deletion
 -a always,exit -F arch=b32 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid=0 -k T1070_Indicator_Removal_on_Host
 -a always,exit -F arch=b64 -S rmdir -S unlink -S unlinkat -S rename -S renameat -F auid=0 -k T1070_Indicator_Removal_on_Host
 
 # Make the configuration immutable --------------------------------------------
-## Uncomment in production to prevent runtime changes (requires reboot to modify)
+## The loader applies this only after successful loading (reboot to modify).
 -e 2
