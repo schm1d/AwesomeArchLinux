@@ -55,7 +55,9 @@ fi
 log_action "Boot mode: $BOOT_MODE"
 
 for installer_component in "$SCRIPT_DIR/vps-chroot.sh" \
-    "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh"; do
+    "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh" \
+    "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
+    "$SCRIPT_DIR/../utils/aide-config.sh"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
         exit 1
@@ -600,38 +602,11 @@ chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 install -m 0644 "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
 install -m 0755 "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/ssh.sh
 
-# Create AUR installation script
-cat > /mnt/root/install-aur-packages.sh <<'AURSCRIPT'
-#!/bin/bash
-set -euo pipefail
-
-BBlue='\033[1;34m'
-NC='\033[0m'
-
-echo -e "${BBlue}Installing yay AUR helper...${NC}"
-YAY_BUILD="/tmp/yay"
-git clone https://aur.archlinux.org/yay.git "$YAY_BUILD"
-cd "$YAY_BUILD"
-makepkg -si --noconfirm
-cd /
-rm -rf "$YAY_BUILD"
-
-echo -e "${BBlue}Installing AUR security packages...${NC}"
-yay -S --noconfirm aide
-yay -S --noconfirm acct
-
-echo -e "${BBlue}Initializing AIDE...${NC}"
-aide --config=/etc/aide.conf --init
-mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
-
-systemctl enable psacct.service
-systemctl start psacct.service
-
-echo -e "${BBlue}AUR packages installed successfully${NC}"
-shred -vzu /root/install-aur-packages.sh
-AURSCRIPT
-
-chmod 700 /mnt/root/install-aur-packages.sh
+# Stage reviewed AUR installation and AIDE configuration for root after reboot.
+install -m 0700 "$SCRIPT_DIR/install-aur-packages.sh" /mnt/root/install-aur-packages.sh
+install -m 0600 "$SCRIPT_DIR/../hardening/lib/aur-review.sh" /mnt/root/aur-review.sh
+install -m 0700 "$SCRIPT_DIR/../utils/aide-config.sh" /mnt/root/aide-config.sh
+# End post-install package staging.
 
 # Create post-installation README
 cat > /mnt/root/POST_INSTALL_README.txt <<EOF
@@ -653,7 +628,7 @@ CRITICAL POST-INSTALLATION STEPS:
 =================================
 
 1. IMMEDIATE ACTIONS:
-   - Run: /root/install-aur-packages.sh
+   - Run as root: sudo /root/install-aur-packages.sh (review each AUR recipe)
    - Configure your SSH authorized_keys
    - Test SSH access before closing current session
 
@@ -722,7 +697,7 @@ echo
 echo -e "${BBlue}Next steps:${NC}"
 echo "1. Reboot: reboot"
 echo "2. Login as root"
-echo "3. Run: /root/install-aur-packages.sh"
+echo "3. Run as root: sudo /root/install-aur-packages.sh (review each AUR recipe)"
 if [[ -n "$SSH_PUBKEY" ]]; then
     echo "4. SSH key already installed — test: ssh -p $SSH_PORT $USERNAME@<server_ip>"
 else

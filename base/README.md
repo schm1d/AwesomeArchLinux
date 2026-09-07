@@ -15,6 +15,16 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 | `vps-harden.sh` | VPS live hardening — filesystem mounts on a running system |
 | `recovery-mount.sh` | Recovery tool — unmount/remount encrypted installations |
 | `secureBoot.sh` | UEFI Secure Boot key generation and enrollment |
+| `install-aur-packages.sh` | Staged post-install security packages and AIDE setup |
+
+Both installers stage `install-aur-packages.sh`, `aur-review.sh`, and
+`aide-config.sh` under `/root`. After reboot, run
+`sudo /root/install-aur-packages.sh` in a terminal. AUR recipes require review
+before a disposable unprivileged account builds them; root installs the
+resulting packages and configures services. Builds use `/var/cache` with a
+private temporary directory so `/tmp` can remain `noexec`, and receive compiler
+group access when that restriction is enabled. Existing AIDE baselines are
+preserved on reruns.
 
 ---
 

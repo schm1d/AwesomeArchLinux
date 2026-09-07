@@ -675,8 +675,8 @@ Use `--skip-var` if no rescue environment is available.
 
 Download the scripts on another machine and copy them to a removable media.
 
-1. Copy `archinstall.sh` + `chroot.sh` + `bootloader.sh` (or `vps-install.sh` + `vps-chroot.sh`) to the same directory on the live system.
-2. Make them executable: `chmod +x *.sh`
+1. Copy the full repository to the live system, preserving `base/`, `hardening/`, and `utils/`; the installers stage shared helpers from these directories.
+2. Enter `base/` and make the scripts executable: `chmod +x *.sh`
 3. Run the installer: `./archinstall.sh` or `./vps-install.sh`
 
 ---
@@ -685,10 +685,14 @@ Download the scripts on another machine and copy them to a removable media.
 
 After rebooting:
 
-1. **Run AUR packages script** (as the created user):
+1. **Run the security packages script as root** (from a terminal):
    ```bash
-   /root/install-aur-packages.sh
+   sudo /root/install-aur-packages.sh
    ```
+   Packages available in signed repositories are installed with pacman. Each
+   AUR recipe requires review and confirmation of its exact commit; builds run
+   as a disposable unprivileged user with compiler access. The script sets up
+   process accounting and AIDE, preserving an existing AIDE baseline on reruns.
 
 2. **Enable security services**:
    ```bash

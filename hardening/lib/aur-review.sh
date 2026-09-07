@@ -135,7 +135,7 @@ aal_aur_install_reviewed() (
     local review_fd="" selected_package="" package_sha256="" installed_version=""
     local package_file resolved_file built_name
     local build_user_created=false
-    local -a package_files=() selected_packages=()
+    local -a package_files=() selected_packages=() build_groups=()
 
     [[ $# -ge 1 && $# -le 2 ]] || {
         _aal_aur_error "Usage: aal_aur_install_reviewed PACKAGE [PACKAGE_BASE]"
@@ -158,12 +158,21 @@ aal_aur_install_reviewed() (
         return 0
     fi
 
-    for command in git makepkg pacman runuser useradd userdel pkill sha256sum; do
+    for command in git makepkg pacman runuser useradd userdel pkill sha256sum getent findmnt; do
         command -v "$command" &>/dev/null || {
             _aal_aur_error "Required command is unavailable: $command"
             return 1
         }
     done
+
+    # The base installer mounts /tmp (and potentially /var/tmp) noexec.
+    # Build tools need to execute configure probes and test binaries.
+    local build_mount_options
+    build_mount_options=$(findmnt -n -o OPTIONS -T /var/cache) || return 1
+    if [[ ",$build_mount_options," == *,noexec,* ]]; then
+        _aal_aur_error "AUR builds require an executable filesystem at /var/cache."
+        return 1
+    fi
 
     case ":${AAL_AUR_RESOLUTION_STACK:-}:" in
         *":$package:"*)
@@ -185,7 +194,7 @@ aal_aur_install_reviewed() (
         fi
         if [[ -n "$tmpdir" ]]; then
             case "$tmpdir" in
-                /var/tmp/awesome-aur-review.*) rm -rf -- "$tmpdir" ;;
+                /var/cache/awesome-aur-review.*) rm -rf -- "$tmpdir" ;;
                 *) _aal_aur_error "Refusing to clean unexpected temporary path: $tmpdir" ;;
             esac
         fi
@@ -193,7 +202,7 @@ aal_aur_install_reviewed() (
     trap cleanup EXIT
     trap 'exit 130' HUP INT TERM
 
-    tmpdir=$(mktemp -d /var/tmp/awesome-aur-review.XXXXXX)
+    tmpdir=$(mktemp -d /var/cache/awesome-aur-review.XXXXXX)
     builddir="$tmpdir/$pkgbase"
     _aal_aur_info "Fetching $pkgbase from the AUR without executing its recipe."
     git clone --quiet -- "https://aur.archlinux.org/${pkgbase}.git" "$builddir"
@@ -234,20 +243,23 @@ aal_aur_install_reviewed() (
     _aal_aur_install_dependencies "$builddir" "$package"
 
     build_user="_aalbuild_${BASHPID}"
-    useradd -r -M -d /var/empty -s /usr/bin/nologin "$build_user"
+    if getent group compilers >/dev/null; then
+        build_groups=(-G compilers)
+    fi
+    useradd -r -U -M -d /var/empty -s /usr/bin/nologin "${build_groups[@]}" "$build_user"
     build_user_created=true
     chown root:"$build_user" "$tmpdir"
     chmod 0710 "$tmpdir"
-    install -d -o "$build_user" -g "$build_user" -m 0700 "$builddir/.home"
+    install -d -o "$build_user" -g "$build_user" -m 0700 "$builddir/.home" "$builddir/.tmp"
     chown -R "$build_user":"$build_user" "$builddir"
 
     _aal_aur_info "Building reviewed commit $commit as disposable user $build_user."
     (
         cd "$builddir"
-        runuser -u "$build_user" -- env HOME="$builddir/.home" \
+        runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" \
             makepkg --cleanbuild --noconfirm
         mapfile -t package_files < <(
-            runuser -u "$build_user" -- env HOME="$builddir/.home" makepkg --packagelist
+            runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" makepkg --packagelist
         )
         (( ${#package_files[@]} > 0 )) || {
             _aal_aur_error "makepkg produced no package paths."

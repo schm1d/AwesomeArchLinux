@@ -9,6 +9,129 @@ import unittest
 from test_high_severity import ROOT, shell_function
 
 
+class AurSetupTests(unittest.TestCase):
+    def stage(self, root, installer):
+        source = (ROOT / installer).read_text()
+        section = source.split('# Stage reviewed AUR installation', 1)[1].split(
+            '# End post-install package staging.', 1)[0]
+        section = section[section.index('\n') + 1:].replace('/mnt/root', str(root))
+        subprocess.run(["bash", "-c", 'set -euo pipefail\n' + section], check=True,
+                       capture_output=True, env=dict(os.environ, SCRIPT_DIR=str(ROOT / "base")))
+
+    def test_both_installers_stage_complete_root_only_bundle(self):
+        for installer in ("base/archinstall.sh", "base/vps-install.sh"):
+            with self.subTest(installer=installer), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.stage(root, installer)
+                for name, original, mode in (
+                    ("install-aur-packages.sh", "base/install-aur-packages.sh", 0o700),
+                    ("aur-review.sh", "hardening/lib/aur-review.sh", 0o600),
+                    ("aide-config.sh", "utils/aide-config.sh", 0o700),
+                ):
+                    self.assertEqual((root / name).read_bytes(), (ROOT / original).read_bytes())
+                    self.assertEqual((root / name).stat().st_mode & 0o777, mode)
+
+    def test_review_failure_stops_setup_and_rerun_preserves_aide_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.stage(root, "base/archinstall.sh")
+            entry = root / "install-aur-packages.sh"
+            entry.write_text(entry.read_text().replace("/var/lib/aide", str(root)))
+            (root / "aur-review.sh").write_text(r'''aal_aur_install_reviewed() {
+    echo "REVIEW $1" >> "$EVENTS"
+    [[ "$REJECT_REVIEW" != true ]] || return 1
+    touch "$FIXTURE/$1.installed"
+}
+''')
+            (root / "aide-config.sh").write_text('''echo "AIDE $*" >> "$EVENTS"
+printf 'reference baseline' > "$FIXTURE/aide.db"
+''')
+            script = r'''set -euo pipefail
+id() { echo 0; }
+pacman() {
+    echo "pacman $*" >> "$EVENTS"
+    case "$1" in
+        -Qq) [[ -f "$FIXTURE/$2.installed" ]] ;;
+        -Si) [[ "$2" == acct ]] ;;
+        -S) if [[ "${!#}" == acct ]]; then touch "$FIXTURE/acct.installed"; fi ;;
+        *) exit 99 ;;
+    esac
+}
+systemctl() { echo "systemctl $*" >> "$EVENTS"; }
+makepkg() { echo UNEXPECTED_ROOT_BUILD >&2; exit 99; }
+source "$1"
+'''
+            for reject in (True, False, False):
+                (root / "events").write_text("")
+                result = subprocess.run(["bash", "-c", script, "test", str(entry)],
+                                        text=True, capture_output=True,
+                                        env=dict(os.environ, FIXTURE=str(root),
+                                                 EVENTS=str(root / "events"),
+                                                 REJECT_REVIEW=str(reject).lower()))
+                events = (root / "events").read_text()
+                if reject:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("systemctl", events)
+                    self.assertNotIn("AIDE", events)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("systemctl enable --now psacct.service", events)
+                    self.assertEqual((root / "aide.db").read_text(), "reference baseline")
+            self.assertNotIn("REVIEW", events)
+            self.assertNotIn("AIDE", events)
+            self.assertIn("Existing AIDE baseline preserved", result.stdout)
+
+    def test_builds_delegate_to_disposable_user_with_compiler_access(self):
+        source = (ROOT / "hardening/lib/aur-review.sh").read_text()
+        start = source.index('    build_user="_aalbuild_')
+        section = source[start:source.index('    # Terminate any recipe-spawned', start)]
+        for restricted in (False, True):
+            with self.subTest(restricted=restricted), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "bin").mkdir()
+                build = root / "cache" / "example"
+                build.mkdir(parents=True)
+                makepkg = root / "bin" / "makepkg"
+                makepkg.write_text('''#!/bin/bash
+set -euo pipefail
+[[ "$BUILD_AS" == _aalbuild_* ]]
+[[ "$HOME" == "$PWD/.home" && "$TMPDIR" == "$PWD/.tmp" ]]
+[[ -d "$HOME" && -d "$TMPDIR" ]]
+printf 'makepkg %s %s\\n' "$BUILD_AS" "$*" >> "$EVENTS"
+if [[ "$1" == --packagelist ]]; then echo "$PWD/example.pkg.tar.zst"; fi
+''')
+                makepkg.chmod(0o755)
+                script = r'''set -euo pipefail
+tmpdir="$FIXTURE/cache"; builddir="$tmpdir/example"; commit=test
+build_groups=(); package_files=()
+getent() { [[ "$RESTRICTED" == true ]]; }
+useradd() { echo "useradd $*" >> "$EVENTS"; }
+chown() { :; }
+install() { mkdir -p "$builddir/.home" "$builddir/.tmp"; }
+_aal_aur_info() { :; }
+_aal_aur_error() { echo "$*" >&2; }
+runuser() {
+    [[ "$1" == -u && "$2" == _aalbuild_* && "$3" == -- ]]
+    export BUILD_AS="$2"
+    shift 3
+    [[ "$1" == env && "$4" == makepkg ]]
+    # /tmp itself may be noexec on the test host. Interpret the mock explicitly
+    # instead of allowing PATH lookup to skip it and reach the real makepkg.
+    env "$2" "$3" bash "$FIXTURE/bin/makepkg" "${@:5}"
+}
+''' + section
+                result = subprocess.run(["bash", "-c", script], text=True, capture_output=True,
+                                        env=dict(os.environ, FIXTURE=str(root), EVENTS=str(root / "events"),
+                                                 RESTRICTED=str(restricted).lower()))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                events = (root / "events").read_text()
+                self.assertEqual("-G compilers" in events, restricted)
+                self.assertIn("--cleanbuild --noconfirm", events)
+                self.assertIn("--packagelist", events)
+                self.assertEqual((root / "cache" / "package-paths").read_bytes(),
+                                 str(build / "example.pkg.tar.zst").encode() + b"\0")
+
+
 class FscryptTests(unittest.TestCase):
     def run_fixture(self, root, failure="", shared=False, action="encrypt", active=False):
         home = root / "homes" / "alice"
