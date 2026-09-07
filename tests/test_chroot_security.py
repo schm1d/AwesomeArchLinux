@@ -2,6 +2,7 @@
 
 import ctypes
 import ctypes.util
+import json
 import os
 from pathlib import Path
 import pwd
@@ -139,6 +140,77 @@ class PasswordPolicyTests(unittest.TestCase):
                 rc = lib.pam_chauthtok(handle, 0)
                 lib.pam_end(handle, rc)
                 self.assertEqual(rc == 0, succeeds, f"PAM returned {rc}: {messages_seen}")
+
+
+class VulnerabilityCheckTests(unittest.TestCase):
+    def run_scan(self, root, output="", status=0):
+        script = '''set -euo pipefail
+source "$1"
+arch-audit() {
+    printf '%s' "$MOCK_FINDINGS"
+    if [[ "$MOCK_STATUS" != 0 ]]; then echo 'simulated fetch failure' >&2; fi
+    return "$MOCK_STATUS"
+}
+run_vulnerability_check "$2"
+'''
+        env = dict(os.environ, MOCK_FINDINGS=output, MOCK_STATUS=str(status))
+        return subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(root)],
+                              text=True, capture_output=True, env=env)
+
+    def test_findings_fail_and_fetch_failure_preserves_the_last_completed_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "var/log").mkdir(parents=True)
+            report = root / "var/log/arch-audit.log"
+            findings = "example | severity: High | CVEs: CVE-2099-0001 | fixed: None\n"
+            result = self.run_scan(root, findings)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(report.read_text(), findings)
+            self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+            result = self.run_scan(root, "incomplete scan", 42)
+            self.assertEqual(result.returncode, 42)
+            self.assertIn("scan failed", result.stderr)
+            self.assertEqual(report.read_text(), findings)
+            result = self.run_scan(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(report.read_text(), "")
+            self.assertIn("no known vulnerable packages", result.stdout)
+            self.assertEqual(list((root / "var/log").glob(".arch-audit.*")), [])
+
+    def test_unwritable_report_is_not_reported_as_a_clean_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_scan(Path(tmp))  # absent /var/log: mktemp must fail
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("no known vulnerable packages", result.stdout)
+
+    @unittest.skipUnless(shutil.which("arch-audit"), "arch-audit unavailable")
+    def test_real_arch_audit_with_offline_advisories_and_an_isolated_package_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "var/log").mkdir(parents=True)
+            local = root / "db/local"
+            local.mkdir(parents=True)
+            (local / "ALPM_DB_VERSION").write_text("9\n")
+            package = local / "testpkg-1.0-1"
+            package.mkdir()
+            (package / "desc").write_text("%NAME%\ntestpkg\n\n%VERSION%\n1.0-1\n\n%ARCH%\nx86_64\n\n")
+            advisory = {"name": "ASA-209901-1", "packages": ["testpkg"], "status": "Vulnerable",
+                        "severity": "High", "type": "arbitrary code execution", "affected": "1.0-1",
+                        "fixed": None, "issues": ["CVE-2099-0001"]}
+            for data, expected in (([], 0), ([advisory], 1)):
+                (root / "advisories.json").write_text(json.dumps(data))
+                script = '''set -euo pipefail
+source "$1"
+export SCAN_ROOT="$2"
+arch-audit() { command arch-audit --dbpath "$SCAN_ROOT/db" --source "$SCAN_ROOT/advisories.json" "$@"; }
+run_vulnerability_check "$2"
+'''
+                result = subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(root)],
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if data:
+                    self.assertIn("testpkg", result.stdout)
+                    self.assertIn("CVE-2099-0001", (root / "var/log/arch-audit.log").read_text())
 
 
 class AuditRuleTests(unittest.TestCase):

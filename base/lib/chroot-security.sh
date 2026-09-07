@@ -199,3 +199,80 @@ ExecStart=/usr/local/sbin/awesome-load-audit-rules
 EOF
     echo "Bundled audit policy staged; audit-rules.service will render, load and lock it at boot."
 )
+
+run_vulnerability_check() (
+    set -euo pipefail
+    umask 077
+    local root="${1:-}" report work rc
+    report="$root/var/log/arch-audit.log"
+    work=$(mktemp "$root/var/log/.arch-audit.XXXXXX")
+    trap 'rm -f -- "$work"' EXIT
+    # arch-audit can exit successfully with findings. An explicit format gives
+    # one nonempty line per vulnerable package, including unfixed advisories.
+    if arch-audit --color never --format '%n | severity: %s | CVEs: %c | fixed: %v' > "$work"; then
+        rc=0
+    else
+        rc=$?
+        echo "Vulnerability scan failed (exit $rc); previous report retained at $report. See journalctl -u arch-audit.service." >&2
+        return "$rc"
+    fi
+    if [[ -s "$work" ]]; then
+        cat "$work"
+        rc=1
+    fi
+    # Only publish complete scans; a failed fetch must not erase old findings.
+    mv -f -- "$work" "$report"
+    if (( rc != 0 )); then
+        echo "Vulnerable packages found. Review $report, apply available updates with pacman -Syu, and rerun arch-audit; unfixed advisories need manual review." >&2
+    else
+        echo "Vulnerability scan completed: no known vulnerable packages reported."
+    fi
+    return "$rc"
+)
+
+configure_vulnerability_check() (
+    set -euo pipefail
+    local root="${1:-}"
+    install -d -m 0755 "$root/usr/local/bin" "$root/etc/systemd/system"
+    cat > "$root/usr/local/bin/arch-audit-check" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /usr/local/lib/awesomearchlinux/chroot-security.sh
+run_vulnerability_check
+EOF
+    chmod 0755 "$root/usr/local/bin/arch-audit-check"
+    cat > "$root/etc/systemd/system/arch-audit.service" <<'EOF'
+[Unit]
+Description=Check installed Arch packages for known vulnerabilities
+Wants=network-online.target
+After=network-online.target
+OnFailure=arch-audit-alert.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arch-audit-check
+TimeoutStartSec=5min
+UMask=0077
+EOF
+    cat > "$root/etc/systemd/system/arch-audit-alert.service" <<'EOF'
+[Unit]
+Description=Notify logged-in users that the vulnerability scan needs attention
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/wall --nobanner "Arch vulnerability scan needs attention. Check systemctl status arch-audit.service and journalctl -u arch-audit.service; the last completed report is /var/log/arch-audit.log."
+EOF
+    cat > "$root/etc/systemd/system/arch-audit.timer" <<'EOF'
+[Unit]
+Description=Run arch-audit after boot and daily
+
+[Timer]
+OnBootSec=15min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+)

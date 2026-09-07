@@ -722,38 +722,9 @@ rm -f /tmp/sudoers.new
 # ARCH-AUDIT
 ###############################################################################
 
-echo -e "${BBlue}Installing arch-audit for vulnerability scanning...${NC}"
-pacman -S --noconfirm arch-audit
-
-cat <<EOF > /usr/local/bin/arch-audit-check
-#!/bin/bash
-arch-audit | tee /var/log/arch-audit.log
-EOF
-chmod +x /usr/local/bin/arch-audit-check
-
-cat <<EOF > /etc/systemd/system/arch-audit.service
-[Unit]
-Description=Arch Audit Service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/arch-audit-check
-EOF
-
-cat <<EOF > /etc/systemd/system/arch-audit.timer
-[Unit]
-Description=Run arch-audit daily
-
-[Timer]
-OnCalendar=daily
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
+# arch-audit was installed above; enable the scheduled check for first boot.
+configure_vulnerability_check
 systemctl enable arch-audit.timer
-systemctl start arch-audit.timer
 
 ###############################################################################
 # USER CREATION
@@ -1277,6 +1248,8 @@ SYSTEMD_HARDENING_CANDIDATES=(
     fail2ban.service
     chronyd.service
     arch-audit.service
+    arch-audit-alert.service
+    arch-audit.timer
     rkhunter-check.service
     pacman-autoupdate.service
 )

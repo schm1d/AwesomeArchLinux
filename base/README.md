@@ -302,7 +302,7 @@ After rebooting into your new system:
 3. Verify SSH is listening on the correct port: `ss -tlnp | grep ssh`
 4. Confirm both audit collection and rule loading: `systemctl status auditd audit-rules.service`; inspect `journalctl -b -u audit-rules.service` for omitted optional watches or errors, and `sudo auditctl -s` for `enabled 2` and dropped events (`lost`). The loader requires core account/PAM/package watches, includes optional paths present at each boot, and locks the policy only after every rule loads. Failures leave the unit failed and the policy unlocked for repair. Edit `/usr/local/share/awesomearchlinux/auditd-attack.rules` or add local `.rules` files, then reboot to apply changes to an immutable policy. Audit failures are reported (`-f 1`), rather than panicking the machine on a full backlog.
 5. Run a security audit: `sudo lynis audit system`
-6. Check for vulnerable packages: `arch-audit`
+6. Check for vulnerable packages: `sudo systemctl start arch-audit.service`, then inspect `systemctl status arch-audit.service` and `/var/log/arch-audit.log`. The timer runs after boot and daily. Findings and scan failures mark the service failed and notify logged-in terminals; fetch failures retain the last completed report. Review unfixed advisories as well as available upgrades. These local notifications do not provide off-host monitoring.
 7. Update ClamAV definitions: `sudo freshclam`
 8. Review fail2ban status: `sudo fail2ban-client status sshd`
 9. Verify AppArmor profiles: `sudo aa-status`

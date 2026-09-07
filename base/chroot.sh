@@ -868,40 +868,9 @@ else
 fi
 rm -f /tmp/sudoers.new
 
-# arch-audit was already installed above with pax-utils — just set up the scheduled scan
-# Create a script to run arch-audit and log results
-cat <<EOF > /usr/local/bin/arch-audit-check
-#!/bin/bash
-arch-audit | tee /var/log/arch-audit.log
-EOF
-chmod +x /usr/local/bin/arch-audit-check
-
-# Create a systemd service for arch-audit
-cat <<EOF > /etc/systemd/system/arch-audit.service
-[Unit]
-Description=Arch Audit Service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/arch-audit-check
-EOF
-
-# Create a systemd timer to run daily
-cat <<EOF > /etc/systemd/system/arch-audit.timer
-[Unit]
-Description=Run arch-audit daily
-
-[Timer]
-OnCalendar=daily
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-# Enable and start the timer
+# arch-audit was installed above; enable the scheduled check for first boot.
+configure_vulnerability_check
 systemctl enable arch-audit.timer
-systemctl start arch-audit.timer
 
 # --- IMPORTANT: User creation MUST come before home directory configuration ---
 # Add the user
@@ -1726,6 +1695,8 @@ SYSTEMD_HARDENING_CANDIDATES=(
     usbguard.service
     bluetooth.service
     arch-audit.service
+    arch-audit-alert.service
+    arch-audit.timer
     rkhunter-check.service
     pacman-autoupdate.service
 )
