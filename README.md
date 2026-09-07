@@ -786,6 +786,7 @@ sudo ./hardening/crowdsec/crowdsec.sh --with-nginx --with-nftables    # CrowdSec
 sudo ./hardening/firehol/firehol.sh -l 1 --allow-ssh 22  # FireHOL alternative with IP blocklists
 
 # --- Utilities ---
+sudo pacman -Syu borg                         # Install Borg during planned package maintenance
 sudo ./utils/backup.sh --init                  # Initialize encrypted backups
 sudo ./utils/backup.sh --backup --prune        # Run backup with retention
 sudo ./utils/aide-config.sh --init             # Initialize AIDE file integrity DB
@@ -809,6 +810,7 @@ sudo ./utils/vaapi.sh                          # Hardware video decode stack
 - **DNS providers** &mdash; Edit `/etc/systemd/resolved.conf.d/dns-over-tls.conf` to change upstream DoT resolvers (the default is Cloudflare primary, Quad9 fallback). If you have installed Stubby manually as an opt-in, edit `/etc/stubby/stubby.yml` instead.
 - **CSP headers** &mdash; Customize `Content-Security-Policy` in nginx configs for your application needs.
 - **Backup paths** &mdash; Edit `backup.sh` include/exclude lists for your environment.
+- **Backup maintenance** &mdash; Install Borg separately before `backup.sh --init`. Only `--init` configures the timer and log rotation; routine backup, prune, list, and restore operations never install packages or upgrade the system.
 - **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/prometheus/node-exporter/`.
 
 ### Security References and Methodology

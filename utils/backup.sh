@@ -17,11 +17,11 @@
 #                                [--prune] [--list] [--restore ARCHIVE] [-h]
 #
 # Requirements:
-#   - Arch Linux with pacman
+#   - BorgBackup installed during separate package maintenance
 #   - Root privileges
 #
 # What this script does:
-#   1. Installs BorgBackup
+#   1. Verifies BorgBackup is installed (never runs package upgrades)
 #   2. Initializes an encrypted borg repository
 #   3. Creates compressed, deduplicated backups of system directories
 #   4. Prunes old archives with configurable retention
@@ -72,7 +72,7 @@ Options:
   -M KEEP_MONTHLY     Monthly archives to keep (default: $KEEP_MONTHLY)
 
 Modes (at least one required):
-  --init              Initialize a new borg repository
+  --init              Initialize a repository and configure its backup timer
   --backup            Create a new backup archive
   --prune             Prune old archives per retention policy
   --list              List all archives in the repository
@@ -82,6 +82,7 @@ Other:
   -h, --help          Show this help
 
 Examples:
+  sudo pacman -Syu borg                 # Separate package maintenance, before setup
   sudo $0 --init
   sudo $0 --backup --prune
   sudo $0 --list
@@ -125,11 +126,13 @@ info "Passphrase file: $PASSPHRASE_FILE"
 info "Log: $LOGFILE"
 
 # =============================================================================
-# 1. INSTALL BORGBACKUP
+# 1. CHECK BORGBACKUP
 # =============================================================================
 
-msg "Ensuring BorgBackup is installed..."
-pacman -Syu --noconfirm --needed borg
+# This script is also the timer's entry point. Package installation and system
+# upgrades must remain an explicit maintenance action, never a backup step.
+command -v borg >/dev/null 2>&1 || \
+    err "BorgBackup is not installed. Install it separately (sudo pacman -Syu borg), then retry."
 
 BORG_VER=$(borg --version)
 info "BorgBackup version: $BORG_VER"
@@ -320,6 +323,13 @@ fi
 # =============================================================================
 # 7. SYSTEMD TIMER FOR DAILY BACKUPS
 # =============================================================================
+
+# Only explicit setup may change scheduling or service configuration. Routine
+# backups, pruning, listing and restores must also work without systemd running.
+if [[ "$DO_INIT" != true ]]; then
+    msg "Requested Borg operation(s) completed."
+    exit 0
+fi
 
 msg "Setting up systemd timer for daily backups..."
 

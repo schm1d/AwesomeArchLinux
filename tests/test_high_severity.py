@@ -177,5 +177,81 @@ curl() {
                 self.assertNotIn("root", result.stderr)
 
 
+class BackupTests(unittest.TestCase):
+    def run_backup(self, tmp, args, missing_borg=False):
+        tmp = Path(tmp)
+        source = (ROOT / "utils/backup.sh").read_text()
+        # Confine every writable system path to a fixture, including paths that
+        # would be reached if routine operations accidentally ran setup again.
+        for before, after in {
+            "/var/log/borg-backup.log": str(tmp / "backup.log"),
+            "/etc/systemd/system": str(tmp / "units"),
+            "/etc/logrotate.d": str(tmp / "logrotate"),
+            "/root/.borg-key-backup": str(tmp / "key-backup"),
+            "/tmp/borg-restore": str(tmp / "restore"),
+        }.items():
+            source = source.replace(before, after)
+        script = tmp / "backup.sh"
+        script.write_text(source)
+        (tmp / "passphrase").write_text("test-only-passphrase")
+        (tmp / "units").mkdir()
+        (tmp / "logrotate").mkdir()
+        wrapper = r'''
+id() { echo 0; }
+chown() { :; }
+pacman() { echo 'UNEXPECTED PACKAGE OPERATION' >> "$TEST_DIR/events"; return 99; }
+systemctl() { echo "systemctl $*" >> "$TEST_DIR/events"; }
+borg() {
+    echo "borg $*" >> "$TEST_DIR/events"
+    if [[ "$1" == --version ]]; then echo 'borg 1.4'; fi
+    if [[ "$1" == key && "$2" == export ]]; then echo 'test key' > "$4"; fi
+    return 0
+}
+command() {
+    if [[ "$MISSING_BORG" == true && "$1" == -v && "$2" == borg ]]; then return 1; fi
+    builtin command "$@"
+}
+source "$1" "${@:2}"
+'''
+        result = subprocess.run(["bash", "-c", wrapper, "test", str(script),
+                                 "-r", str(tmp / "repo"), "-p", str(tmp / "passphrase"), *args],
+                                env=dict(os.environ, TEST_DIR=str(tmp),
+                                         MISSING_BORG=str(missing_borg).lower()),
+                                text=True, capture_output=True)
+        events = (tmp / "events").read_text() if (tmp / "events").exists() else ""
+        return result, events
+
+    def test_routine_operations_never_run_package_or_service_setup(self):
+        modes = [(["--backup", "--prune"], "borg create"),
+                 (["--prune"], "borg prune"), (["--list"], "borg list"),
+                 (["--restore", "snapshot"], "borg extract")]
+        for args, expected in modes:
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as tmp:
+                result, events = self.run_backup(tmp, args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, events)
+                self.assertNotIn("PACKAGE OPERATION", events)
+                self.assertNotIn("systemctl", events)
+                self.assertEqual(list((Path(tmp) / "units").iterdir()), [])
+                self.assertEqual(list((Path(tmp) / "logrotate").iterdir()), [])
+
+    def test_missing_borg_fails_without_installing_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events = self.run_backup(tmp, ["--backup"], missing_borg=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BorgBackup is not installed", result.stdout + result.stderr)
+            self.assertEqual(events, "")
+
+    def test_explicit_init_still_configures_the_backup_timer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, events = self.run_backup(tmp, ["--init"])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("borg init", events)
+            self.assertIn("systemctl enable borg-backup.timer", events)
+            self.assertNotIn("PACKAGE OPERATION", events)
+            self.assertTrue((Path(tmp) / "units/borg-backup.service").exists())
+            self.assertTrue((Path(tmp) / "logrotate/borg-backup").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
