@@ -98,6 +98,19 @@ ask_yes_no() {
     done
 }
 
+wipe_disk() {
+    local disk="$1" source="$2" size_bytes
+    size_bytes=$(blockdev --getsize64 "$disk") || return 1
+    if [[ ! "$size_bytes" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Cannot wipe $disk: invalid device size '$size_bytes'." >&2
+        return 1
+    fi
+    # Stop at the exact device boundary, including a partial final MiB.
+    # Unbounded dd exits with ENOSPC on a successful full-device overwrite.
+    dd if="$source" of="$disk" bs=1M count="${size_bytes}B" \
+        iflag=fullblock status=progress conv=fsync
+}
+
 recommended_tmp_size_gb() {
     local disk="$1"
     local disk_size_bytes
@@ -690,10 +703,10 @@ PARTITION3="${DISK}${PART_SUFFIX}3"
 if [[ $(ask_yes_no "Securely wipe disk before encryption?") == "y" ]]; then
     if [[ $(ask_yes_no "Use fast wipe (less secure)?") == "y" ]]; then
         echo -e "${BBlue}Fast wiping disk...${NC}"
-        dd if=/dev/zero of="$DISK" bs=1M status=progress conv=fsync
+        wipe_disk "$DISK" /dev/zero
     else
         echo -e "${BBlue}Secure wiping disk (this will take time)...${NC}"
-        dd if=/dev/urandom of="$DISK" bs=1M status=progress conv=fsync
+        wipe_disk "$DISK" /dev/urandom
     fi
 fi
 
