@@ -26,6 +26,12 @@ private temporary directory so `/tmp` can remain `noexec`, and receive compiler
 group access when that restriction is enabled. Existing AIDE baselines are
 preserved on reruns.
 
+Both chroot scripts configure password quality before asking for the initial
+user and root passwords. A required quality check precedes the password writers;
+local `pam_unix` uses the checked token. Existing Arch authentication control
+flow is retained, with lockout thresholds in `faillock.conf`. Original PAM and
+policy files are saved once with a `.before-awesome` suffix.
+
 ---
 
 ## Bare-Metal Installation

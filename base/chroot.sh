@@ -70,6 +70,9 @@ case "$SYSCTL_DISABLE_IPV6" in
         ;;
 esac
 
+# shellcheck source=lib/chroot-security.sh
+source /usr/local/lib/awesomearchlinux/chroot-security.sh
+
 # --- Other Variables ---
 RULES_URL='https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/refs/heads/main/utils/auditd-attack.rules'
 LOCAL_RULES_FILE="/etc/audit/rules.d/auditd-attack.rules"
@@ -960,6 +963,10 @@ echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/"$USERNAME"/.nanorc # T
 chmod 600 /home/"$USERNAME"/.nanorc
 
 # Set password for user (with loop for incorrect input)
+echo -e "${BBlue}Configuring password policy before setting passwords...${NC}"
+pacman -S --needed --noconfirm pambase pam libpwquality
+configure_password_policy
+
 set +e # Disable 'exit on error' temporarily
 while true; do
     echo -e "${BBlue}Setting password for user $USERNAME...${NC}"
@@ -1500,47 +1507,8 @@ chmod 0644 /etc/login.defs
 
 sleep 1
 
-# Remove deprecated PAM modules
-echo -e "${BBlue}Removing deprecated pam_tally2.so references...${NC}"
-sed -i '/pam_tally2.so/d' /etc/pam.d/system-auth
-rm -f /etc/pam.d/common-auth
+# Password policy is configured before the initial passwd calls above.
 
-# Install necessary PAM modules
-echo -e "${BBlue}Installing necessary PAM modules...${NC}"
-pacman -S --noconfirm pambase pam libpwquality
-
-# Configure account lockout with pam_faillock
-echo -e "${BBlue}Configuring account lockout policy with pam_faillock...${NC}"
-
-# Backup the original system-auth file
-cp /etc/pam.d/system-auth /etc/pam.d/system-auth.bak
-
-# Insert pam_faillock.so lines with escaped square brackets
-sed -i '/^auth.*required.*pam_unix\.so/i auth required pam_faillock.so preauth silent deny=5 unlock_time=900' /etc/pam.d/system-auth
-sed -i '/^auth.*include.*system-auth/i auth \[default=die\] pam_faillock.so authfail deny=5 unlock_time=900' /etc/pam.d/system-auth
-
-# Add account required pam_faillock.so
-sed -i '/^account.*required.*pam_unix\.so/a account required pam_faillock.so' /etc/pam.d/system-auth
-
-# Configure password quality requirements
-echo -e "${BBlue}Configuring password quality requirements...${NC}"
-
-# Update /etc/security/pwquality.conf
-cp /etc/security/pwquality.conf /etc/security/pwquality.conf.bak
-cat <<EOF > /etc/security/pwquality.conf
-minlen = 12
-dcredit = -1
-ucredit = -1
-ocredit = -1
-lcredit = -1
-difok = 5
-enforce_for_root
-EOF
-
-# Ensure pam_pwquality.so is included
-if ! grep -q "pam_pwquality.so" /etc/pam.d/system-auth; then
-    sed -i '/^password.*required.*pam_unix.so/a password required pam_pwquality.so retry=3' /etc/pam.d/system-auth
-fi
 
 echo -e "${BBlue}Setting up daily package update checks...${NC}"
 pacman -S --noconfirm pacman-contrib

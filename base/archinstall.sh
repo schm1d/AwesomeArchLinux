@@ -72,7 +72,7 @@ fi
 
 for installer_component in "$SCRIPT_DIR/chroot.sh" "$SCRIPT_DIR/bootloader.sh" \
     "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
-    "$SCRIPT_DIR/../utils/aide-config.sh"; do
+    "$SCRIPT_DIR/../utils/aide-config.sh" "$SCRIPT_DIR/lib/chroot-security.sh"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
         exit 1
@@ -1071,6 +1071,8 @@ if [ -f "$SCRIPT_DIR/../hardening/lib/nftables.sh" ]; then
     cp "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
     chmod 0644 /mnt/nftables.sh
 fi
+
+install -Dm0644 "$SCRIPT_DIR/lib/chroot-security.sh" /mnt/usr/local/lib/awesomearchlinux/chroot-security.sh
 
 # Stage reviewed AUR installation and AIDE configuration for root after reboot.
 install -m 0700 "$SCRIPT_DIR/install-aur-packages.sh" /mnt/root/install-aur-packages.sh
