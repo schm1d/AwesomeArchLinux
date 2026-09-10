@@ -343,6 +343,7 @@ These are companion utilities, not silent installer defaults (except the I/O sch
 - **CPU governor** (`utils/cpufreq.sh`) &mdash; `linux-cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
 - **I/O scheduler** (`utils/iosched.sh`) &mdash; BFQ for HDDs, `mq-deadline` for SATA/virtio SSD, `none` for NVMe.
 - **NVMe dropout workaround** (`utils/nvme-stability.py`) &mdash; Opt-in power-management diagnostic for existing signed UKI installs, with staged builds, signature verification, backups and rollback. See [NVMe stability and offline recovery](utils/NVME-STABILITY.md).
+- **Motherboard thermal monitoring** (`utils/board-health.py`) &mdash; Exact ASUS ROG Zenith II Extreme Alpha detection enables minute-by-minute CPU, chipset, VRM and NVMe monitoring on bare-metal installs. Sustained heat and missing sensors produce journal warnings; existing installs can use `--install`. See [board support and tuning notes](utils/ZENITH-II-ALPHA.md).
 - **VA-API** (`utils/vaapi.sh`) &mdash; vendor-correct packages and a pinned `LIBVA_DRIVER_NAME` only when the GPU is unambiguous. Hybrid Intel+NVIDIA laptops are left unpinned on purpose.
 
 #### DNS Security

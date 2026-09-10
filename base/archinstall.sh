@@ -73,7 +73,7 @@ fi
 for installer_component in "$SCRIPT_DIR/chroot.sh" "$SCRIPT_DIR/bootloader.sh" \
     "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
     "$SCRIPT_DIR/../utils/aide-config.sh" "$SCRIPT_DIR/lib/chroot-security.sh" \
-    "$SCRIPT_DIR/../utils/auditd-attack.rules"; do
+    "$SCRIPT_DIR/../utils/auditd-attack.rules" "$SCRIPT_DIR/../utils/board-health.py"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
         exit 1
@@ -1075,6 +1075,7 @@ fi
 
 install -Dm0644 "$SCRIPT_DIR/lib/chroot-security.sh" /mnt/usr/local/lib/awesomearchlinux/chroot-security.sh
 install -Dm0644 "$SCRIPT_DIR/../utils/auditd-attack.rules" /mnt/usr/local/share/awesomearchlinux/auditd-attack.rules
+install -Dm0644 "$SCRIPT_DIR/../utils/board-health.py" /mnt/usr/local/lib/awesomearchlinux/board-health.py
 
 # Stage reviewed AUR installation and AIDE configuration for root after reboot.
 install -m 0700 "$SCRIPT_DIR/install-aur-packages.sh" /mnt/root/install-aur-packages.sh

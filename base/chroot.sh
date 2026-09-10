@@ -602,6 +602,15 @@ SMARTALERT
 
 systemctl enable smartd.service
 
+# Native EC sensors expose chipset/VRM heat on this exact board. Add frequent
+# read-only monitoring; power-state workarounds remain separate and opt-in.
+if [[ -r /sys/class/dmi/id/board_vendor && -r /sys/class/dmi/id/board_name ]] &&
+    [[ "$(</sys/class/dmi/id/board_vendor)" == "ASUSTeK COMPUTER INC." &&
+       "$(</sys/class/dmi/id/board_name)" == "ROG ZENITH II EXTREME ALPHA" ]]; then
+    pacman -S --noconfirm --needed python
+    python3 /usr/local/lib/awesomearchlinux/board-health.py --install --enable-only
+fi
+
 echo -e "${BBlue}Configuring usbguard...${NC}"
 pacman -S --noconfirm usbguard
 
