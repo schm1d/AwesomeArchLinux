@@ -342,6 +342,7 @@ These are companion utilities, not silent installer defaults (except the I/O sch
 - **zram** (`utils/zram.sh`) &mdash; `zram-generator` at 50% RAM / zstd / priority 100, disk swap kept as overflow. zswap is disabled if found; stacking zswap + zram double-compresses pages.
 - **CPU governor** (`utils/cpufreq.sh`) &mdash; `linux-cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
 - **I/O scheduler** (`utils/iosched.sh`) &mdash; BFQ for HDDs, `mq-deadline` for SATA/virtio SSD, `none` for NVMe.
+- **NVMe dropout workaround** (`utils/nvme-stability.py`) &mdash; Opt-in power-management diagnostic for existing signed UKI installs, with staged builds, signature verification, backups and rollback. See [NVMe stability and offline recovery](utils/NVME-STABILITY.md).
 - **VA-API** (`utils/vaapi.sh`) &mdash; vendor-correct packages and a pinned `LIBVA_DRIVER_NAME` only when the GPU is unambiguous. Hybrid Intel+NVIDIA laptops are left unpinned on purpose.
 
 #### DNS Security
@@ -531,7 +532,7 @@ units; hardware daemons also require representative hot-plug coverage.
 
 - **USBGuard** &mdash; Default-block policy with a one-time allow policy generated for devices present at the first service start; root IPC access remains available to authorize later devices.
 - **Bluetooth** &mdash; Strict LE-only profile with Secure Connections required, a 16-byte minimum key for secured GATT characteristics, device privacy, a generic adapter name, and two-minute discoverable/pairable windows. BlueZ does not automatically power newly discovered controllers; the local user opts in when Bluetooth is needed. Classic BR/EDR profiles such as A2DP audio are intentionally unavailable; changing `ControllerMode=le` to `dual` restores compatibility at the cost of a larger wireless attack surface. BlueZ's upstream systemd sandbox is retained and its socket families are restricted.
-- **Disk health monitoring** &mdash; `smartd` scans all SATA and NVMe devices, runs a short self-test daily and a long self-test weekly, and tracks drive temperature (advisory entries logged at 45 &deg;C; only the 55 &deg;C critical threshold raises an alert). Alerts are written to the journal and the console rather than mailed, so they arrive without a configured MTA. `nvme-cli` is installed for post-incident investigation (`nvme smart-log`, `nvme error-log`).
+- **Disk health monitoring** &mdash; `smartd` scans all SATA and NVMe devices, schedules a short self-test daily and a long self-test weekly where supported, and tracks drive temperature (advisory entries logged at 50 &deg;C; the 70 &deg;C critical threshold raises an alert). Alerts are written to the journal and the console rather than mailed, so they arrive without a configured MTA. `nvme-cli` is installed for post-incident investigation (`nvme smart-log`, `nvme error-log`).
 
 #### File System Security
 
