@@ -579,12 +579,29 @@ pacman -S --noconfirm smartmontools nvme-cli
 # -o on       enable automatic offline data collection
 # -S on       enable attribute autosave
 # -s ...      short self-test daily 02:00, long self-test Saturday 03:00
+#             (non-NVMe devices only, see below)
 # -W 4,50,70  DIFF,INFO,CRIT: log on 4C swings, log an advisory at 50C,
 #             and treat 70C as critical (NVMe operating range).
 #             Only the CRIT threshold invokes the -M exec handler.
-cat <<'SMARTD' > /etc/smartd.conf
-DEVICESCAN -a -o on -S on -s (S/../.././02|L/../../6/03) -W 4,50,70 -m <nomailer> -M exec /usr/local/bin/smart-alert
-SMARTD
+#
+# NVMe controllers have dropped off the bus as a scheduled self-test started
+# (see utils/NVME-STABILITY.md), so NVMe drives are monitored without -s.
+# DEVICESCAN ignores every later line and skips devices already listed, so
+# each NVMe namespace is listed first. nvmeN numbering changes between boots;
+# use the stable by-id name, one per namespace. NVMe drives added after
+# installation are found by DEVICESCAN and do get the scheduled self-tests.
+{
+    echo 'DEFAULT -a -o on -S on -W 4,50,70 -m <nomailer> -M exec /usr/local/bin/smart-alert'
+    declare -A nvme_seen=()
+    for link in /dev/disk/by-id/nvme-*; do
+        [[ -b $link && $link != *-part[0-9]* ]] || continue
+        target=$(readlink -f -- "$link")
+        [[ -v nvme_seen[$target] ]] && continue
+        nvme_seen[$target]=1
+        echo "$link -d nvme"
+    done
+    echo 'DEVICESCAN -s (S/../.././02|L/../../6/03)'
+} > /etc/smartd.conf
 
 install -Dm0755 /dev/stdin /usr/local/bin/smart-alert <<'SMARTALERT'
 #!/usr/bin/env bash
