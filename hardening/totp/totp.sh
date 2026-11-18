@@ -9,7 +9,8 @@
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
-# Usage:       sudo ./totp.sh [-u USERNAME] [--allow-missing-totp] [-h]
+# Usage:       sudo ./totp.sh [-u USERNAME] [--allow-missing-totp]
+#                             [--allow-no-ssh-key] [--require-password] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -18,16 +19,17 @@
 #   - Public key authentication already configured for the target user
 #
 # What this script does:
-#   1. Installs libpam_google_authenticator and qrencode
+#   1. Installs libpam-google-authenticator and qrencode
 #   2. Creates and verifies the target user's TOTP secret
 #   3. Configures fail-closed PAM authentication (unless explicitly staged)
-#   4. Configures sshd for challenge-response (publickey + TOTP)
+#   4. Configures sshd for keyboard-interactive (publickey + TOTP)
 #   5. Validates the complete SSH configuration
 #   6. Reloads sshd without dropping existing sessions
 #   7. Prints emergency scratch codes and instructions
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -44,6 +46,8 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 # --- Defaults ---
 USERNAME=""
 ALLOW_MISSING_TOTP=false
+ALLOW_NO_SSH_KEY=false
+REQUIRE_PASSWORD=false
 SSHD_CONFIG="/etc/ssh/sshd_config"
 PAM_SSHD="/etc/pam.d/sshd"
 LOGFILE=""
@@ -58,6 +62,10 @@ Options:
                 (default: \$SUDO_USER, or first non-root user)
   --allow-missing-totp
                 Staged rollout: permit SSH users without a TOTP secret
+  --allow-no-ssh-key
+                Proceed even if ~/.ssh/authorized_keys is missing or empty
+  --require-password
+                Keep system-remote-login PAM password prompt in addition to SSH key + TOTP
   -h            Show this help
 
 Examples:
@@ -69,17 +77,23 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -u)                    USERNAME="${2:-}"; [[ -n "$USERNAME" ]] || err "-u requires a username"; shift 2 ;;
+        -u)                    need_arg "$@"; USERNAME="$2"; shift 2 ;;
         --allow-missing-totp)  ALLOW_MISSING_TOTP=true; shift ;;
+        --allow-no-ssh-key)    ALLOW_NO_SSH_KEY=true; shift ;;
+        --require-password)    REQUIRE_PASSWORD=true; shift ;;
         -h|--help)             usage ;;
         *)                     err "Unknown option: $1" ;;
     esac
 done
 
-# --- Validate root ---
+# --- Validate root & SSH preflight (prevent lockout before touching packages/PAM) ---
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
+command -v sshd >/dev/null 2>&1 || err "sshd binary not found. Install openssh before configuring SSH TOTP."
+[[ -f "$SSHD_CONFIG" ]] || err "sshd configuration not found: $SSHD_CONFIG"
+[[ -f "$PAM_SSHD" ]] || err "PAM sshd configuration not found: $PAM_SSHD"
 
 # --- Resolve target user ---
 if [[ -z "$USERNAME" ]]; then
@@ -94,6 +108,7 @@ fi
 
 # Verify the user exists
 id "$USERNAME" &>/dev/null || err "User '$USERNAME' does not exist"
+USER_GROUP=$(id -gn "$USERNAME")
 
 USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
 [[ -n "$USER_HOME" ]] || err "Could not resolve home directory for user '$USERNAME'"
@@ -101,10 +116,17 @@ USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
 
 TOTP_SECRET="$USER_HOME/.google_authenticator"
 
+# Refuse to enforce publickey,keyboard-interactive if target user has no authorized_keys
+if [[ ! -s "$USER_HOME/.ssh/authorized_keys" ]]; then
+    if [[ "$ALLOW_NO_SSH_KEY" != true ]]; then
+        err "Missing or empty $USER_HOME/.ssh/authorized_keys for '$USERNAME'. Configure SSH public-key authentication first (or pass --allow-no-ssh-key to override)."
+    fi
+fi
+
 # Create the log without a predictable filename or permissive caller umask.
 # File descriptor 3 remains terminal-only for QR codes and recovery codes.
-umask 077
-LOGFILE=$(mktemp "/var/log/totp-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
+install -d -m 0755 /var/log
+LOGFILE=$(umask 077; mktemp "/var/log/totp-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
 chmod 0600 "$LOGFILE"
 exec 3>&1
 exec > >(tee -a "$LOGFILE") 2>&1
@@ -114,13 +136,58 @@ info "Home directory: $USER_HOME"
 info "TOTP secret file: $TOTP_SECRET"
 info "Log: $LOGFILE"
 
+if [[ ! -s "$USER_HOME/.ssh/authorized_keys" ]]; then
+    warn "No SSH public keys found in $USER_HOME/.ssh/authorized_keys (--allow-no-ssh-key enabled)"
+fi
+
+# Warn if global AllowUsers in sshd_config (or drop-ins) excludes $USERNAME
+check_allow_users() {
+    local user="$1" token pattern matched=false f
+    local -a allow_tokens=() files=("$SSHD_CONFIG")
+    shopt -s nullglob
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        files+=("$f")
+    done
+    shopt -u nullglob
+
+    mapfile -t allow_tokens < <(
+        awk '
+            /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]([[:space:]]|$)/ { in_match = 1 }
+            !in_match && /^[[:space:]]*[Aa][Ll][Ll][Oo][Ww][Uu][Ss][Ee][Rr][Ss][[:space:]]+/ {
+                line = $0
+                sub(/#.*/, "", line)
+                sub(/^[[:space:]]*[Aa][Ll][Ll][Oo][Ww][Uu][Ss][Ee][Rr][Ss][[:space:]]+/, "", line)
+                n = split(line, toks, /[[:space:]]+/)
+                for (i = 1; i <= n; i++) {
+                    if (toks[i] != "") print toks[i]
+                }
+            }
+        ' "${files[@]}" 2>/dev/null
+    )
+
+    if (( ${#allow_tokens[@]} > 0 )); then
+        for token in "${allow_tokens[@]}"; do
+            pattern="${token%%@*}"
+            # shellcheck disable=SC2053
+            if [[ "$user" == $pattern ]]; then
+                matched=true
+                break
+            fi
+        done
+        if [[ "$matched" == false ]]; then
+            warn "AllowUsers is active (${allow_tokens[*]}) and excludes '$user' — add '$user' to AllowUsers or SSH login will be denied."
+        fi
+    fi
+}
+check_allow_users "$USERNAME"
+
 # =============================================================================
 # 1. INSTALL PACKAGES
 # =============================================================================
 
-msg "Installing libpam_google_authenticator and qrencode..."
+msg "Installing libpam-google-authenticator and qrencode..."
 
-pacman -Syu --noconfirm --needed libpam_google_authenticator qrencode
+pacman -Syu --noconfirm --needed libpam-google-authenticator qrencode
 
 info "google-authenticator version: $(google-authenticator --version 2>&1 || echo 'unknown')"
 
@@ -132,14 +199,14 @@ echo
 
 # -t time-based, -d no token reuse, -r/-R rate limit, -w clock-skew window,
 # -f force-write, and -Q UTF8 for terminal QR rendering.
-su - "$USERNAME" -c "google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8" >&3 2>&3
+( cd "$USER_HOME" && runuser -u "$USERNAME" -- env HOME="$USER_HOME" google-authenticator -t -d -r 3 -R 30 -w 3 -f -Q UTF8 ) >&3 2>&3
 echo
 
 msg "Setting permissions on TOTP secret file..."
 if [[ -f "$TOTP_SECRET" && -s "$TOTP_SECRET" ]]; then
     chmod 600 "$TOTP_SECRET"
-    chown "$USERNAME:$USERNAME" "$TOTP_SECRET"
-    info "$TOTP_SECRET — mode 600, owned by $USERNAME"
+    chown "$USERNAME:$USER_GROUP" "$TOTP_SECRET"
+    info "$TOTP_SECRET — mode 600, owned by $USERNAME:$USER_GROUP"
 else
     err "TOTP secret file was not created at $TOTP_SECRET"
 fi
@@ -157,17 +224,27 @@ fi
 PAM_MODULE_RE='^[[:space:]]*auth[[:space:]]+.*pam_google_authenticator\.so'
 PAM_NULLOK_RE='^[[:space:]]*auth[[:space:]]+.*pam_google_authenticator\.so.*[[:space:]]nullok([[:space:]]|$)'
 
+cp "$PAM_SSHD" "${PAM_SSHD}.bak.$(date +%Y%m%d-%H%M%S)"
+info "Backed up $PAM_SSHD"
+
+if [[ "$REQUIRE_PASSWORD" == false ]]; then
+    # Comment out 'auth include system-remote-login' so keyboard-interactive
+    # prompts ONLY for TOTP (not a Linux account password, which locks out
+    # passwordless SSH-key accounts).
+    sed -i -E 's|^([[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-remote-login([[:space:]].*)?)$|# \1 # disabled by totp.sh (publickey + TOTP without password)|' "$PAM_SSHD"
+    info "Disabled PAM password prompt (system-remote-login auth) for publickey + TOTP flow"
+else
+    sed -i -E 's|^#[[:space:]]*([[:space:]]*auth[[:space:]]+(include|substack)[[:space:]]+system-remote-login[^#]*)# disabled by totp\.sh.*|\1|' "$PAM_SSHD"
+    info "Retained PAM password prompt (--require-password)"
+fi
+
 if grep -Eq "$PAM_MODULE_RE" "$PAM_SSHD" 2>/dev/null; then
     warn "PAM is already configured for google-authenticator in $PAM_SSHD"
     info "Existing line:"
-    grep "pam_google_authenticator" "$PAM_SSHD" | while IFS= read -r line; do
+    { grep "pam_google_authenticator" "$PAM_SSHD" || true; } | while IFS= read -r line; do
         info "  $line"
     done
 else
-    # Back up the original PAM config
-    cp "$PAM_SSHD" "${PAM_SSHD}.bak.$(date +%Y%m%d-%H%M%S)"
-    info "Backed up $PAM_SSHD"
-
     # Append the TOTP auth line after existing auth lines
     echo "" >> "$PAM_SSHD"
     echo "# TOTP two-factor authentication (added by totp.sh)" >> "$PAM_SSHD"
@@ -175,43 +252,119 @@ else
 
     msg "Added pam_google_authenticator to $PAM_SSHD"
 fi
+chown root:root "$PAM_SSHD"
+chmod 0644 "$PAM_SSHD"
 
 # =============================================================================
-# 4. CONFIGURE SSHD FOR CHALLENGE-RESPONSE
+# 4. CONFIGURE SSHD FOR KEYBOARD-INTERACTIVE (PUBLICKEY + TOTP)
 # =============================================================================
 
-msg "Configuring sshd for challenge-response authentication..."
+msg "Configuring sshd for keyboard-interactive authentication..."
 
 # Back up sshd_config
 cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
+chmod 0600 "${SSHD_CONFIG}.bak."* 2>/dev/null || true
 info "Backed up $SSHD_CONFIG"
 
-# Helper: set or update a directive in sshd_config
+# Helper: set or update a global directive in sshd_config BEFORE any Match block
 sshd_set() {
     local key="$1"
     local value="$2"
+    local tmp mode
+    tmp=$(umask 077; mktemp "${SSHD_CONFIG}.XXXXXX")
 
-    if grep -qE "^\s*${key}\s+" "$SSHD_CONFIG"; then
-        # Update existing (uncommented) directive
-        sed -i "s|^\s*${key}\s\+.*|${key} ${value}|" "$SSHD_CONFIG"
-        info "Updated: ${key} ${value}"
-    elif grep -qE "^\s*#\s*${key}\s+" "$SSHD_CONFIG"; then
-        # Uncomment and set value
-        sed -i "s|^\s*#\s*${key}\s\+.*|${key} ${value}|" "$SSHD_CONFIG"
-        info "Uncommented and set: ${key} ${value}"
-    else
-        # Append new directive
-        echo "${key} ${value}" >> "$SSHD_CONFIG"
-        info "Added: ${key} ${value}"
-    fi
+    mode=$(SSHD_KEY="$key" awk '
+        BEGIN { key_low = tolower(ENVIRON["SSHD_KEY"]) }
+        /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]([[:space:]]|$)/ { exit }
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line ~ /^#/) {
+                sub(/^#[[:space:]]*/, "", line)
+                nc = split(line, cparts, /[[:space:]]+/)
+                if (!has_comment && tolower(cparts[1]) == key_low && nc >= 2) {
+                    has_comment = 1
+                }
+                next
+            }
+            np = split(line, parts, /[[:space:]]+/)
+            if (np >= 1 && tolower(parts[1]) == key_low) {
+                has_active = 1
+                exit
+            }
+        }
+        END {
+            if (has_active) print "active"
+            else if (has_comment) print "comment"
+            else print "insert"
+        }
+    ' "$SSHD_CONFIG")
+
+    SSHD_KEY="$key" SSHD_VAL="$value" SSHD_MODE="$mode" awk '
+        BEGIN {
+            key_low = tolower(ENVIRON["SSHD_KEY"])
+            mode = ENVIRON["SSHD_MODE"]
+            in_match = 0
+            done = 0
+        }
+        !in_match && /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]([[:space:]]|$)/ {
+            if (!done) {
+                print ENVIRON["SSHD_KEY"] " " ENVIRON["SSHD_VAL"]
+                print ""
+                done = 1
+            }
+            in_match = 1
+        }
+        !in_match {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (mode == "active" && line !~ /^#/) {
+                np = split(line, parts, /[[:space:]]+/)
+                if (np >= 1 && tolower(parts[1]) == key_low) {
+                    if (!done) {
+                        print ENVIRON["SSHD_KEY"] " " ENVIRON["SSHD_VAL"]
+                        done = 1
+                    }
+                    next
+                }
+            } else if (mode == "comment" && !done && line ~ /^#/) {
+                sub(/^#[[:space:]]*/, "", line)
+                nc = split(line, cparts, /[[:space:]]+/)
+                if (nc >= 2 && tolower(cparts[1]) == key_low) {
+                    print ENVIRON["SSHD_KEY"] " " ENVIRON["SSHD_VAL"]
+                    done = 1
+                    next
+                }
+            }
+        }
+        { print }
+        END {
+            if (!done) {
+                print ENVIRON["SSHD_KEY"] " " ENVIRON["SSHD_VAL"]
+            }
+        }
+    ' "$SSHD_CONFIG" > "$tmp"
+
+    chown root:root "$tmp"
+    chmod 0600 "$tmp"
+    mv -f -- "$tmp" "$SSHD_CONFIG"
+    case "$mode" in
+        active)  info "Updated: ${key} ${value}" ;;
+        comment) info "Uncommented and set: ${key} ${value}" ;;
+        insert)  info "Added (before any Match block): ${key} ${value}" ;;
+    esac
 }
 
-sshd_set "ChallengeResponseAuthentication" "yes"
+# Remove deprecated ChallengeResponseAuthentication if present
+sed -i -E 's|^([[:space:]]*ChallengeResponseAuthentication[[:space:]]+.*)$|# \1 # deprecated; replaced by KbdInteractiveAuthentication|' "$SSHD_CONFIG"
+
 sshd_set "AuthenticationMethods" "publickey,keyboard-interactive"
 sshd_set "KbdInteractiveAuthentication" "yes"
 
 # Ensure UsePAM is enabled (required for PAM-based TOTP)
 sshd_set "UsePAM" "yes"
+chown root:root "$SSHD_CONFIG"
+chmod 0600 "$SSHD_CONFIG"
 
 msg "sshd configuration updated"
 
@@ -221,6 +374,19 @@ if sshd -t; then
     msg "sshd configuration test passed"
 else
     err "sshd configuration test failed! Check $SSHD_CONFIG and restore from backup."
+fi
+
+# Verify effective sshd settings (detect overrides in /etc/ssh/sshd_config.d/*.conf or Match blocks)
+SSHD_EFFECTIVE=$(sshd -T -C "user=${USERNAME},host=localhost,addr=127.0.0.1" 2>/dev/null || sshd -T 2>/dev/null || true)
+if [[ -n "$SSHD_EFFECTIVE" ]]; then
+    EFF_AUTH_METHODS=$(awk '$1 == "authenticationmethods" { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }' <<< "$SSHD_EFFECTIVE")
+    EFF_KBD_INT=$(awk '$1 == "kbdinteractiveauthentication" { print $2; exit }' <<< "$SSHD_EFFECTIVE")
+    if [[ "$EFF_AUTH_METHODS" != "publickey,keyboard-interactive" ]]; then
+        warn "Effective sshd AuthenticationMethods is '${EFF_AUTH_METHODS:-unset}' (expected 'publickey,keyboard-interactive'). Check /etc/ssh/sshd_config.d/*.conf or Match blocks for overrides."
+    fi
+    if [[ "$EFF_KBD_INT" != "yes" ]]; then
+        warn "Effective sshd KbdInteractiveAuthentication is '${EFF_KBD_INT:-unset}' (expected 'yes'). Check /etc/ssh/sshd_config.d/*.conf or Match blocks for overrides."
+    fi
 fi
 
 if [[ "$ALLOW_MISSING_TOTP" == false ]]; then
@@ -245,11 +411,14 @@ fi
 # 6. RELOAD SSHD
 # =============================================================================
 
-msg "Reloading sshd without dropping existing sessions..."
-
 sshd -t || err "sshd configuration test failed before reload"
-systemctl reload sshd
-systemctl is-active --quiet sshd && msg "sshd is running" || err "sshd is not active; restore the saved configuration from console"
+if systemctl is-active --quiet sshd; then
+    msg "Reloading sshd without dropping existing sessions..."
+    systemctl reload sshd
+    systemctl is-active --quiet sshd && msg "sshd is running" || err "sshd is not active; restore the saved configuration from console"
+else
+    warn "sshd.service is not currently active — skipping live reload (changes apply when sshd starts)"
+fi
 
 # =============================================================================
 # 7. PRINT EMERGENCY SCRATCH CODES AND INSTRUCTIONS
@@ -273,7 +442,8 @@ if [[ -f "$TOTP_SECRET" ]]; then
     echo
     # Scratch codes are the 8-digit numbers at the end of the file
     # (after the config lines that start with " or contain known options)
-    grep -E '^[0-9]{8}$' "$TOTP_SECRET" | while IFS= read -r code; do
+    mapfile -t SCRATCH_CODES < <(grep -E '^[0-9]{8}$' "$TOTP_SECRET" || true)
+    for code in "${SCRATCH_CODES[@]}"; do
         echo -e "  ${C_RED}$code${C_NC}"
     done
     echo

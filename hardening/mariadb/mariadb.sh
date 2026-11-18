@@ -14,7 +14,9 @@
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
-# Usage:       sudo ./mariadb.sh [-p PORT] [--ssl] [--local-only] [-h]
+# Usage:       sudo ./mariadb.sh [-p PORT] [--ssl] [--rotate-ssl]
+#                                [--local-only | --no-local]
+#                                [--rotate-root-password] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -34,6 +36,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -50,7 +53,9 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"    "$C_NC" "$1" >&2; exit 1; }
 # --- Defaults ---
 PORT=3306
 ENABLE_SSL=false
+ROTATE_SSL=false
 LOCAL_ONLY=true
+ROTATE_ROOT_PASS=false
 HARDENING_CONF="/etc/my.cnf.d/hardening.cnf"
 ROOT_PASS_FILE="/root/.mariadb-root-pass"
 LOGFILE="/var/log/mariadb-hardening-$(date +%Y%m%d-%H%M%S).log"
@@ -61,11 +66,13 @@ usage() {
 Usage: sudo $0 [options]
 
 Options:
-  -p PORT       MariaDB listen port (default: $PORT)
-  --ssl         Enable TLS with self-signed certificates
-  --local-only  Bind to 127.0.0.1 only (default: enabled)
-  --no-local    Bind to 0.0.0.0 (accept remote connections)
-  -h, --help    Show this help
+  -p PORT                 MariaDB listen port (default: $PORT)
+  --ssl                   Enable TLS (preserves existing certs; generates self-signed if absent)
+  --rotate-ssl            Enable TLS and regenerate self-signed certificates even if present
+  --local-only            Bind to 127.0.0.1 only (default: enabled)
+  --no-local              Bind to 0.0.0.0 (accept remote connections)
+  --rotate-root-password  Generate a new MariaDB root password even if $ROOT_PASS_FILE exists
+  -h, --help              Show this help
 
 Examples:
   sudo $0                           # Defaults: port 3306, local-only
@@ -78,12 +85,18 @@ EOF
 # --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -p)          PORT="$2"; shift 2 ;;
-        --ssl)       ENABLE_SSL=true; shift ;;
-        --local-only) LOCAL_ONLY=true; shift ;;
-        --no-local)  LOCAL_ONLY=false; shift ;;
-        -h|--help)   usage ;;
-        *)           err "Unknown option: $1" ;;
+        -p)
+            [[ $# -ge 2 && -n "${2:-}" ]] || err "Option -p requires a port number"
+            PORT="$2"
+            shift 2
+            ;;
+        --ssl)                  ENABLE_SSL=true; shift ;;
+        --rotate-ssl)           ENABLE_SSL=true; ROTATE_SSL=true; shift ;;
+        --local-only)           LOCAL_ONLY=true; shift ;;
+        --no-local)             LOCAL_ONLY=false; shift ;;
+        --rotate-root-password) ROTATE_ROOT_PASS=true; shift ;;
+        -h|--help)              usage ;;
+        *)                      err "Unknown option: $1" ;;
     esac
 done
 
@@ -95,6 +108,7 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
 fi
 
 # Redirect output to logfile as well
+install -o root -g root -m 0600 /dev/null "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 BIND_ADDRESS="127.0.0.1"
@@ -112,15 +126,9 @@ info "Log:         $LOGFILE"
 # 1. INSTALL MARIADB
 # =============================================================================
 
-msg "Installing MariaDB..."
-
-if pacman -Qi mariadb &>/dev/null; then
-    info "mariadb is already installed"
-else
-    pacman -S --noconfirm --needed mariadb
-    msg "mariadb installed successfully"
-fi
-pacman -S --noconfirm --needed logrotate
+msg "Installing MariaDB and logrotate..."
+pacman -Syu --noconfirm --needed mariadb logrotate
+msg "Packages installed/verified"
 
 # =============================================================================
 # 2. INITIALIZE DATABASE
@@ -191,7 +199,10 @@ trap 'exit 143' TERM
 
 # A unique socket and PID file make every client and cleanup operation target
 # only the process launched here. Networking remains disabled during bootstrap.
+# --no-defaults MUST be the first argument so a stale /etc/my.cnf.d/hardening.cnf
+# from an earlier run cannot abort bootstrap before Step 6/7 rewrites it.
 "$MARIADB_SERVER" \
+    --no-defaults \
     --user=mysql \
     --basedir=/usr \
     --datadir=/var/lib/mysql \
@@ -204,7 +215,7 @@ MARIADB_PID=$!
 
 # Wait for this exact socket rather than the system-wide default socket.
 RETRIES=30
-until mariadb --protocol=socket --socket="$MARIADB_SOCKET" -u root -e "SELECT 1" &>/dev/null; do
+until mariadb --no-defaults --protocol=socket --socket="$MARIADB_SOCKET" -u root -e "SELECT 1" &>/dev/null; do
     if ! kill -0 "$MARIADB_PID" 2>/dev/null; then
         [[ -f "$MARIADB_ERROR_LOG" ]] && tail -n 50 "$MARIADB_ERROR_LOG"
         err "Isolated MariaDB bootstrap process exited before becoming ready"
@@ -225,15 +236,30 @@ info "MariaDB is ready"
 
 msg "Running security hardening..."
 
-# Generate a strong random root password
-ROOT_PASS="$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)"
+REUSED_ROOT_PASS=false
+ROOT_PASS=""
+if [[ "$ROTATE_ROOT_PASS" == false && -f "$ROOT_PASS_FILE" ]]; then
+    ROOT_PASS=$(sed -n 's/^root_password=//p' "$ROOT_PASS_FILE" 2>/dev/null | head -n 1 || true)
+    if [[ -n "$ROOT_PASS" ]]; then
+        REUSED_ROOT_PASS=true
+        info "Reusing existing root password from $ROOT_PASS_FILE (pass --rotate-root-password to rotate)"
+    fi
+fi
 
-mariadb --protocol=socket --socket="$MARIADB_SOCKET" -u root <<EOSQL
+if [[ -z "$ROOT_PASS" ]]; then
+    # Generate a strong random root password
+    ROOT_PASS="$(openssl rand -base64 32 | tr -d '/+=\n' | head -c 32)"
+fi
+
+SQL_ROOT_PASS="${ROOT_PASS//\\/\\\\}"
+SQL_ROOT_PASS="${SQL_ROOT_PASS//\'/\'\'}"
+
+mariadb --no-defaults --protocol=socket --socket="$MARIADB_SOCKET" -u root <<EOSQL
 -- Flush privileges first to enable grant tables
 FLUSH PRIVILEGES;
 
 -- Set root password
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PASS}';
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${SQL_ROOT_PASS}';
 
 -- Remove anonymous users
 DELETE FROM mysql.global_priv WHERE User='';
@@ -252,17 +278,21 @@ EOSQL
 msg "Security hardening applied"
 
 # Save root password securely
-cat > "$ROOT_PASS_FILE" <<EOF
+if [[ "$REUSED_ROOT_PASS" == false ]]; then
+    (
+        umask 077
+        cat > "$ROOT_PASS_FILE" <<EOF
 # MariaDB root password
 # Generated by AwesomeArchLinux/hardening/mariadb/mariadb.sh on $(date)
 # Keep this file secure. Delete after storing in a password manager.
 root_password=${ROOT_PASS}
 EOF
+    )
+    msg "Root password saved to $ROOT_PASS_FILE (mode 600)"
+fi
 
-chmod 600 "$ROOT_PASS_FILE"
+chmod 0600 "$ROOT_PASS_FILE"
 chown root:root "$ROOT_PASS_FILE"
-
-msg "Root password saved to $ROOT_PASS_FILE (mode 600)"
 
 # Stop and clean up only the bootstrap process launched above.
 cleanup_bootstrap_instance
@@ -297,53 +327,70 @@ msg "Directories created"
 # =============================================================================
 
 if [[ "$ENABLE_SSL" == true ]]; then
-    msg "Generating self-signed SSL certificates..."
-
     SSL_DIR="/etc/mysql/ssl"
-    mkdir -p "$SSL_DIR"
+    install -d -o root -g mysql -m 0750 /etc/mysql "$SSL_DIR"
 
-    # Generate CA key and certificate
-    openssl genrsa 4096 > "$SSL_DIR/ca-key.pem"
-    openssl req -new -x509 -nodes -days 3650 \
-        -key "$SSL_DIR/ca-key.pem" \
-        -out "$SSL_DIR/ca-cert.pem" \
-        -subj "/CN=MariaDB-CA/O=AwesomeArchLinux"
+    if [[ "$ROTATE_SSL" == false && \
+          -s "$SSL_DIR/ca-cert.pem" && \
+          -s "$SSL_DIR/server-cert.pem" && \
+          -s "$SSL_DIR/server-key.pem" ]]; then
+        info "Preserving existing SSL certificates in $SSL_DIR (pass --rotate-ssl to regenerate)"
+    else
+        msg "Generating self-signed SSL certificates..."
+        SERVER_CN="${HOSTNAME:-$(cat /etc/hostname 2>/dev/null || uname -n)}"
+        SERVER_CN="${SERVER_CN:-localhost}"
 
-    # Generate server key and certificate
-    openssl genrsa 4096 > "$SSL_DIR/server-key.pem"
-    openssl req -new -nodes \
-        -key "$SSL_DIR/server-key.pem" \
-        -out "$SSL_DIR/server-req.pem" \
-        -subj "/CN=$(hostname -f)/O=AwesomeArchLinux"
-    openssl x509 -req -days 3650 \
-        -in "$SSL_DIR/server-req.pem" \
-        -CA "$SSL_DIR/ca-cert.pem" \
-        -CAkey "$SSL_DIR/ca-key.pem" \
-        -CAcreateserial \
-        -out "$SSL_DIR/server-cert.pem"
+        (
+            umask 077
+            # Generate CA key and certificate
+            openssl genrsa 4096 > "$SSL_DIR/ca-key.pem"
+            openssl req -new -x509 -nodes -days 3650 \
+                -key "$SSL_DIR/ca-key.pem" \
+                -out "$SSL_DIR/ca-cert.pem" \
+                -subj "/CN=MariaDB-CA/O=AwesomeArchLinux"
 
-    # Generate client key and certificate (for client authentication)
-    openssl genrsa 4096 > "$SSL_DIR/client-key.pem"
-    openssl req -new -nodes \
-        -key "$SSL_DIR/client-key.pem" \
-        -out "$SSL_DIR/client-req.pem" \
-        -subj "/CN=MariaDB-Client/O=AwesomeArchLinux"
-    openssl x509 -req -days 3650 \
-        -in "$SSL_DIR/client-req.pem" \
-        -CA "$SSL_DIR/ca-cert.pem" \
-        -CAkey "$SSL_DIR/ca-key.pem" \
-        -CAcreateserial \
-        -out "$SSL_DIR/client-cert.pem"
+            # Generate server key and certificate
+            openssl genrsa 4096 > "$SSL_DIR/server-key.pem"
+            openssl req -new -nodes \
+                -key "$SSL_DIR/server-key.pem" \
+                -out "$SSL_DIR/server-req.pem" \
+                -subj "/CN=${SERVER_CN}/O=AwesomeArchLinux"
+            openssl x509 -req -days 3650 \
+                -in "$SSL_DIR/server-req.pem" \
+                -CA "$SSL_DIR/ca-cert.pem" \
+                -CAkey "$SSL_DIR/ca-key.pem" \
+                -CAcreateserial \
+                -out "$SSL_DIR/server-cert.pem"
 
-    # Clean up CSR files
-    rm -f "$SSL_DIR/server-req.pem" "$SSL_DIR/client-req.pem"
+            # Generate client key and certificate (for client authentication)
+            openssl genrsa 4096 > "$SSL_DIR/client-key.pem"
+            openssl req -new -nodes \
+                -key "$SSL_DIR/client-key.pem" \
+                -out "$SSL_DIR/client-req.pem" \
+                -subj "/CN=MariaDB-Client/O=AwesomeArchLinux"
+            openssl x509 -req -days 3650 \
+                -in "$SSL_DIR/client-req.pem" \
+                -CA "$SSL_DIR/ca-cert.pem" \
+                -CAkey "$SSL_DIR/ca-key.pem" \
+                -CAcreateserial \
+                -out "$SSL_DIR/client-cert.pem"
+        )
 
-    # Set permissions
+        # Clean up CSR files
+        rm -f "$SSL_DIR/server-req.pem" "$SSL_DIR/client-req.pem"
+        msg "SSL certificates generated in $SSL_DIR"
+    fi
+
+    # Set permissions (0600 on private keys, 0644 on certificates)
     chown -R mysql:mysql "$SSL_DIR"
-    chmod 700 "$SSL_DIR"
-    chmod 600 "$SSL_DIR"/*.pem
-
-    msg "SSL certificates generated in $SSL_DIR"
+    chmod 0750 "$SSL_DIR"
+    for ssl_key in "$SSL_DIR"/*-key.pem; do
+        [[ -f "$ssl_key" ]] && chmod 0600 "$ssl_key"
+    done
+    for ssl_cert in "$SSL_DIR"/*-cert.pem; do
+        [[ -f "$ssl_cert" ]] && chmod 0644 "$ssl_cert"
+    done
+    unset ssl_key ssl_cert
 fi
 
 # =============================================================================
@@ -382,7 +429,7 @@ interactive_timeout     = 600
 local-infile            = 0
 skip-symbolic-links
 secure-file-priv        = /var/lib/mysql-files
-sql-mode                = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION
+sql-mode                = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
 log-raw                 = OFF
 
 EOF
@@ -464,13 +511,17 @@ msg "File permissions hardened"
 
 msg "Writing systemd hardening override for MariaDB..."
 
-mkdir -p /etc/systemd/system/mariadb.service.d
+install -d -m 0755 /etc/systemd/system/mariadb.service.d
 
-# Determine capabilities
-CAPABILITY_SETTING="CapabilityBoundingSet="
+# Determine capabilities (empty reset lines replace upstream unit capabilities instead of merging)
+CAPABILITY_SETTING="CapabilityBoundingSet=
+AmbientCapabilities="
 if (( PORT < 1024 )); then
-    CAPABILITY_SETTING="CapabilityBoundingSet=CAP_NET_BIND_SERVICE"
-    info "Port $PORT < 1024: adding CAP_NET_BIND_SERVICE"
+    CAPABILITY_SETTING="CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=
+AmbientCapabilities=CAP_NET_BIND_SERVICE"
+    info "Port $PORT < 1024: adding CAP_NET_BIND_SERVICE (bounding + ambient)"
 fi
 
 cat > /etc/systemd/system/mariadb.service.d/hardening.conf <<EOF
@@ -485,9 +536,11 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+RuntimeDirectory=mysqld
+RuntimeDirectoryMode=0755
 
 # Writable paths required by MariaDB
-ReadWritePaths=/var/lib/mysql /var/log/mysql /run/mysqld /var/lib/mysql-files
+ReadWritePaths=/var/lib/mysql /var/log/mysql -/run/mysqld /var/lib/mysql-files
 
 # Privilege restrictions
 NoNewPrivileges=yes
@@ -503,6 +556,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # MariaDB uses memory-mapped files; do not deny write-execute
 MemoryDenyWriteExecute=no
 EOF
+chmod 0644 /etc/systemd/system/mariadb.service.d/hardening.conf
 
 systemctl daemon-reload
 
@@ -514,7 +568,7 @@ msg "systemd hardening override applied"
 
 msg "Configuring logrotate for MariaDB logs..."
 
-mkdir -p /etc/logrotate.d
+install -d -m 0755 /etc/logrotate.d
 cat > /etc/logrotate.d/mariadb <<'EOF'
 /var/log/mysql/*.log {
     weekly
@@ -526,15 +580,15 @@ cat > /etc/logrotate.d/mariadb <<'EOF'
     create 640 mysql mysql
     sharedscripts
     postrotate
-        # Signal MariaDB to reopen log files
-        if [ -f /run/mysqld/mysqld.pid ]; then
-            kill -USR1 $(cat /run/mysqld/mysqld.pid) 2>/dev/null || true
+        # Signal MariaDB main process to reopen log files
+        if systemctl is-active --quiet mariadb.service; then
+            systemctl kill -s USR1 --kill-who=main mariadb.service 2>/dev/null || true
         fi
     endscript
 }
 EOF
 
-chmod 644 /etc/logrotate.d/mariadb
+chmod 0644 /etc/logrotate.d/mariadb
 
 msg "Logrotate configured"
 
@@ -556,10 +610,26 @@ else
     err "MariaDB failed to start. Check: journalctl -u mariadb -e"
 fi
 
-# Verify we can connect with the root password
-if mariadb -u root -p"${ROOT_PASS}" -e "SELECT 1" &>/dev/null; then
+# Verify we can connect with the root password without exposing it in argv
+AUTH_CNF=$(umask 077; mktemp /run/mariadb-verify.XXXXXX)
+CNF_ROOT_PASS="${ROOT_PASS//\\/\\\\}"
+CNF_ROOT_PASS="${CNF_ROOT_PASS//\"/\\\"}"
+(
+    umask 077
+    cat > "$AUTH_CNF" <<EOF
+[client]
+user=root
+password="${CNF_ROOT_PASS}"
+EOF
+)
+chmod 0600 "$AUTH_CNF"
+
+if mariadb-admin --defaults-extra-file="$AUTH_CNF" ping &>/dev/null && \
+   mariadb --defaults-extra-file="$AUTH_CNF" -e "SELECT 1" &>/dev/null; then
+    rm -f -- "$AUTH_CNF"
     msg "Root authentication verified"
 else
+    rm -f -- "$AUTH_CNF"
     warn "Could not verify root authentication. Check $ROOT_PASS_FILE for the password."
 fi
 
@@ -656,7 +726,7 @@ echo "  journalctl -u mariadb -f                  # Follow MariaDB logs"
 echo "  mariadb -u root -p                        # Connect as root"
 echo "  mariadb -u root -p -e 'SHOW VARIABLES'    # Show all server variables"
 echo "  mariadb -u root -p -e 'SHOW STATUS'       # Show server status"
-echo "  mysqladmin -u root -p processlist          # Show active connections"
+echo "  mariadb-admin -u root -p processlist      # Show active connections"
 echo
 
 echo -e "${C_GREEN}Done.${C_NC}"

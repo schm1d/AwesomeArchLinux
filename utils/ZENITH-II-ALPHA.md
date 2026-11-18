@@ -17,8 +17,8 @@ The bare-metal installer enables `awesome-board-health.timer` on a matching
 board. Existing installations can enable the same profile:
 
 ```bash
-python3 utils/board-health.py --status
-sudo python3 utils/board-health.py --install
+./utils/board-health.sh --status
+sudo ./utils/board-health.sh --install
 systemctl status awesome-board-health.timer
 journalctl -u awesome-board-health.service -p warning
 ```
@@ -70,8 +70,8 @@ sudo systemctl stop awesome-board-health.service
 For full removal, also remove these profile-owned files and reload systemd:
 
 ```bash
-sudo rm /etc/systemd/system/awesome-board-health.service /etc/systemd/system/awesome-board-health.timer
-sudo rm /usr/local/bin/awesome-board-health /etc/awesome-board-health.conf
+sudo rm -f /etc/systemd/system/awesome-board-health.service /etc/systemd/system/awesome-board-health.timer
+sudo rm -f /usr/local/bin/awesome-board-health /usr/local/lib/awesomearchlinux/board-health.sh /etc/awesome-board-health.conf
 sudo systemctl daemon-reload
 ```
 

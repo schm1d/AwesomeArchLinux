@@ -5,9 +5,11 @@ Hardens SSH access on Arch Linux by requiring both a public key **and** a time-b
 ## Quick Start
 
 ```bash
-sudo ./totp.sh              # Configure TOTP for current user
+sudo ./totp.sh              # Configure TOTP for current user (SSH key + TOTP)
 sudo ./totp.sh -u alice     # Configure TOTP for a specific user
 sudo ./totp.sh -u alice --allow-missing-totp  # Explicit staged rollout
+sudo ./totp.sh -u alice --allow-no-ssh-key    # Override missing ~/.ssh/authorized_keys check
+sudo ./totp.sh -u alice --require-password    # Require SSH key + Linux password + TOTP
 sudo ./totp.sh -h           # Show help
 ```
 
@@ -15,18 +17,18 @@ sudo ./totp.sh -h           # Show help
 
 - Arch Linux with `pacman`
 - Root privileges (run with `sudo`)
-- SSH server (`sshd`) installed and running
-- Public key authentication already configured for the target user
+- SSH server (`sshd`) installed (`openssh`)
+- Non-empty `~/.ssh/authorized_keys` configured for the target user (enforced before modifying PAM or `sshd` unless `--allow-no-ssh-key` is explicitly passed)
 
 ## What the Script Does
 
-1. Installs `libpam_google_authenticator` and `qrencode` via pacman
-2. Configures PAM (`/etc/pam.d/sshd`) to use the Google Authenticator module
-3. Configures sshd to require `publickey,keyboard-interactive` authentication
-4. Generates a TOTP secret and displays a QR code in the terminal
-5. Sets secure permissions (600) on the secret file
-6. Restarts sshd
-7. Displays emergency scratch codes
+1. Runs lockout preflight checks (`sshd` binary, `/etc/ssh/sshd_config`, `/etc/pam.d/sshd`, non-empty `~/.ssh/authorized_keys`, and `AllowUsers` membership) before installing packages or touching configuration
+2. Installs `libpam-google-authenticator` and `qrencode` via pacman
+3. Generates a TOTP secret as the target user via `runuser`, displays a QR code in the terminal, and enforces mode `600` on `~/.google_authenticator` **before** modifying PAM or `sshd`
+4. Configures PAM (`/etc/pam.d/sshd`) to require the Google Authenticator module and comments out `auth include system-remote-login` (unless `--require-password` is passed) so passwordless SSH-key accounts are prompted only for TOTP
+5. Configures `sshd` globally (inserting directives safely **before** any `Match` blocks) to require `publickey,keyboard-interactive` authentication and verifies effective settings via `sshd -t` and `sshd -T`
+6. Reloads `sshd` without dropping existing sessions when `sshd.service` is active
+7. Displays single-use emergency scratch codes
 
 ## Setting Up TOTP on Your Phone
 
@@ -158,7 +160,7 @@ The user must scan the QR code and save the emergency scratch codes. Permissions
   ```bash
   grep pam_google_authenticator /etc/pam.d/sshd
   ```
-- Remove any duplicates and restart sshd.
+- Remove any duplicates and reload `sshd` (`sudo systemctl reload sshd`).
 
 ### Want to reset TOTP for a user
 
@@ -182,8 +184,8 @@ sudo ./totp.sh -u username
 
 | File | Change |
 |------|--------|
-| `/etc/pam.d/sshd` | Added `pam_google_authenticator.so` auth line |
-| `/etc/ssh/sshd_config` | Set `ChallengeResponseAuthentication yes`, `AuthenticationMethods publickey,keyboard-interactive`, `KbdInteractiveAuthentication yes`, `UsePAM yes` |
+| `/etc/pam.d/sshd` | Added `pam_google_authenticator.so` auth line; commented `auth include system-remote-login` unless `--require-password` |
+| `/etc/ssh/sshd_config` | Set `AuthenticationMethods publickey,keyboard-interactive`, `KbdInteractiveAuthentication yes`, `UsePAM yes` |
 | `~/.google_authenticator` | Created (TOTP secret, scratch codes, config) |
 
 ## References

@@ -3,7 +3,7 @@
 # =============================================================================
 # Script:      vim.sh
 # Description: Installs Vim with vim-plug and a curated set of plugins,
-#              then applies secure permissions on configuration files.
+#              then applies editor hardening and secure permissions.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
@@ -24,11 +24,19 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
-# Install Vim if not already installed
+for cmd in git curl; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo -e "${BRed}Required command '$cmd' not found. Install it first.${NC}" >&2
+        exit 1
+    fi
+done
+
 if ! command -v vim &>/dev/null; then
     echo -e "${BBlue}Installing Vim...${NC}"
-    sudo pacman -S --noconfirm vim
+    sudo pacman -S --needed --noconfirm vim
 fi
+
+mkdir -p -m 0700 "$HOME/.vim" "$HOME/.vim/swap" "$HOME/.vim/backup" "$HOME/.vim/undo"
 
 # Install vim-plug if not already installed
 PLUG_VIM="$HOME/.vim/autoload/plug.vim"
@@ -38,13 +46,24 @@ if [ ! -f "$PLUG_VIM" ]; then
         https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
 fi
 
-# Create .vimrc if it doesn't exist
 VIMRC="$HOME/.vimrc"
 if [ ! -f "$VIMRC" ]; then
     touch "$VIMRC"
 fi
 
-# Add vim-plug configuration to .vimrc if not already present
+if ! grep -q "set nomodeline" "$VIMRC"; then
+    cat >> "$VIMRC" <<'EOL'
+
+" Editor security hardening (prevent modeline code execution & world-readable swap)
+set nomodeline
+set modelines=0
+set directory^=~/.vim/swap//
+set backupdir^=~/.vim/backup//
+set undodir^=~/.vim/undo//
+set undofile
+EOL
+fi
+
 if ! grep -q "call plug#begin" "$VIMRC"; then
     echo -e "${BBlue}Adding vim-plug configuration to .vimrc...${NC}"
     cat >> "$VIMRC" <<'EOL'
@@ -53,7 +72,7 @@ if ! grep -q "call plug#begin" "$VIMRC"; then
 call plug#begin('~/.vim/plugged')
 Plug 'sheerun/vimrc'
 Plug 'sheerun/vim-polyglot'
-Plug 'scrooloose/nerdtree'
+Plug 'preservim/nerdtree'
 Plug 'tpope/vim-fugitive'
 Plug 'airblade/vim-gitgutter'
 Plug 'tomlion/vim-solidity'
@@ -62,11 +81,9 @@ call plug#end()
 EOL
 fi
 
-# Install plugins using vim-plug
 echo -e "${BBlue}Installing Vim plugins...${NC}"
-vim +PlugInstall +qall
+GIT_TERMINAL_PROMPT=0 vim --not-a-term +PlugInstall +qall < /dev/null || true
 
-# Set secure permissions (no sudo needed — these are user files)
 chmod 600 "$VIMRC"
 chmod 700 "$HOME/.vim"
 

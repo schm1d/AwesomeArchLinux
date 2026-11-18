@@ -39,10 +39,9 @@ sudo ./php.sh --no-fpm
 
 ### 1. Package Installation
 
-- `php` (core interpreter)
-- `php-fpm` (FastCGI Process Manager)
+- `php` (core interpreter, including bundled `intl` extension enabled in `php.ini`)
+- `php-fpm` (FastCGI Process Manager — installed only when `--with-fpm` is enabled)
 - `php-gd` (image processing)
-- `php-intl` (internationalization)
 - `php-sodium` (modern cryptography)
 
 Packages that are not found in the repositories are skipped gracefully.
@@ -60,7 +59,7 @@ The script backs up the original `php.ini` before modifying it.
 | `display_startup_errors` | `Off` | Never show startup errors to users |
 | `log_errors` | `On` | Log all errors to file |
 | `error_log` | `/var/log/php/error.log` | Centralized error log |
-| `error_reporting` | `E_ALL & ~E_DEPRECATED & ~E_STRICT` | Report all meaningful errors |
+| `error_reporting` | `E_ALL & ~E_DEPRECATED` | Report all meaningful errors (PHP 8.4+ compatible) |
 
 #### Security
 
@@ -69,7 +68,7 @@ The script backs up the original `php.ini` before modifying it.
 | `disable_functions` | `exec,passthru,shell_exec,system,...` | Block dangerous functions (see [Customizing disable_functions](#customizing-disable_functions)) |
 | `allow_url_fopen` | `Off` | Prevent remote file inclusion (RFI) |
 | `allow_url_include` | `Off` | Prevent remote file inclusion (RFI) |
-| `open_basedir` | `/var/www:/tmp:/usr/share/php` | Restrict filesystem access |
+| `open_basedir` | `/var/www:/srv/http:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php` | Restrict filesystem access while permitting sessions and logs |
 | `cgi.fix_pathinfo` | `0` | Prevent CGI path traversal |
 
 #### Session Security
@@ -82,8 +81,6 @@ The script backs up the original `php.ini` before modifying it.
 | `session.cookie_samesite` | `Strict` | Prevent CSRF via cross-site requests |
 | `session.use_only_cookies` | `1` | Disable session ID in URL |
 | `session.name` | `__Secure-PHPSESSID` | Cookie prefix signals secure context |
-| `session.sid_length` | `48` | Long session IDs (more entropy) |
-| `session.sid_bits_per_character` | `6` | Maximize entropy density |
 
 #### Resource Limits
 
@@ -124,7 +121,7 @@ The script backs up the original `php.ini` before modifying it.
 | `rlimit_core` | `0` | No core dumps (prevent info leakage) |
 | `security.limit_extensions` | `.php` | Only execute `.php` files |
 | `clear_env` | `yes` | Clean environment for workers |
-| `php_admin_value[open_basedir]` | `/var/www:/tmp` | Cannot be overridden by application |
+| `php_admin_value[open_basedir]` | `/var/www:/srv/http:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php` | Cannot be overridden by application |
 | `php_admin_flag[allow_url_fopen]` | `off` | Cannot be overridden by application |
 
 ### 4. systemd Service Hardening
@@ -147,21 +144,23 @@ The script backs up the original `php.ini` before modifying it.
 | `MemoryDenyWriteExecute` | `no` | Required for OPcache JIT compilation |
 | `LockPersonality` | `yes` | Cannot change execution domain |
 | `SystemCallFilter` | `@system-service @network-io` | Allowlist of permitted syscalls |
+| `SystemCallErrorNumber` | `EPERM` | Return `EPERM` instead of killing process on filtered syscalls |
 | `SystemCallArchitectures` | `native` | No 32-bit compat syscalls |
-| `CapabilityBoundingSet` | `CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE` | Minimal capabilities for FPM |
-| `ReadWritePaths` | `/var/log/php /var/lib/php /run/php-fpm /var/www` | Only directories FPM needs to write |
+| `CapabilityBoundingSet` | reset (`CapabilityBoundingSet=`), then `CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL` | Minimal capabilities for FPM master to drop privileges and signal workers |
+| `RuntimeDirectory` | `php-fpm` | Creates `/run/php-fpm` before unit start |
+| `ReadWritePaths` | `-/var/log/php -/var/lib/php/sessions -/run/php-fpm /var/www -/srv/http` | Only directories FPM needs to write |
 
 ### 5. nginx FastCGI Integration (--with-nginx)
 
 - FastCGI pass to PHP-FPM Unix socket
 - `SCRIPT_FILENAME` parameter set correctly
 - `X-Powered-By` header hidden via `fastcgi_hide_header`
-- `open_basedir` reinforced via `PHP_VALUE` parameter
+- No conflicting `PHP_VALUE open_basedir` override (since `php_admin_value[open_basedir]` is locked at the FPM pool level)
 - Sample security rules: deny PHP execution in upload directories, block dotfiles
 
 ### 6. Log Rotation
 
-Daily rotation of `/var/log/php/*.log` with 14-day retention, compression, and automatic PHP-FPM reload after rotation.
+Daily rotation of `/var/log/php/*.log` with 14-day retention, compression, and automatic PHP-FPM reload after rotation (when `--with-fpm` is enabled).
 
 ## Generated Files
 
@@ -171,7 +170,7 @@ Daily rotation of `/var/log/php/*.log` with 14-day retention, compression, and a
 | `/etc/php/php.ini.bak.*` | Backup of original php.ini |
 | `/etc/php/php-fpm.d/www.conf` | Hardened FPM pool |
 | `/etc/systemd/system/php-fpm.service.d/hardening.conf` | systemd security override |
-| `/etc/nginx/conf.d/php-fpm.conf` | nginx FastCGI config (if `--with-nginx`) |
+| `/etc/nginx/snippets/php-fpm.conf` | nginx FastCGI location snippet (if `--with-nginx`) |
 | `/etc/nginx/conf.d/php-security.conf.sample` | nginx PHP security rules (if `--with-nginx`) |
 | `/etc/logrotate.d/php` | Log rotation config |
 | `/var/log/php/` | Error log, FPM access log, slow log |
@@ -241,21 +240,21 @@ user = myappuser
 group = myappuser
 listen = /run/php-fpm/myapp.sock
 
-; Application-specific basedir
-php_admin_value[open_basedir] = /var/www/myapp:/tmp:/usr/share/php
+; Application-specific basedir (include session/log paths as needed)
+php_admin_value[open_basedir] = /var/www/myapp:/var/lib/php/sessions/myapp:/var/log/php:/tmp:/usr/share/php
 php_admin_value[upload_tmp_dir] = /var/www/myapp/tmp
 php_admin_value[session.save_path] = /var/lib/php/sessions/myapp
 ```
 
 ### Per nginx vhost
 
-Override `open_basedir` in the FastCGI parameters:
+If you remove `php_admin_value[open_basedir]` from a custom pool, you can narrow `open_basedir` via `PHP_ADMIN_VALUE` in the FastCGI parameters (note that FPM rejects `PHP_VALUE` overrides when `php_admin_value[open_basedir]` is already locked in the pool):
 
 ```nginx
 location ~ \.php$ {
     fastcgi_pass unix:/run/php-fpm/myapp.sock;
     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-    fastcgi_param PHP_VALUE "open_basedir=/var/www/myapp:/tmp";
+    fastcgi_param PHP_ADMIN_VALUE "open_basedir=/var/www/myapp:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php";
     include fastcgi_params;
 }
 ```
@@ -467,7 +466,7 @@ sudo ./php.sh --with-nginx
 # Inside the HTTPS server block, add PHP handling:
 location ~ \.php$ {
     try_files $uri =404;
-    include conf.d/php-fpm.conf;
+    include snippets/php-fpm.conf;
 }
 
 # Deny PHP in uploads
@@ -496,7 +495,7 @@ location /.well-known/acme-challenge/ {
 # PHP handler (after ACME)
 location ~ \.php$ {
     try_files $uri =404;
-    include conf.d/php-fpm.conf;
+    include snippets/php-fpm.conf;
 }
 ```
 

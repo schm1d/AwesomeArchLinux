@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Description: Arch Linux VPS Security-Hardened Installation
 # Adapted from archinstall.sh for VPS/cloud environments
@@ -14,6 +14,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CLEANUP_ENABLED=0
+cleanup() {
+    if [[ "$CLEANUP_ENABLED" -eq 0 ]]; then
+        return
+    fi
+    echo "Cleanup triggered, unmounting partial VPS setup..." >&2
+    swapoff /mnt/swapfile 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # --- Color variables (all used in echo -e strings) ---
 # shellcheck disable=SC2034
@@ -54,6 +65,17 @@ else
 fi
 log_action "Boot mode: $BOOT_MODE"
 
+SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
+SYSCTL_BUNDLE_FILES=(
+    sysctl.sh
+    60-awesome-security-core.conf
+    70-awesome-workstation-network.conf
+    80-awesome-performance.conf
+    80-awesome-bbr.modules
+    90-awesome-strict.conf
+    90-awesome-ipv6-disabled.conf
+)
+
 for installer_component in "$SCRIPT_DIR/vps-chroot.sh" \
     "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh" \
     "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
@@ -61,6 +83,12 @@ for installer_component in "$SCRIPT_DIR/vps-chroot.sh" \
     "$SCRIPT_DIR/../utils/auditd-attack.rules"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
+        exit 1
+    fi
+done
+for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
+    if [[ ! -r "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
+        echo -e "${BRed}Missing required sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
         exit 1
     fi
 done
@@ -99,11 +127,13 @@ ask_for_disk() {
     local disk
     while true; do
         read -r -p "Select the target disk (e.g., sda, vda, nvme0n1): " disk
-        if [[ -b "/dev/$disk" ]]; then
+        disk="${disk#/dev/}"
+        if [[ -n "$disk" && "$disk" != */* && -b "/dev/$disk" &&
+              "$(lsblk -dn -o TYPE "/dev/$disk" 2>/dev/null)" == "disk" ]]; then
             echo "$disk"
             return 0
         else
-            echo -e "${BRed}Error: Disk /dev/$disk does not exist or is not a block device.\n${NC}" >&2
+            echo -e "${BRed}Error: /dev/$disk does not exist or is not a whole disk device.\n${NC}" >&2
         fi
     done
 }
@@ -113,13 +143,43 @@ ask_for_numeric() {
     local input_val
     while true; do
         read -r -p "$prompt_msg " input_val
-        if [[ "$input_val" =~ ^[0-9]+$ ]]; then
+        if [[ "$input_val" =~ ^[1-9][0-9]*$ ]]; then
             echo "$input_val"
             return 0
         else
-            echo -e "${BRed}Invalid input: '$input_val'. Please enter a positive number.\n${NC}" >&2
+            echo -e "${BRed}Invalid input: '$input_val'. Please enter a positive integer.\n${NC}" >&2
         fi
     done
+}
+
+ask_for_ssh_port() {
+    local port_input port
+    while true; do
+        read -r -p "SSH port (default 22): " port_input
+        port="${port_input:-22}"
+        if [[ "$port" =~ ^[1-9][0-9]*$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )); then
+            echo "$port"
+            return 0
+        else
+            echo -e "${BRed}Invalid SSH port: '$port'. Must be 1-65535.\n${NC}" >&2
+        fi
+    done
+}
+
+validate_ssh_pubkey() {
+    local key="$1"
+    if [[ -z "$key" ]]; then
+        return 0
+    fi
+    if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>\"\'\\] ]] || [[ "$key" == *$'\n'* ]] || [[ "$key" == *$'\r'* ]]; then
+        echo -e "${BRed}ERROR: SSH public key contains invalid characters.${NC}" >&2
+        return 1
+    fi
+    if ! [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]; then
+        echo -e "${BRed}ERROR: SSH public key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-, sk-ssh-, or sk-ecdsa-.${NC}" >&2
+        return 1
+    fi
+    return 0
 }
 
 ask_for_username() {
@@ -229,14 +289,14 @@ ask_for_locale() {
         local i=1
         for loc in "${locales[@]}"; do
             printf "  %2d) %s\n" "$i" "$loc" >&2
-            ((i++))
+            (( ++i ))
         done
         echo "   0) Other -- type a locale name" >&2
         read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
             read -r -p "Enter locale (e.g. nl_NL.UTF-8): " loc
-            if grep -q "^#\?${loc} " /etc/locale.gen 2>/dev/null; then
+            if [[ "$loc" =~ ^[A-Za-z0-9_.@-]+$ ]] && grep -Eq "^#?${loc//./\\.}[[:space:]]" /etc/locale.gen 2>/dev/null; then
                 echo "$loc"
                 return 0
             else
@@ -276,7 +336,7 @@ ask_for_keymap() {
         local i=1
         for km in "${keymaps[@]}"; do
             printf "  %2d) %s\n" "$i" "$km" >&2
-            ((i++))
+            (( ++i ))
         done
         echo "   0) Other -- type a keymap name" >&2
         read -r -p "Choice [1]: " choice
@@ -331,13 +391,18 @@ EOF
 
 validate_network
 
-# Select mirrors
+# Select mirrors safely without predictable /tmp paths or empty-response clobbering
 echo -e "${BBlue}Selecting fastest HTTPS mirrors...${NC}"
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
-MIRROR_TMP="/tmp/mirrorlist.tmp"
-curl -s "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
-    sed -e 's/^#Server/Server/' -e '/^#/d' > "$MIRROR_TMP"
-head -20 "$MIRROR_TMP" > /etc/pacman.d/mirrorlist
+MIRROR_TMP=$(mktemp /etc/pacman.d/.mirrorlist.XXXXXX)
+if curl -fsSL "https://archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4" | \
+    sed -e 's/^#Server/Server/' -e '/^#/d' > "$MIRROR_TMP" && \
+    grep -q '^Server[[:space:]]*=' "$MIRROR_TMP"; then
+    sed -n '1,20p' "$MIRROR_TMP" > /etc/pacman.d/mirrorlist
+    chmod 0644 /etc/pacman.d/mirrorlist
+else
+    echo -e "${BYellow}Warning: Failed to fetch remote mirrorlist; keeping existing /etc/pacman.d/mirrorlist.${NC}" >&2
+fi
 rm -f "$MIRROR_TMP"
 
 # -----------------------
@@ -345,7 +410,7 @@ rm -f "$MIRROR_TMP"
 # -----------------------
 
 echo -e "${BBlue}Available disks:\n${NC}"
-lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+lsblk -d -o NAME,SIZE,TYPE,MODEL | awk 'NR==1 || $3=="disk"'
 echo
 
 TARGET_DISK=$(ask_for_disk)
@@ -360,13 +425,11 @@ echo -e "${BBlue}Partition sizes:\n${NC}"
 SIZE_OF_SWAP=$(ask_for_numeric "SWAP size in GB (recommended: 1-2 for VPS):")
 echo
 
-# Ask about separate /var partition
-CREATE_VAR_PART=$(ask_yes_no "Create separate /var partition? (recommended for web servers)")
-VAR_SIZE=""
-SIZE_OF_VAR=0
-if [[ "$CREATE_VAR_PART" == "y" ]]; then
-    SIZE_OF_VAR=$(ask_for_numeric "/var size in GB:")
-    VAR_SIZE="${SIZE_OF_VAR}G"
+DISK_SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$DISK" 2>/dev/null || echo 0)
+REQUIRED_VPS_BYTES=$(((SIZE_OF_SWAP + 8) * 1073741824))
+if [[ "$DISK_SIZE_BYTES" =~ ^[0-9]+$ ]] && (( DISK_SIZE_BYTES < REQUIRED_VPS_BYTES )); then
+    echo -e "${BRed}Error: Insufficient disk space on $DISK. Need at least $((REQUIRED_VPS_BYTES / 1073741824)) GiB.${NC}" >&2
+    exit 1
 fi
 
 # User configuration
@@ -381,23 +444,27 @@ LOCALE=$(ask_for_locale)
 KEYMAP=$(ask_for_keymap)
 
 # Ask for SSH port
-read -r -p "SSH port (default 22): " SSH_PORT_INPUT
-SSH_PORT="${SSH_PORT_INPUT:-22}"
+SSH_PORT=$(ask_for_ssh_port)
 
 # Ask for SSH public key (critical: password auth will be disabled)
-echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
-echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
-read -r SSH_PUBKEY
-if [[ -z "$SSH_PUBKEY" ]]; then
-    echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
-    echo -e "${BRed}You will need VPS console access to add one after installation.${NC}"
-elif [[ ! "$SSH_PUBKEY" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2|sk-ssh-|sk-ecdsa-) ]]; then
-    echo -e "${BRed}ERROR: SSH key must start with a valid key type prefix.${NC}" >&2
-    exit 1
-elif [[ "$SSH_PUBKEY" =~ [\$\`\(\)\{\}\;\|\&\<\>] ]] || [[ "$SSH_PUBKEY" == *$'\n'* ]]; then
-    echo -e "${BRed}ERROR: SSH key contains invalid shell metacharacters.${NC}" >&2
-    exit 1
-fi
+ALLOW_NO_SSH_KEY=false
+echo -e "\n${BYellow}Password authentication and root SSH login will be disabled after installation.${NC}"
+while true; do
+    echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
+    read -r SSH_PUBKEY
+    SSH_PUBKEY="${SSH_PUBKEY%$'\r'}"
+    if [[ -z "$SSH_PUBKEY" ]]; then
+        echo -e "${BRed}WARNING: No SSH public key provided! Remote SSH login will be impossible until a key is added via VPS console.${NC}"
+        if [[ $(ask_yes_no "Do you confirm you have out-of-band VPS console access and want to proceed WITHOUT an SSH key?") == "y" ]]; then
+            ALLOW_NO_SSH_KEY=true
+            break
+        fi
+        continue
+    fi
+    if validate_ssh_pubkey "$SSH_PUBKEY"; then
+        break
+    fi
+done
 
 echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
 SYSCTL_PROFILE=$(ask_for_sysctl_profile)
@@ -457,6 +524,8 @@ sleep 2
 echo -e "${BBlue}Formatting filesystems...${NC}"
 log_action "Formatting filesystems"
 
+CLEANUP_ENABLED=1
+
 mkfs.ext4 -F -m 1 -E lazy_itable_init=0,lazy_journal_init=0 "$ROOT_PART"
 
 # Mount root
@@ -468,12 +537,6 @@ dd if=/dev/zero of=/mnt/swapfile bs=1G count="$SIZE_OF_SWAP" status=progress
 chmod 600 /mnt/swapfile
 mkswap /mnt/swapfile
 swapon /mnt/swapfile
-
-# Create /var if requested
-if [[ -n "$VAR_SIZE" ]]; then
-    echo -e "${BYellow}Note: Separate /var requires manual partitioning or LVM.${NC}"
-    echo -e "${BYellow}Using a single partition with /var on root for VPS simplicity.${NC}"
-fi
 
 # Prepare EFI (if UEFI)
 if [ "$BOOT_MODE" = "uefi" ]; then
@@ -539,62 +602,52 @@ cat <<EOF > /mnt/etc/systemd/system/systemd-logind.service.d/hidepid.conf
 SupplementaryGroups=proc
 EOF
 
-# Create installation info
-cat > /mnt/root/.install-env <<EOF
-export INSTALL_DISK="$DISK"
-export INSTALL_USER="$USERNAME"
-export INSTALL_HOST="$HOSTNAME"
-export INSTALL_DATE="$(date)"
-export INSTALL_TYPE="vps"
-export INSTALL_SSH_PORT="$SSH_PORT"
-export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
-export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
-export INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
-export INSTALL_TMP_SIZE="${TMP_SIZE_GB}G"
-export INSTALL_TIMEZONE="$TIMEZONE"
-export INSTALL_LOCALE="$LOCALE"
-export INSTALL_KEYMAP="$KEYMAP"
-EOF
+# Create installation info safely with printf %q
+INSTALL_DATE_VAL="$(date)"
+{
+    printf 'export %s=%q\n' \
+        INSTALL_DISK "$DISK" \
+        INSTALL_USER "$USERNAME" \
+        INSTALL_HOST "$HOSTNAME" \
+        INSTALL_DATE "$INSTALL_DATE_VAL" \
+        INSTALL_TYPE "vps" \
+        INSTALL_SSH_PORT "$SSH_PORT" \
+        INSTALL_SSH_PUBKEY "$SSH_PUBKEY" \
+        INSTALL_ALLOW_NO_SSH_KEY "$ALLOW_NO_SSH_KEY" \
+        INSTALL_SYSCTL_PROFILE "$SYSCTL_PROFILE" \
+        INSTALL_DISABLE_IPV6 "$DISABLE_IPV6" \
+        INSTALL_TMP_SIZE "${TMP_SIZE_GB}G" \
+        INSTALL_TIMEZONE "$TIMEZONE" \
+        INSTALL_LOCALE "$LOCALE" \
+        INSTALL_KEYMAP "$KEYMAP"
+} > /mnt/root/.install-env
 chmod 600 /mnt/root/.install-env
 
-cat > /mnt/set-install-vars.sh <<EOF
-export _INSTALL_DISK="$DISK"
-export _INSTALL_USER="$USERNAME"
-export _INSTALL_HOST="$HOSTNAME"
-export _INSTALL_SSH_PORT="$SSH_PORT"
-export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
-export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
-export _INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
-export _INSTALL_TMP_SIZE="${TMP_SIZE_GB}G"
-export _INSTALL_TYPE="vps"
-export _INSTALL_TIMEZONE="$TIMEZONE"
-export _INSTALL_LOCALE="$LOCALE"
-export _INSTALL_KEYMAP="$KEYMAP"
-EOF
+{
+    printf 'export %s=%q\n' \
+        _INSTALL_DISK "$DISK" \
+        _INSTALL_USER "$USERNAME" \
+        _INSTALL_HOST "$HOSTNAME" \
+        _INSTALL_SSH_PORT "$SSH_PORT" \
+        _INSTALL_SSH_PUBKEY "$SSH_PUBKEY" \
+        _INSTALL_ALLOW_NO_SSH_KEY "$ALLOW_NO_SSH_KEY" \
+        _INSTALL_SYSCTL_PROFILE "$SYSCTL_PROFILE" \
+        _INSTALL_DISABLE_IPV6 "$DISABLE_IPV6" \
+        _INSTALL_TMP_SIZE "${TMP_SIZE_GB}G" \
+        _INSTALL_TYPE "vps" \
+        _INSTALL_TIMEZONE "$TIMEZONE" \
+        _INSTALL_LOCALE "$LOCALE" \
+        _INSTALL_KEYMAP "$KEYMAP"
+} > /mnt/set-install-vars.sh
+chmod 700 /mnt/set-install-vars.sh
 
-chmod +x /mnt/set-install-vars.sh
-cp "$SCRIPT_DIR/vps-chroot.sh" /mnt/
-chmod +x /mnt/vps-chroot.sh
+install -m 0755 "$SCRIPT_DIR/vps-chroot.sh" /mnt/vps-chroot.sh
 
 # Stage the complete sysctl bundle. The chroot helper selects and installs the
 # requested layers without applying them to the live ISO kernel.
-SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
 SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
-SYSCTL_BUNDLE_FILES=(
-    sysctl.sh
-    60-awesome-security-core.conf
-    70-awesome-workstation-network.conf
-    80-awesome-performance.conf
-    80-awesome-bbr.modules
-    90-awesome-strict.conf
-    90-awesome-ipv6-disabled.conf
-)
 install -d -m 0755 "$SYSCTL_STAGING_DIR"
 for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
-    if [[ ! -f "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
-        echo -e "${BRed}Missing sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
-        exit 1
-    fi
     install -m 0644 "$SYSCTL_SOURCE_DIR/$sysctl_file" "$SYSCTL_STAGING_DIR/$sysctl_file"
 done
 chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
@@ -678,6 +731,8 @@ arch-chroot /mnt bash -c "source /set-install-vars.sh && /vps-chroot.sh"
 # -----------------------
 # 9. CLEANUP
 # -----------------------
+
+CLEANUP_ENABLED=0
 
 echo -e "${BBlue}Performing cleanup...${NC}"
 log_action "Performing cleanup."

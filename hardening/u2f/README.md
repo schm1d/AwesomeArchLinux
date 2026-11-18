@@ -16,9 +16,9 @@ Plug the authenticator in first. Touch it when it blinks. Enroll a **second** ke
 ## What the Script Does
 
 1. Installs `pam-u2f`, `libfido2`, `pcsclite`, and `ccid`, and starts `pcscd`
-2. Enrolls the token with `pamu2fcfg` into `/etc/u2f_mappings`
-3. Inserts `pam_u2f` at the top of local login stacks (`system-local-login`, `login`, GDM/SDDM/LightDM when present)
-4. Optionally wires `/etc/pam.d/sudo`
+2. Enrolls the token with `pamu2fcfg` (run directly as `root` with `-u <user>` so `/dev/hidraw*` seat ACLs do not block SSH or cross-user enrollment) into `/etc/u2f_mappings`
+3. Inserts `pam_u2f` **after** `auth include system-login` / `auth include system-auth` in `/etc/pam.d/system-local-login` (so `pam_faillock` and password verification run first, and `[default=die]` aborts bad passwords before prompting the hardware key; also updates `login` / GDM / SDDM / LightDM only when present and not already including `system-local-login`, avoiding double touch prompts)
+4. Optionally wires `/etc/pam.d/sudo` (after `auth include system-auth`)
 5. Refuses to touch `sshd` PAM when TOTP is already configured
 
 ## Why not pam_u2f on SSH?
@@ -35,9 +35,9 @@ That is the phishing-resistant SSH path. TOTP remains useful as a software backu
 
 ## Gotchas
 
-- **Lockout.** `--sudo` without a spare key and an open root session will strand you. The script never writes sshd PAM for this reason.
+- **Lockout & local root TTY.** `--sudo` without a spare key and an open root session will strand you. In addition, `/etc/pam.d/login` includes `system-local-login`: without `--allow-missing` (`nouserok`) or an enrolled key for `root` (`sudo ./u2f.sh --enroll -u root`), local console `root` login also requires U2F, meaning lockout recovery requires an open root/SSH session or booting live/rescue media.
 - **`nouserok`.** `--allow-missing` lets unmapped users skip the key. That is a staged rollout, not a hardened end state.
-- **Origin.** Mappings are bound to `pam://<short-hostname>`. Renaming the host breaks existing mappings; re-enroll.
+- **Origin.** Mappings are bound to `pam://<short-hostname>` (derived strictly from `/etc/hostname` / `hostnamectl --static` / `uname -n`, lowercased). Renaming the host breaks existing mappings; re-enroll.
 - **PIN.** FIDO2 tokens with a PIN will prompt for it. Empty PIN + stolen key is just a second password sitting on a USB stick.
 - **NFC / older U2F.** If `fido2-token -L` is empty, the key is not talking to the host (cable, udev, or `pcscd`).
 - **USBGuard.** If USBGuard is already enforcing, allow the authenticator before enrollment.
@@ -48,12 +48,14 @@ That is the phishing-resistant SSH path. TOTP remains useful as a software backu
 |------|--------|
 | `/etc/u2f_mappings` | Central user→key mapping (mode 644) |
 | `/etc/pam.d/system-local-login` | `auth required pam_u2f.so cue origin=...` |
-| `/etc/pam.d/login`, `gdm-password`, `sddm`, `lightdm` | Same line, when the file exists |
+| `/etc/pam.d/login`, `gdm-password`, `sddm`, `lightdm` | Same line, when present and not already including `system-local-login` |
 | `/etc/pam.d/sudo` | Only with `--sudo` |
 
 Timestamped `*.bak.*` copies are written next to every edited PAM file.
 
 ## Recovery
+
+From an already-open root/SSH session (or from Arch live/rescue media if `root` has no enrolled U2F key and `nouserok` is not set):
 
 ```bash
 ls /etc/pam.d/*.bak.*

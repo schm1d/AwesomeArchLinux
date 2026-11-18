@@ -1,6 +1,6 @@
 # AppArmor Hardening for Arch Linux
 
-Mandatory Access Control (MAC) profiles for critical system services on Arch Linux. This script installs AppArmor, configures GRUB to enable it at boot, and deploys enforce-mode profiles for seven services.
+Mandatory Access Control (MAC) profiles for critical system services on Arch Linux. This script installs AppArmor, configures the detected bootloader (signed UKIs via `/etc/kernel/cmdline`, systemd-boot entries, or GRUB) to enable it at boot, and deploys enforce-mode profiles for seven services.
 
 ## Usage
 
@@ -8,7 +8,7 @@ Mandatory Access Control (MAC) profiles for critical system services on Arch Lin
 # Full installation and enforcement
 sudo ./apparmor.sh
 
-# Preview profiles without installing (writes to /tmp/apparmor-preview/)
+# Preview profiles without installing (writes to /tmp/apparmor-preview.XXXXXX/)
 sudo ./apparmor.sh --dry-run
 ```
 
@@ -24,13 +24,13 @@ sudo aa-status
 
 | Profile | Binary | Purpose |
 |---|---|---|
-| `usr.bin.nginx` | `/usr/bin/nginx` | Web server. Allows reading config, web content, TLS certs. Grants `net_bind_service` for port 80/443, plus `setuid`/`setgid`/`dac_override` for worker process management. |
-| `usr.bin.sshd` | `/usr/bin/sshd` | SSH daemon. Allows host key access, PAM authentication, PTY allocation, and logging. Grants `sys_chroot`, `audit_write`, `kill` for privilege separation. Login shells execute unconfined (`Ux`). |
-| `usr.bin.fail2ban-server` | `/usr/bin/fail2ban-server` | Intrusion prevention. Reads all logs to detect brute force, writes its own state/log. Executes `nft`/`iptables` for ban actions. Grants `net_admin`/`net_raw`/`dac_read_search`. |
-| `usr.bin.freshclam` | `/usr/bin/freshclam` | ClamAV signature updater. Network access (TCP) to download updates. Writes to `/var/lib/clamav/`. Grants `setuid`/`setgid` for privilege drop. |
-| `usr.bin.clamd` | `/usr/bin/clamd` | ClamAV scanning daemon. Reads signature database and files submitted via `/tmp/`. Communicates over Unix sockets only (no network). Grants `dac_override` for scanning files owned by other users. |
-| `usr.bin.stubby` | `/usr/bin/stubby` | DNS-over-TLS resolver. Network access for upstream DNS resolution over TLS. Reads its config and TLS trust store. Grants `net_bind_service` for port 53 listening. **Only deployed if `/usr/bin/stubby` exists** — the default AwesomeArchLinux path uses `systemd-resolved` native DoT instead of Stubby, so this profile is a no-op unless you installed Stubby manually as an opt-in. |
-| `usr.bin.chronyd` | `/usr/bin/chronyd` | NTP daemon. UDP network access for time synchronization. Grants `sys_time` to adjust the system clock. Reads hardware clock devices (`/dev/rtc*`, `/dev/pps*`). |
+| `usr.bin.nginx` | `/usr/bin/nginx` | Web server. Allows reading config, web content (`/var/www`, `/srv/http`, `/usr/share/nginx/html`), TLS certs (`abstractions/ssl_certs`, `/etc/letsencrypt`, `/etc/ssl`), and PHP-FPM/Unix upstream sockets (`/run/php-fpm/*.sock`). Grants `net_bind_service` for port 80/443, plus `setuid`/`setgid`/`chown`/`dac_override`/`dac_read_search` for worker and cache management. |
+| `usr.bin.sshd` | `/usr/bin/sshd` | SSH daemon. Covers OpenSSH 10.x split helpers (`sshd-session`, `sshd-auth`, `sftp-server`, `ssh-sk-helper`, `ssh-pkcs11-helper`), host and user SSH key access, PAM/systemd-logind/faillock/wtmp (`libpam-systemd`, `wutmp`, `/run/faillock`), systemd notify socket, PTY allocation, and logging. Grants `sys_chroot`, `sys_resource`, `audit_write`, `dac_read_search`, `kill` for privilege separation. Login shells (`bash`, `sh`, `zsh`, `fish`, `git-shell`) execute unconfined (`Ux`) and `nologin` runs confined (`rix`). |
+| `usr.bin.fail2ban-server` | `/usr/bin/fail2ban-server` | Intrusion prevention. Reads `/var/log/`, `/run/log/journal/`, and `/etc/machine-id` to detect brute force, locks/writes `/var/lib/fail2ban/`, and uses Unix/Netlink sockets. Executes Python (`mrix`), action shells/utilities (`bash`/`sh`/`dash`, `sed`/`grep`/`gawk`/`awk`), and `nft`/`iptables`/`xtables-*-multi` for ban actions. Grants `net_admin`/`net_raw`/`dac_read_search`. |
+| `usr.bin.freshclam` | `/usr/bin/freshclam` | ClamAV signature updater. TCP + TLS (`abstractions/ssl_certs`) network access to download updates and local Unix stream access (`peer=(label=clamd)`) to notify `clamd` after signature reloads. Writes to `/var/lib/clamav/`. Grants `setuid`/`setgid` for privilege drop. |
+| `usr.bin.clamd` | `/usr/bin/clamd` | ClamAV scanning daemon. Uses `abstractions/nameservice-strict` (no TCP/UDP network), reads signature database and scan targets, manages temporary unpacked files in `/tmp` and `/var/tmp`, and communicates over local Unix stream sockets only. Grants `dac_override` for scanning files owned by other users. |
+| `usr.bin.stubby` | `/usr/bin/stubby` | DNS-over-TLS resolver. Network access for upstream DNS resolution over TLS. Reads its config and TLS trust store (`abstractions/ssl_certs`). Grants `net_bind_service` for port 53 listening. **Only deployed if `/usr/bin/stubby` exists** — if absent, any stale live/on-disk `usr.bin.stubby` profile is unloaded and removed. |
+| `usr.bin.chronyd` | `/usr/bin/chronyd` | NTP/NTS daemon. UDP (NTP) and TCP (NTS-KE port 4460) network access plus OpenSSL, `ssl_certs`, and `p11-kit` abstractions (for GnuTLS TLS 1.3 trust verification), `/run/systemd/notify`, and `/etc/chrony.keys`. Grants `sys_time`, `setuid`/`setgid`, `chown`, `dac_override`, and `net_bind_service`. Accesses hardware clock devices (`/dev/rtc*`, `/dev/pps*`, `/dev/ptp*` `rw`). |
 
 ## Customization
 
@@ -130,8 +130,13 @@ AppArmor ships with reusable rule sets in `/etc/apparmor.d/abstractions/`. Inclu
 |---|---|
 | `abstractions/base` | Core system access (`/etc/ld.so.cache`, `/lib/**`, `/proc/meminfo`, etc.) |
 | `abstractions/nameservice` | DNS resolution, NSS, `/etc/hosts`, `/etc/resolv.conf` |
-| `abstractions/openssl` | OpenSSL config, CA certificates, entropy sources |
+| `abstractions/nameservice-strict` | Local NSS/DNS config lookup without granting direct TCP/UDP sockets |
+| `abstractions/openssl` | OpenSSL config and entropy sources |
+| `abstractions/ssl_certs` | System CA trust stores, Let's Encrypt / ACME certificate bundles |
+| `abstractions/p11-kit` | PKCS#11 / `p11-kit-trust` modules (used by GnuTLS-linked daemons like `chronyd`) |
 | `abstractions/authentication` | PAM, `/etc/passwd`, `/etc/shadow`, `/etc/nsswitch.conf` |
+| `abstractions/libpam-systemd` | `systemd-logind` D-Bus session creation/release for PAM logins |
+| `abstractions/wutmp` | `utmp`, `wtmp`/`wtmpdb`, `btmp`, and `lastlog`/`lastlog2` login accounting |
 | `abstractions/python` | Python interpreter, stdlib, site-packages |
 
 ### Useful Commands Reference
@@ -152,7 +157,8 @@ sudo rm /etc/apparmor.d/usr.bin.myservice
 
 # Disable AppArmor entirely (not recommended)
 sudo systemctl disable apparmor.service
-# Then remove kernel params from /etc/default/grub and run grub-mkconfig
+# Then remove apparmor=1 security=apparmor from /etc/kernel/cmdline (and rebuild/sign UKIs),
+# systemd-boot entry options, or /etc/default/grub (and run grub-mkconfig)
 ```
 
 ## References

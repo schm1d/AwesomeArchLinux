@@ -46,10 +46,13 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
+# shellcheck disable=SC1090,SC1091
+source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -93,7 +96,7 @@ Optional:
   -e EMAIL      Admin email for cache manager
   --ssl-bump    Enable SSL bump (HTTPS interception with peek-and-splice)
   --dns-filter  Enable DNS-level ad/malware filtering via dnsmasq
-  --dry-run     Write configs but do not start services
+  --dry-run     Preview planned configuration and firewall rules without modifying the system
   -h            Show this help
 
 Examples:
@@ -105,13 +108,14 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -n)           NETWORK="$2"; shift 2 ;;
-        -p)           HTTP_PORT="$2"; shift 2 ;;
-        -P)           HTTPS_PORT="$2"; shift 2 ;;
-        -c)           CACHE_SIZE_MB="$2"; shift 2 ;;
-        -e)           ADMIN_EMAIL="$2"; shift 2 ;;
+        -n)           need_arg "$@"; NETWORK="$2"; shift 2 ;;
+        -p)           need_arg "$@"; HTTP_PORT="$2"; shift 2 ;;
+        -P)           need_arg "$@"; HTTPS_PORT="$2"; shift 2 ;;
+        -c)           need_arg "$@"; CACHE_SIZE_MB="$2"; shift 2 ;;
+        -e)           need_arg "$@"; ADMIN_EMAIL="$2"; shift 2 ;;
         --ssl-bump)   SSL_BUMP=true; shift ;;
         --dns-filter) DNS_FILTER=true; shift ;;
         --dry-run)    DRY_RUN=true; shift ;;
@@ -132,25 +136,65 @@ IFS='./' read -r NET_O1 NET_O2 NET_O3 NET_O4 NET_PREFIX <<< "$NETWORK"
 for octet in "$NET_O1" "$NET_O2" "$NET_O3" "$NET_O4"; do
     (( 10#$octet <= 255 )) || err "Invalid CIDR address: $NETWORK"
 done
-(( 10#$NET_PREFIX <= 32 )) || err "Invalid CIDR prefix: $NETWORK"
-[[ "$HTTP_PORT" =~ ^[0-9]+$ ]] && (( HTTP_PORT >= 1 && HTTP_PORT <= 65535 )) \
+(( 10#$NET_PREFIX >= 1 && 10#$NET_PREFIX <= 32 )) || err "Invalid CIDR prefix: $NETWORK (must be /1 through /32)"
+[[ "$HTTP_PORT" =~ ^[0-9]+$ ]] && (( 10#$HTTP_PORT >= 1 && 10#$HTTP_PORT <= 65535 )) \
     || err "Invalid HTTP port: $HTTP_PORT"
-[[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) \
+[[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( 10#$HTTPS_PORT >= 1 && 10#$HTTPS_PORT <= 65535 )) \
     || err "Invalid HTTPS port: $HTTPS_PORT"
-[[ "$CACHE_SIZE_MB" =~ ^[0-9]+$ ]] && (( CACHE_SIZE_MB >= 1 )) \
+if [[ "$SSL_BUMP" == true ]] && (( 10#$HTTP_PORT == 10#$HTTPS_PORT )); then
+    err "HTTP port (-p $HTTP_PORT) and HTTPS port (-P $HTTPS_PORT) must differ when --ssl-bump is enabled"
+fi
+[[ "$CACHE_SIZE_MB" =~ ^[0-9]+$ ]] && (( 10#$CACHE_SIZE_MB >= 1 )) \
     || err "Invalid cache size: $CACHE_SIZE_MB"
 
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@$(hostname -f 2>/dev/null || echo localhost)}"
+LOCAL_MGR_PORT=3127
+if (( 10#$HTTP_PORT == 3127 || 10#$HTTPS_PORT == 3127 )); then
+    LOCAL_MGR_PORT=3126
+    if (( 10#$HTTP_PORT == 3126 || 10#$HTTPS_PORT == 3126 )); then
+        LOCAL_MGR_PORT=3125
+    fi
+fi
 
-readonly NETWORK HTTP_PORT HTTPS_PORT CACHE_SIZE_MB ADMIN_EMAIL SSL_BUMP DNS_FILTER DRY_RUN
+PROXY_HOST=$(cat /etc/hostname 2>/dev/null || uname -n)
+PROXY_HOST="${PROXY_HOST//[[:space:]]/}"
+if ! aal_valid_hostname "$PROXY_HOST"; then
+    PROXY_HOST="localhost"
+fi
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@${PROXY_HOST}}"
+unset PROXY_HOST
+aal_valid_email "$ADMIN_EMAIL" || err "Invalid admin email address: $ADMIN_EMAIL"
+
+readonly NETWORK HTTP_PORT HTTPS_PORT LOCAL_MGR_PORT CACHE_SIZE_MB ADMIN_EMAIL SSL_BUMP DNS_FILTER DRY_RUN
+
+# Build the nftables ruleset block once so --dry-run can preview it cleanly.
+SQUID_NFT_BLOCK=$(cat <<EOF
+table ip squid_proxy {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        ip saddr $NETWORK tcp dport 80 redirect to :$HTTP_PORT
+EOF
+)
+if [[ "$SSL_BUMP" == true ]]; then
+    SQUID_NFT_BLOCK+=$'\n'"        ip saddr $NETWORK tcp dport 443 redirect to :$HTTPS_PORT"
+fi
+SQUID_NFT_BLOCK+=$'\n    }\n}'
+SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTP_PORT accept comment \"awesome-squid-http\""
+if [[ "$SSL_BUMP" == true ]]; then
+    SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTPS_PORT accept comment \"awesome-squid-https\""
+fi
+if [[ "$DNS_FILTER" == true ]]; then
+    SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new udp dport 53 accept comment \"awesome-squid-dns-udp\""
+    SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport 53 accept comment \"awesome-squid-dns-tcp\""
+fi
 
 info "Network:       $NETWORK"
 info "HTTP port:     $HTTP_PORT"
 info "HTTPS port:    $HTTPS_PORT"
+info "Local mgr:     127.0.0.1:${LOCAL_MGR_PORT}"
 info "Cache size:    ${CACHE_SIZE_MB} MB"
+info "Admin email:   $ADMIN_EMAIL"
 info "SSL bump:      $SSL_BUMP"
 info "DNS filter:    $DNS_FILTER"
-[[ "$DRY_RUN" == true ]] && warn "Dry-run mode: configs will be written but services will not start"
 
 if [[ "$SSL_BUMP" == true ]]; then
     echo
@@ -160,6 +204,25 @@ if [[ "$SSL_BUMP" == true ]]; then
     warn " authorization to inspect traffic on this network."
     warn "============================================================"
     echo
+fi
+
+if [[ "$DRY_RUN" == true ]]; then
+    warn "Dry-run mode: no packages installed and no system files, sysctls, or firewall rules modified"
+    echo
+    info "Packages that would be installed: squid openssl nftables curl$( [[ "$DNS_FILTER" == true ]] && printf ' dnsmasq' )"
+    info "Files that would be written:"
+    info "  - $SQUID_CONF (0640 root:proxy)"
+    info "  - $BLOCKLIST_DIR/{ads,malware,whitelist}.txt (0750 dir, 0640 files root:proxy)"
+    [[ "$SSL_BUMP" == true ]] && info "  - $SQUID_SSL_DIR/{squid-ca.pem,squid-ca.key,dhparam.pem} (0750 dir root:proxy)"
+    [[ "$DNS_FILTER" == true ]] && info "  - /etc/dnsmasq.d/proxy-{blocklist,dns}.conf & /etc/systemd/system/dnsmasq.service.d/hardening.conf"
+    info "  - /etc/sysctl.d/99-z-squid-proxy.conf (net.ipv4.ip_forward = 1)"
+    info "  - /etc/systemd/system/squid.service.d/hardening.conf"
+    info "  - /etc/systemd/system/squid-blocklist-update.{service,timer}"
+    echo
+    info "Planned nftables block (squid-proxy):"
+    printf '%s\n\n' "$SQUID_NFT_BLOCK"
+    msg "Dry-run complete. Re-run without --dry-run to apply."
+    exit 0
 fi
 
 # --- Helper: backup a file before overwriting ---
@@ -197,24 +260,33 @@ done
 
 msg "Setting up Squid directories..."
 
-# Squid package on Arch creates the 'proxy' user; verify
+# Squid package on Arch creates the 'proxy' user; verify user and group
+if ! getent group proxy &>/dev/null; then
+    groupadd -r proxy
+    info "Created proxy group"
+fi
 if ! getent passwd proxy &>/dev/null; then
-    useradd -r -d /var/cache/squid -s /usr/bin/nologin -c "Squid proxy" proxy
+    useradd -r -g proxy -d /var/cache/squid -s /usr/bin/nologin -c "Squid proxy" proxy
     info "Created proxy user"
 fi
 
-mkdir -p /etc/squid/conf.d "$SQUID_CACHE_DIR" /var/log/squid "$BLOCKLIST_DIR" "$SQUID_SSL_DIR" /run/squid
-
-chown proxy:proxy "$SQUID_CACHE_DIR" /var/log/squid /run/squid
-chmod 750 "$SQUID_CACHE_DIR" /var/log/squid
-chmod 700 "$SQUID_SSL_DIR"
+install -d -o root -g proxy -m 0750 /etc/squid /etc/squid/conf.d "$BLOCKLIST_DIR" "$SQUID_SSL_DIR"
+install -d -o proxy -g proxy -m 0750 "$SQUID_CACHE_DIR" /var/log/squid /run/squid
 
 # Create empty blocklist files so squid.conf ACLs don't error on missing files
-touch "$BLOCKLIST_DIR/ads.txt" "$BLOCKLIST_DIR/malware.txt"
-[[ ! -f "$BLOCKLIST_DIR/whitelist.txt" ]] && cat > "$BLOCKLIST_DIR/whitelist.txt" <<'EOF'
+for bl_file in "$BLOCKLIST_DIR/ads.txt" "$BLOCKLIST_DIR/malware.txt"; do
+    [[ -f "$bl_file" ]] || install -o root -g proxy -m 0640 /dev/null "$bl_file"
+    chown root:proxy "$bl_file"
+    chmod 0640 "$bl_file"
+done
+if [[ ! -f "$BLOCKLIST_DIR/whitelist.txt" ]]; then
+    cat > "$BLOCKLIST_DIR/whitelist.txt" <<'EOF'
 # Whitelisted domains — one per line (e.g., .example.com)
 # These bypass blocklist filtering
 EOF
+fi
+chown root:proxy "$BLOCKLIST_DIR/whitelist.txt"
+chmod 0640 "$BLOCKLIST_DIR/whitelist.txt"
 
 msg "Directories created"
 
@@ -228,25 +300,29 @@ if [[ "$SSL_BUMP" == true ]]; then
     if [[ -f "$SQUID_SSL_DIR/squid-ca.pem" && -f "$SQUID_SSL_DIR/squid-ca.key" ]]; then
         info "SSL CA already exists, skipping generation"
     else
-        openssl req -new -newkey rsa:4096 -sha256 -days 3650 -nodes -x509 \
-            -keyout "$SQUID_SSL_DIR/squid-ca.key" \
-            -out "$SQUID_SSL_DIR/squid-ca.pem" \
-            -subj "/CN=Squid Proxy CA/O=AwesomeArchLinux Transparent Proxy" \
-            2>/dev/null
-
-        chmod 600 "$SQUID_SSL_DIR/squid-ca.key"
-        chmod 644 "$SQUID_SSL_DIR/squid-ca.pem"
+        (
+            umask 077
+            openssl req -new -newkey rsa:4096 -sha256 -days 3650 -nodes -x509 \
+                -keyout "$SQUID_SSL_DIR/squid-ca.key" \
+                -out "$SQUID_SSL_DIR/squid-ca.pem" \
+                -subj "/CN=Squid Proxy CA/O=AwesomeArchLinux Transparent Proxy" \
+                2>/dev/null
+        )
 
         msg "SSL CA generated (valid 10 years)"
         warn "Deploy $SQUID_SSL_DIR/squid-ca.pem to client trust stores"
     fi
+    chown root:proxy "$SQUID_SSL_DIR/squid-ca.key" "$SQUID_SSL_DIR/squid-ca.pem"
+    chmod 0640 "$SQUID_SSL_DIR/squid-ca.key"
+    chmod 0644 "$SQUID_SSL_DIR/squid-ca.pem"
 
     # Generate DH parameters for SSL bump
     if [[ ! -f "$SQUID_SSL_DIR/dhparam.pem" ]]; then
         openssl dhparam -out "$SQUID_SSL_DIR/dhparam.pem" 2048 2>/dev/null
-        chmod 644 "$SQUID_SSL_DIR/dhparam.pem"
         msg "DH parameters generated (2048-bit)"
     fi
+    chown root:proxy "$SQUID_SSL_DIR/dhparam.pem"
+    chmod 0644 "$SQUID_SSL_DIR/dhparam.pem"
 
     # Initialize SSL certificate database
     if [[ ! -d "$SQUID_CACHE_DIR/ssl_db" ]]; then
@@ -266,6 +342,7 @@ install -d -m 0755 /usr/local/bin
 cat > /usr/local/bin/awesome-squid-blocklist-update <<'BLOCKLIST_UPDATE'
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 readonly BLOCKLIST_DIR="${AAL_SQUID_BLOCKLIST_DIR:-/etc/squid/blocklists}"
 readonly MIN_ENTRIES="${AAL_MIN_BLOCKLIST_ENTRIES:-1000}"
@@ -324,7 +401,7 @@ finish() {
         if [[ "$NO_RECONFIGURE" == false ]]; then
             "$SQUID_BIN" -k reconfigure >/dev/null 2>&1 || \
                 printf 'Warning: could not reload the restored Squid blocklists.\n' >&2
-            if [[ "$DNS_ACTIVE" == true ]]; then
+            if [[ "$DNS_ACTIVE" == true ]] && "$SYSTEMCTL_BIN" is-active --quiet dnsmasq; then
                 "$SYSTEMCTL_BIN" reload dnsmasq >/dev/null 2>&1 || \
                     printf 'Warning: could not reload the restored dnsmasq blocklist.\n' >&2
             fi
@@ -366,8 +443,13 @@ stage_blocklist() {
         return 1
     fi
 
-    chmod 0644 "$compiled"
-    chown root:root "$compiled"
+    if getent group proxy &>/dev/null; then
+        chown root:proxy "$compiled"
+        chmod 0640 "$compiled"
+    else
+        chown root:root "$compiled"
+        chmod 0644 "$compiled"
+    fi
     STAGE_RESULT="$compiled"
     printf 'Validated %s blocklist: %d domains.\n' "$label" "$count"
 }
@@ -413,7 +495,7 @@ done
 for i in "${!DESTINATIONS[@]}"; do
     mv -f -- "${STAGED_FILES[$i]}" "${DESTINATIONS[$i]}"
     STAGED_FILES[$i]=""
-    (( REPLACED += 1 ))
+    REPLACED=$(( REPLACED + 1 ))
 done
 
 if [[ "$NO_RECONFIGURE" == false ]]; then
@@ -423,7 +505,9 @@ if [[ "$NO_RECONFIGURE" == false ]]; then
     fi
     "$SQUID_BIN" -k reconfigure
     if [[ "$DNS_ACTIVE" == true ]]; then
-        "$SYSTEMCTL_BIN" reload dnsmasq
+        if "$SYSTEMCTL_BIN" is-active --quiet dnsmasq; then
+            "$SYSTEMCTL_BIN" reload dnsmasq
+        fi
     fi
 fi
 
@@ -432,11 +516,17 @@ printf 'Squid blocklists updated successfully.\n'
 BLOCKLIST_UPDATE
 chmod 0755 /usr/local/bin/awesome-squid-blocklist-update
 
-if [[ "$DRY_RUN" == false ]]; then
-    /usr/local/bin/awesome-squid-blocklist-update --no-reconfigure
-else
-    info "Dry-run: skipping blocklist download"
+if [[ "$DNS_FILTER" == false ]]; then
+    if [[ -e /etc/dnsmasq.d/proxy-dns.conf || -e /etc/dnsmasq.d/proxy-blocklist.conf ]]; then
+        rm -f /etc/dnsmasq.d/proxy-dns.conf /etc/dnsmasq.d/proxy-blocklist.conf
+        info "Removed stale /etc/dnsmasq.d/proxy-{dns,blocklist}.conf (DNS filter disabled)"
+        if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+            systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+        fi
+    fi
 fi
+
+/usr/local/bin/awesome-squid-blocklist-update --no-reconfigure
 
 # =============================================================================
 # 5. WRITE SQUID CONFIGURATION
@@ -452,6 +542,8 @@ cat > "$SQUID_CONF" <<EOF
 # =============================================================================
 
 # --- Ports ---
+# Loopback forward/management port (required by Squid 7+ and used for local cachemgr/testing)
+http_port 127.0.0.1:${LOCAL_MGR_PORT}
 http_port ${HTTP_PORT} intercept
 EOF
 
@@ -619,12 +711,15 @@ cat >> "$SQUID_CONF" <<EOF
 # =============================================================================
 
 shutdown_lifetime 5 seconds
+cache_mgr ${ADMIN_EMAIL}
 cache_effective_user proxy
 cache_effective_group proxy
 pid_filename /run/squid/squid.pid
 coredump_dir ${SQUID_CACHE_DIR}
 EOF
 
+chown root:proxy "$SQUID_CONF"
+chmod 0640 "$SQUID_CONF"
 msg "squid.conf written"
 
 # =============================================================================
@@ -646,7 +741,7 @@ acl step1 at_step SslBump1
 acl step2 at_step SslBump2
 acl step3 at_step SslBump3
 
-# Peek at ClientHello to read -r SNI
+# Peek at ClientHello to read SNI
 ssl_bump peek step1
 
 # Splice (pass-through) by default — no decryption
@@ -675,23 +770,44 @@ fi
 if [[ "$DNS_FILTER" == true ]]; then
     msg "Configuring DNS filtering via dnsmasq..."
 
-    # Check for systemd-resolved conflict on port 53
+    # Check for systemd-resolved conflict on port 53 (UDP or TCP)
     if systemctl is-active systemd-resolved &>/dev/null; then
-        if ss -tlnp | grep -q ':53 '; then
+        if ss -tulnp | grep -q ':53 '; then
             warn "systemd-resolved is bound to port 53"
             info "Disabling resolved stub listener for dnsmasq..."
-            mkdir -p /etc/systemd/resolved.conf.d
+            install -d -m 0755 /etc/systemd/resolved.conf.d
             cat > /etc/systemd/resolved.conf.d/disable-stub.conf <<'EOF'
 [Resolve]
 DNSStubListener=no
 EOF
+            chmod 0644 /etc/systemd/resolved.conf.d/disable-stub.conf
             systemctl restart systemd-resolved 2>/dev/null || true
         fi
     fi
 
+    # Ensure /etc/dnsmasq.conf includes /etc/dnsmasq.d/*.conf idempotently
+    # (the *.conf filter prevents dotfile temp/backup files from being parsed)
+    if [[ -f /etc/dnsmasq.conf ]]; then
+        if grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d/?([[:space:]]*(#.*)?)$' /etc/dnsmasq.conf || \
+           ! grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d/?,\*\.conf([[:space:]]|$)' /etc/dnsmasq.conf; then
+            backup_file /etc/dnsmasq.conf
+            sed -i -E 's|^([[:space:]]*conf-dir=/etc/dnsmasq\.d/?([[:space:]]*(#.*)?))$|# \1|' /etc/dnsmasq.conf
+            if ! grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d/?,\*\.conf([[:space:]]|$)' /etc/dnsmasq.conf; then
+                printf '\nconf-dir=/etc/dnsmasq.d/,*.conf\n' >> /etc/dnsmasq.conf
+            fi
+            info "Enabled conf-dir=/etc/dnsmasq.d/,*.conf in /etc/dnsmasq.conf"
+        fi
+    else
+        cat > /etc/dnsmasq.conf <<'EOF'
+conf-dir=/etc/dnsmasq.d/,*.conf
+EOF
+        chmod 0644 /etc/dnsmasq.conf
+        info "Created /etc/dnsmasq.conf with conf-dir=/etc/dnsmasq.d/,*.conf"
+    fi
+
     # Convert both validated blocklists to dnsmasq format
     DNSMASQ_BLOCKLIST="/etc/dnsmasq.d/proxy-blocklist.conf"
-    mkdir -p /etc/dnsmasq.d
+    install -d -m 0755 /etc/dnsmasq.d
 
     info "Converting blocklists to dnsmasq format..."
     {
@@ -704,11 +820,15 @@ EOF
                 "$BLOCKLIST_DIR/ads.txt" "$BLOCKLIST_DIR/malware.txt" | sort -u
         fi
     } > "$DNSMASQ_BLOCKLIST"
+    chmod 0644 "$DNSMASQ_BLOCKLIST"
 
     # Write dnsmasq main config override
     cat > /etc/dnsmasq.d/proxy-dns.conf <<'EOF'
 # DNS filtering config for transparent proxy
-# Forward queries to privacy-respecting upstreams
+# Ignore /etc/resolv.conf so dnsmasq never loops back to 127.0.0.53
+no-resolv
+
+# Forward queries to privacy-respecting Quad9 upstreams
 server=9.9.9.9
 server=149.112.112.112
 
@@ -726,11 +846,23 @@ domain-needed
 stop-dns-rebind
 rebind-localhost-ok
 EOF
+    chmod 0644 /etc/dnsmasq.d/proxy-dns.conf
+
+    install -d -m 0755 /var/log
+    if [[ ! -f /var/log/dnsmasq.log ]]; then
+        if getent passwd dnsmasq &>/dev/null; then
+            install -o dnsmasq -g "$(id -gn dnsmasq)" -m 0640 /dev/null /var/log/dnsmasq.log
+        else
+            install -o root -g root -m 0640 /dev/null /var/log/dnsmasq.log
+        fi
+    fi
 
     # systemd hardening for dnsmasq
-    mkdir -p /etc/systemd/system/dnsmasq.service.d
+    install -d -m 0755 /etc/systemd/system/dnsmasq.service.d
     cat > /etc/systemd/system/dnsmasq.service.d/hardening.conf <<'EOF'
 [Service]
+ExecStart=
+ExecStart=/usr/bin/dnsmasq -k --enable-dbus --user=dnsmasq --pid-file=/run/dnsmasq/dnsmasq.pid
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -749,11 +881,16 @@ PrivateDevices=yes
 DevicePolicy=closed
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ReadWritePaths=/var/run/dnsmasq
+RuntimeDirectory=dnsmasq
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN
+ReadWritePaths=-/run/dnsmasq /var/log/dnsmasq.log
 EOF
+    chmod 0644 /etc/systemd/system/dnsmasq.service.d/hardening.conf
 
     msg "DNS filtering configured"
+else
+    rm -f /etc/dnsmasq.d/proxy-dns.conf /etc/dnsmasq.d/proxy-blocklist.conf
 fi
 
 # =============================================================================
@@ -764,6 +901,7 @@ msg "Configuring sysctl for transparent interception..."
 
 # Use z- prefix to override the AwesomeArchLinux workstation network layer,
 # which sets ip_forward=0.
+install -d -m 0755 /etc/sysctl.d
 cat > /etc/sysctl.d/99-z-squid-proxy.conf <<'EOF'
 # Squid transparent proxy — override base hardening ip_forward=0
 # Required for nftables REDIRECT to intercept client traffic
@@ -772,8 +910,13 @@ net.ipv4.ip_forward = 1
 # REDIRECT does not require routing 127/8 from non-loopback interfaces.
 net.ipv4.conf.all.route_localnet = 0
 EOF
+chmod 0644 /etc/sysctl.d/99-z-squid-proxy.conf
 
-sysctl --system &>/dev/null
+if [[ -x /usr/lib/systemd/systemd-sysctl ]]; then
+    /usr/lib/systemd/systemd-sysctl /etc/sysctl.d/99-z-squid-proxy.conf &>/dev/null || true
+else
+    sysctl --ignore --system &>/dev/null || true
+fi
 
 # Verify
 if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" != "1" ]]; then
@@ -794,21 +937,6 @@ fi
 
 # Persist only the rules owned by this script. Never snapshot the live ruleset:
 # it can contain transient Docker, Fail2Ban, or CrowdSec state.
-SQUID_NFT_BLOCK=$(cat <<EOF
-table ip squid_proxy {
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        ip saddr $NETWORK tcp dport 80 redirect to :$HTTP_PORT
-EOF
-)
-if [[ "$SSL_BUMP" == true ]]; then
-    SQUID_NFT_BLOCK+=$'\n'"        ip saddr $NETWORK tcp dport 443 redirect to :$HTTPS_PORT"
-fi
-SQUID_NFT_BLOCK+=$'\n    }\n}'
-SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTP_PORT accept comment \"awesome-squid-http\""
-if [[ "$SSL_BUMP" == true ]]; then
-    SQUID_NFT_BLOCK+=$'\n'"insert rule inet filter input ip saddr $NETWORK ct state new tcp dport $HTTPS_PORT accept comment \"awesome-squid-https\""
-fi
 aal_nft_persist_block squid-proxy <<< "$SQUID_NFT_BLOCK"
 
 # Replace only this script's live objects. The hyphenated table is the legacy
@@ -827,9 +955,15 @@ if ! nft list chain inet filter input &>/dev/null; then
 fi
 aal_nft_remove_live_rules inet filter input awesome-squid-http
 aal_nft_remove_live_rules inet filter input awesome-squid-https
+aal_nft_remove_live_rules inet filter input awesome-squid-dns-udp
+aal_nft_remove_live_rules inet filter input awesome-squid-dns-tcp
 nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport "$HTTP_PORT" accept comment "awesome-squid-http"
 if [[ "$SSL_BUMP" == true ]]; then
     nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport "$HTTPS_PORT" accept comment "awesome-squid-https"
+fi
+if [[ "$DNS_FILTER" == true ]]; then
+    nft insert rule inet filter input ip saddr "$NETWORK" ct state new udp dport 53 accept comment "awesome-squid-dns-udp"
+    nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport 53 accept comment "awesome-squid-dns-tcp"
 fi
 
 msg "nftables transparent interception configured"
@@ -855,6 +989,8 @@ cat > /etc/squid/conf.d/tproxy-alternative.txt <<EOF
 # 4. Squid needs CAP_NET_ADMIN capability (already granted in systemd hardening)
 # =============================================================================
 EOF
+chown root:proxy /etc/squid/conf.d/tproxy-alternative.txt
+chmod 0640 /etc/squid/conf.d/tproxy-alternative.txt
 
 # =============================================================================
 # 10. INITIALIZE SQUID CACHE
@@ -869,6 +1005,8 @@ fi
 
 squid -z --foreground 2>/dev/null || warn "Cache initialization returned non-zero (may be OK for rock store)"
 chown -R proxy:proxy "$SQUID_CACHE_DIR"
+# Remove root-owned POSIX shared memory segments created by root 'squid -z'
+rm -f /dev/shm/squid*.shm
 
 msg "Cache initialized"
 
@@ -878,9 +1016,10 @@ msg "Cache initialized"
 
 msg "Applying systemd hardening overrides..."
 
-mkdir -p /etc/systemd/system/squid.service.d
+install -d -m 0755 /etc/systemd/system/squid.service.d
 cat > /etc/systemd/system/squid.service.d/hardening.conf <<'EOF'
 [Service]
+PIDFile=/run/squid/squid.pid
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -901,12 +1040,14 @@ DevicePolicy=closed
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
-ReadWritePaths=/var/cache/squid /var/log/squid /run/squid
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_NET_ADMIN CAP_IPC_LOCK
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+RuntimeDirectory=squid
+ReadWritePaths=/var/cache/squid /var/log/squid -/run/squid
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_NET_ADMIN CAP_IPC_LOCK CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_KILL
 
 LimitNOFILE=65536
 EOF
+chmod 0644 /etc/systemd/system/squid.service.d/hardening.conf
 
 systemctl daemon-reload
 msg "systemd hardening applied"
@@ -917,6 +1058,7 @@ msg "systemd hardening applied"
 
 msg "Creating blocklist update timer..."
 
+install -d -m 0755 /etc/systemd/system
 cat > /etc/systemd/system/squid-blocklist-update.service <<EOF
 [Unit]
 Description=Update Squid proxy domain blocklists
@@ -944,9 +1086,11 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=CAP_KILL
-ReadWritePaths=${BLOCKLIST_DIR} -/etc/dnsmasq.d /run/squid
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_SETUID CAP_SETGID CAP_KILL
+ReadWritePaths=${BLOCKLIST_DIR} -/etc/dnsmasq.d -/run/squid -/var/log/squid
 EOF
+chmod 0644 /etc/systemd/system/squid-blocklist-update.service
 
 cat > /etc/systemd/system/squid-blocklist-update.timer <<'EOF'
 [Unit]
@@ -960,6 +1104,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+chmod 0644 /etc/systemd/system/squid-blocklist-update.timer
 
 systemctl daemon-reload
 systemctl enable squid-blocklist-update.timer
@@ -972,6 +1117,7 @@ msg "Blocklist auto-update timer enabled (daily at 03:00)"
 
 msg "Configuring log rotation..."
 
+install -d -m 0755 /etc/logrotate.d
 cat > /etc/logrotate.d/squid <<'EOF'
 /var/log/squid/*.log {
     daily
@@ -980,12 +1126,14 @@ cat > /etc/logrotate.d/squid <<'EOF'
     delaycompress
     missingok
     notifempty
+    su proxy proxy
     sharedscripts
     postrotate
         squid -k rotate 2>/dev/null || true
     endscript
 }
 EOF
+chmod 0644 /etc/logrotate.d/squid
 
 msg "Log rotation configured (14 days, compressed)"
 
@@ -993,42 +1141,31 @@ msg "Log rotation configured (14 days, compressed)"
 # 14. VALIDATE AND START SERVICES
 # =============================================================================
 
-if [[ "$DRY_RUN" == true ]]; then
-    msg "Dry-run: validating configuration..."
+msg "Starting services..."
 
-    if squid -k parse 2>/dev/null; then
-        msg "Squid config is valid"
+systemctl daemon-reload
+
+# Start dnsmasq first if DNS filtering is enabled
+if [[ "$DNS_FILTER" == true ]]; then
+    systemctl enable --now dnsmasq
+    if systemctl is-active --quiet dnsmasq; then
+        msg "dnsmasq is running"
     else
-        err "Squid config has errors — run: squid -k parse"
+        warn "dnsmasq failed to start — check: journalctl -u dnsmasq -e"
     fi
+fi
 
-    info "Re-run without --dry-run to start services"
+# Start Squid (clean any root-owned rock shm segments left by squid -z)
+rm -f /dev/shm/squid*.shm
+systemctl enable squid
+systemctl restart squid
+
+sleep 3
+
+if systemctl is-active --quiet squid; then
+    msg "squid is running"
 else
-    msg "Starting services..."
-
-    systemctl daemon-reload
-
-    # Start dnsmasq first if DNS filtering is enabled
-    if [[ "$DNS_FILTER" == true ]]; then
-        systemctl enable --now dnsmasq
-        if systemctl is-active --quiet dnsmasq; then
-            msg "dnsmasq is running"
-        else
-            warn "dnsmasq failed to start — check: journalctl -u dnsmasq -e"
-        fi
-    fi
-
-    # Start Squid
-    systemctl enable squid
-    systemctl restart squid
-
-    sleep 3
-
-    if systemctl is-active --quiet squid; then
-        msg "squid is running"
-    else
-        err "squid failed to start. Check: journalctl -u squid -e"
-    fi
+    err "squid failed to start. Check: journalctl -u squid -e"
 fi
 
 # =============================================================================
@@ -1067,12 +1204,14 @@ echo
 echo -e "${C_BLUE}Interception:${C_NC}"
 echo "  Mode:                  Transparent (nftables REDIRECT)"
 echo "  Network:               $NETWORK"
+echo "  Local forward/mgr:     127.0.0.1:$LOCAL_MGR_PORT"
 echo "  HTTP port:             $HTTP_PORT (← port 80 redirected)"
 if [[ "$SSL_BUMP" == true ]]; then
     echo "  HTTPS port:            $HTTPS_PORT (← port 443 redirected)"
     echo "  SSL bump mode:         Peek-and-splice (SNI inspection, no decrypt by default)"
 fi
 echo "  Source restriction:    only $NETWORK may reach Squid intercept ports"
+echo "  Non-intercepted ports: governed by host 'inet filter forward' and NAT masquerade policy"
 echo
 
 echo -e "${C_BLUE}Security features:${C_NC}"
@@ -1106,18 +1245,18 @@ echo "  6. Review TPROXY alternative: /etc/squid/conf.d/tproxy-alternative.txt"
 echo
 
 echo -e "${C_BLUE}Verification commands:${C_NC}"
-echo "  squid -k parse                                # Validate config"
-echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:info    # Proxy status"
-echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:5min    # 5-minute averages"
-echo "  squidclient -h 127.0.0.1 -p $HTTP_PORT mgr:utilization  # Cache utilization"
-echo "  nft list table ip squid_proxy                  # Interception rules"
-echo "  tail -f /var/log/squid/access.log              # Watch traffic"
-echo "  curl -x http://127.0.0.1:$HTTP_PORT http://example.com  # Test proxy"
+echo "  squid -k parse                                                          # Validate config"
+echo "  curl -fsS http://127.0.0.1:${LOCAL_MGR_PORT}/squid-internal-mgr/info    # Proxy status"
+echo "  curl -fsS http://127.0.0.1:${LOCAL_MGR_PORT}/squid-internal-mgr/5min    # 5-minute averages"
+echo "  curl -fsS http://127.0.0.1:${LOCAL_MGR_PORT}/squid-internal-mgr/utilization  # Cache utilization"
+echo "  nft list table ip squid_proxy                                           # Interception rules"
+echo "  tail -f /var/log/squid/access.log                                       # Watch traffic"
+echo "  curl -x http://127.0.0.1:${LOCAL_MGR_PORT} http://example.com           # Test proxy"
 echo
 
 echo -e "${C_BLUE}Cache hit monitoring:${C_NC}"
-echo "  squidclient mgr:info | grep 'Hit Ratios'      # Hit ratio"
-echo "  squidclient mgr:storedir                       # Cache store stats"
+echo "  curl -fsS http://127.0.0.1:${LOCAL_MGR_PORT}/squid-internal-mgr/info | grep 'Hit Ratios'"
+echo "  curl -fsS http://127.0.0.1:${LOCAL_MGR_PORT}/squid-internal-mgr/storedir"
 echo
 
 echo -e "${C_GREEN}Done.${C_NC}"

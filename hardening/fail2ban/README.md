@@ -16,8 +16,8 @@ sudo ./fail2ban.sh -h           # Show help
 
 | Jail | Trigger | Ban Duration | Description |
 |------|---------|-------------|-------------|
-| `sshd` | 3 failed logins in 1h | 24 hours | Standard SSH brute-force protection. Matches failed password and publickey attempts. Uses the built-in `sshd` filter. |
-| `sshd-aggressive` | 1 attempt | 7 days | Zero-tolerance jail with a custom filter. Catches invalid usernames, connections closed without authenticating, disconnections before auth, and bad protocol version strings. Designed for clearly malicious probing. |
+| `sshd` | 3 failed logins in 1h | 24 hours | Standard SSH brute-force protection. Matches failed password and publickey attempts via the built-in `sshd` filter plus `filter.d/sshd.local` (which matches OpenSSH 10.x `sshd-auth` / `sshd-session` journal entries). |
+| `sshd-aggressive` | 3 attempts in 24h | 7 days | Custom filter catching invalid usernames, pre-auth closures/disconnections involving `(?:invalid\|authenticating) user`, and bad protocol version strings, while ignoring benign bare TCP probes and Happy Eyeballs races. |
 
 ### nginx Jails
 
@@ -37,8 +37,9 @@ sudo ./fail2ban.sh -h           # Show help
 
 ```
 /etc/fail2ban/jail.local                          # Jail configuration (overrides jail.conf)
-/etc/fail2ban/filter.d/sshd-aggressive.conf       # Custom aggressive SSH filter
-/etc/fail2ban/action.d/nftables-common.local      # nftables action override for Arch
+/etc/fail2ban/filter.d/sshd.local                 # OpenSSH 10.x _daemon & journalmatch override for [sshd]
+/etc/fail2ban/filter.d/sshd-aggressive.conf       # Custom aggressive SSH filter (OpenSSH 10.x aware)
+/etc/fail2ban/action.d/nftables.local             # Dual-stack nftables action override
 ```
 
 ## Customization
@@ -102,8 +103,10 @@ sudo journalctl -u fail2ban -f
 sudo nft list ruleset
 
 # Check how many IPs are currently banned across all jails
-sudo fail2ban-client status | grep "Jail list" | sed 's/.*://;s/,/\n/g' | \
-    xargs -I{} sh -c 'echo "--- {} ---"; sudo fail2ban-client status {}'
+for jail in $(sudo fail2ban-client status | awk -F: '/Jail list:/ { gsub(/,/, " ", $2); print $2 }'); do
+    printf -- '--- %s ---\n' "$jail"
+    sudo fail2ban-client status "$jail"
+done
 ```
 
 ## Unbanning IPs
@@ -144,7 +147,7 @@ Ensure nginx log files exist and are readable by fail2ban:
 ls -la /var/log/nginx/error.log /var/log/nginx/access.log
 ```
 
-If nginx is not installed or logs do not exist yet, the nginx jails will be inactive but will not prevent fail2ban from starting.
+If nginx is not installed or `/var/log/nginx/{access,error}.log` do not exist when `fail2ban.sh` runs, `[nginx-*]` jails are written with `enabled = false` so fail2ban always starts cleanly. Re-run `sudo ./fail2ban.sh` (or set `enabled = true` and `sudo fail2ban-client reload`) after configuring nginx.
 
 ### sshd-aggressive catches legitimate users
 

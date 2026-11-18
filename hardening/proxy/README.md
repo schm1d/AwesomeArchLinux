@@ -11,7 +11,7 @@ sudo ./proxy.sh -n 192.168.1.0/24
 # Full setup: SSL bump + DNS filtering + larger cache
 sudo ./proxy.sh -n 10.0.0.0/8 -c 20000 --ssl-bump --dns-filter
 
-# Preview configs without starting
+# Preview planned configuration and firewall rules without modifying the system
 sudo ./proxy.sh -n 192.168.1.0/24 --dry-run
 ```
 
@@ -32,7 +32,7 @@ sudo ./proxy.sh -n 192.168.1.0/24 --dry-run
 | `-e EMAIL` | Admin email | `admin@hostname` |
 | `--ssl-bump` | Enable HTTPS interception (peek-and-splice) | |
 | `--dns-filter` | Enable DNS-level ad/malware blocking via dnsmasq | |
-| `--dry-run` | Write configs, validate, don't start services | |
+| `--dry-run` | Preview planned configuration and firewall rules without modifying the system | |
 | `-h` | Show help | |
 
 ## Architecture
@@ -70,10 +70,13 @@ Traffic from the configured network is transparently redirected to Squid via nft
 | Component | Detail |
 |-----------|--------|
 | **nftables table** | `ip squid_proxy` with source-scoped prerouting REDIRECT |
-| **Input filter** | Only the configured LAN CIDR may reach Squid intercept ports |
+| **Input filter** | Only the configured LAN CIDR (`/1`–`/32`) may reach Squid intercept ports (and port 53 when `--dns-filter` is enabled) |
+| **Loopback port** | `127.0.0.1:3127` (`3126` if `3127` is used for interception) — forward-proxy & `squid-internal-mgr` port required by Squid 7+ |
 | **HTTP** | Port 80 → `$HTTP_PORT` (intercept mode) |
 | **HTTPS** | Port 443 → `$HTTPS_PORT` (if `--ssl-bump`) |
 | **sysctl** | `ip_forward=1`, `route_localnet=0` via `/etc/sysctl.d/99-z-squid-proxy.conf` |
+
+> **Gateway forwarding note:** This script redirects TCP port 80 (and TCP port 443 with `--ssl-bump`) into Squid on the local host. Non-intercepted routed traffic (such as TCP 443 without `--ssl-bump`, QUIC/UDP 443, NTP, or client DNS when `--dns-filter` is off) is governed by the host's `inet filter forward` chain and outbound NAT masquerade rules, which default to drop on the hardened base ruleset until explicitly permitted for your LAN/WAN interfaces.
 
 ### Security Hardening
 
@@ -112,11 +115,11 @@ When `--ssl-bump` is enabled:
 
 When `--dns-filter` is enabled:
 
-- **dnsmasq** provides DNS-level blocking using the same blocklists
+- **dnsmasq** provides DNS-level blocking using the same blocklists (`conf-dir=/etc/dnsmasq.d/,*.conf`, `no-resolv`)
 - Blocks domains at the DNS layer before HTTP requests are made
-- Upstream resolvers: Quad9 (9.9.9.9) and Cloudflare (149.112.112.112)
+- Upstream resolvers: Quad9 (`9.9.9.9` and `149.112.112.112`)
 - Handles systemd-resolved conflict automatically
-- systemd hardening applied to dnsmasq
+- systemd hardening applied to dnsmasq (`/run/dnsmasq/dnsmasq.pid` under `ProtectSystem=strict`)
 
 ### Cache
 
@@ -134,7 +137,7 @@ When `--dns-filter` is enabled:
 - `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`
 - `ProtectKernel{Tunables,Modules,Logs}=yes`
 - `LockPersonality=yes`, `RestrictRealtime=yes`
-- `CapabilityBoundingSet` limited to `CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_NET_ADMIN CAP_IPC_LOCK`
+- `CapabilityBoundingSet` limited to `CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_NET_ADMIN CAP_IPC_LOCK CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_KILL` (no ambient capabilities)
 - `LimitNOFILE=65536`
 - `NoNewPrivileges=no` (required — Squid internally drops privileges)
 
@@ -193,14 +196,14 @@ Then `squid -k reconfigure`.
 ### Verify Proxy is Working
 
 ```bash
-# Direct test
-curl -x http://127.0.0.1:3128 http://example.com
+# Direct forward-proxy test via loopback management port
+curl -x http://127.0.0.1:3127 http://example.com
 
 # Verify transparent interception (from a client on the LAN)
 curl http://example.com   # Should work without proxy config
 
 # Check a blocked domain
-curl -x http://127.0.0.1:3128 http://ads.example.com
+curl -x http://127.0.0.1:3127 http://ads.example.com
 # Should return 403 Forbidden
 ```
 
@@ -210,13 +213,13 @@ curl -x http://127.0.0.1:3128 http://ads.example.com
 # Watch access log
 tail -f /var/log/squid/access.log
 
-# Cache statistics
-squidclient -h 127.0.0.1 -p 3128 mgr:info
-squidclient -h 127.0.0.1 -p 3128 mgr:5min
-squidclient -h 127.0.0.1 -p 3128 mgr:utilization
+# Cache statistics (Squid 7+ internal manager via curl; squidclient was removed)
+curl -fsS http://127.0.0.1:3127/squid-internal-mgr/info
+curl -fsS http://127.0.0.1:3127/squid-internal-mgr/5min
+curl -fsS http://127.0.0.1:3127/squid-internal-mgr/utilization
 
 # Cache hit ratio
-squidclient mgr:info | grep "Hit Ratios"
+curl -fsS http://127.0.0.1:3127/squid-internal-mgr/info | grep "Hit Ratios"
 ```
 
 ### Verify nftables Rules
@@ -263,8 +266,8 @@ nft -a list chain inet filter input | grep awesome-squid
 systemctl status dnsmasq
 journalctl -u dnsmasq -e
 
-# Check if port 53 is bound
-ss -tlnp | grep ':53 '
+# Check if port 53 (UDP/TCP) is bound
+ss -tulnp | grep ':53 '
 
 # Test DNS directly
 dig @127.0.0.1 example.com
@@ -284,6 +287,7 @@ ls -la /var/cache/squid/
 systemctl stop squid
 squid -z --foreground
 chown -R proxy:proxy /var/cache/squid
+rm -f /dev/shm/squid*.shm
 systemctl start squid
 ```
 

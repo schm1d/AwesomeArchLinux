@@ -15,7 +15,8 @@
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
 # Usage:       sudo ./wordpress.sh -d DOMAIN -w WP_PATH [--db-name DB]
-#                                  [--db-user USER] [--db-host HOST] [-h]
+#                                  [--db-user USER] [--db-host HOST]
+#                                  [--fresh-install] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -36,9 +37,10 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
@@ -59,6 +61,10 @@ WP_PATH="/var/www/wordpress"
 DB_NAME="wordpress"
 DB_USER="wpuser"
 DB_HOST="localhost"
+DB_NAME_SET=false
+DB_USER_SET=false
+DB_HOST_SET=false
+FRESH_INSTALL=false
 LOGFILE="/var/log/wordpress-hardening-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Usage ---
@@ -67,14 +73,15 @@ usage() {
 Usage: sudo $0 [options]
 
 Required:
-  -d DOMAIN       Domain name for the WordPress site
+  -d DOMAIN         Domain name for the WordPress site
 
 Optional:
-  -w WP_PATH      WordPress installation path (default: $WP_PATH)
-  --db-name DB    Database name (default: $DB_NAME)
-  --db-user USER  Database user (default: $DB_USER)
-  --db-host HOST  Database host (default: $DB_HOST)
-  -h              Show this help
+  -w WP_PATH        WordPress installation path (default: $WP_PATH)
+  --db-name DB      Database name (default: $DB_NAME)
+  --db-user USER    Database user (default: $DB_USER)
+  --db-host HOST    Database host (default: $DB_HOST)
+  --fresh-install   Randomize \$table_prefix even if DB credentials are already set
+  -h                Show this help
 
 Examples:
   sudo $0 -d example.com
@@ -88,13 +95,14 @@ EOF
 need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -d)          need_arg "$@"; DOMAIN="$2"; shift 2 ;;
-        -w)          need_arg "$@"; WP_PATH="$2"; shift 2 ;;
-        --db-name)   need_arg "$@"; DB_NAME="$2"; shift 2 ;;
-        --db-user)   need_arg "$@"; DB_USER="$2"; shift 2 ;;
-        --db-host)   need_arg "$@"; DB_HOST="$2"; shift 2 ;;
-        -h|--help)   usage ;;
-        *)           err "Unknown option: $1" ;;
+        -d)              need_arg "$@"; DOMAIN="$2"; shift 2 ;;
+        -w)              need_arg "$@"; WP_PATH="$2"; shift 2 ;;
+        --db-name)       need_arg "$@"; DB_NAME="$2"; DB_NAME_SET=true; shift 2 ;;
+        --db-user)       need_arg "$@"; DB_USER="$2"; DB_USER_SET=true; shift 2 ;;
+        --db-host)       need_arg "$@"; DB_HOST="$2"; DB_HOST_SET=true; shift 2 ;;
+        --fresh-install) FRESH_INSTALL=true; shift ;;
+        -h|--help)       usage ;;
+        *)               err "Unknown option: $1" ;;
     esac
 done
 
@@ -103,6 +111,10 @@ done
 [[ -n "$DOMAIN" ]]   || err "Domain is required (-d example.com)"
 DOMAIN="${DOMAIN,,}"
 aal_valid_hostname "$DOMAIN" || err "Invalid domain name: $DOMAIN"
+[[ "$DB_NAME" =~ ^[A-Za-z0-9_$-]{1,64}$ ]] || err "Invalid database name: $DB_NAME"
+[[ "$DB_USER" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || err "Invalid database user: $DB_USER"
+[[ "$DB_HOST" =~ ^[\[\]A-Za-z0-9_.:/-]{1,253}$ ]] || err "Invalid database host: $DB_HOST"
+command -v nginx &>/dev/null || err "nginx is not installed. Run ../nginx/nginx.sh first or: pacman -S nginx-mainline"
 
 [[ -d "$WP_PATH" ]] || err "WordPress directory does not exist: $WP_PATH"
 WP_PATH=$(realpath -- "$WP_PATH") || err "Could not resolve WordPress path"
@@ -114,6 +126,9 @@ esac
     err "WordPress path contains unsupported characters: $WP_PATH"
 
 # Redirect output to logfile as well
+install -d -m 0755 /var/log
+( umask 077 && : > "$LOGFILE" )
+chmod 0600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "Domain: $DOMAIN"
@@ -141,6 +156,45 @@ if [[ -d "$WP_PATH/wp-includes" ]]; then
     info "Found wp-includes/"
 fi
 
+# Detect SSL certificates BEFORE Step 2 so wp-config.php, nginx, .user.ini, and
+# wp-cron all agree on HTTPS vs HTTP-only mode (preventing admin lockout).
+USE_SSL=false
+CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+if [[ -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
+    USE_SSL=true
+    info "SSL certificates found for $DOMAIN"
+else
+    warn "No SSL certificates found at $CERT_DIR — configuring HTTP-only"
+    warn "Run ../nginx/nginx.sh for HTTPS setup, then re-run this script"
+fi
+
+wp_get_define_val() {
+    local name="$1"
+    [[ -f "$WP_PATH/wp-config.php" ]] || return 0
+    WP_DEF_NAME="$name" awk -F"['\"]" '
+        BEGIN {
+            re = "^[[:space:]]*define[[:space:]]*\\([[:space:]]*[\x27\"]" ENVIRON["WP_DEF_NAME"] "[\x27\"]"
+        }
+        $0 ~ re { print $4; exit }
+    ' "$WP_PATH/wp-config.php"
+}
+
+wp_db_has_placeholders() {
+    [[ -f "$WP_PATH/wp-config.php" ]] || return 0
+    local db_name_val db_user_val db_pass_val
+    db_name_val=$(wp_get_define_val "DB_NAME")
+    db_user_val=$(wp_get_define_val "DB_USER")
+    db_pass_val=$(wp_get_define_val "DB_PASSWORD")
+    [[ -z "$db_name_val" || "$db_name_val" == "database_name_here" || \
+       -z "$db_user_val" || "$db_user_val" == "username_here" || \
+       "$db_pass_val" == "password_here" ]]
+}
+
+INITIAL_DB_PLACEHOLDER=false
+if wp_db_has_placeholders; then
+    INITIAL_DB_PLACEHOLDER=true
+fi
+
 # =============================================================================
 # 2. WP-CONFIG.PHP HARDENING
 # =============================================================================
@@ -152,37 +206,78 @@ if [[ -f "$WP_PATH/wp-config.php" ]]; then
 
     # Back up wp-config.php
     BACKUP="${WP_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
-    cp "$WP_CONFIG" "$BACKUP"
+    ( umask 077 && cp "$WP_CONFIG" "$BACKUP" )
     chmod 600 "$BACKUP"
     info "wp-config.php backed up to $BACKUP"
 
-    # --- Helper: add or update a define() constant ---
-    # If the constant exists, update its value. If not, insert before
-    # "That's all, stop editing!" or at the end of the file.
+    # --- Helper: add or update an active define() constant ---
+    # Matches only active non-comment lines using POSIX ERE. If absent, inserts
+    # before "stop editing" or before require_once ... wp-settings.php.
     wp_define() {
         local name="$1"
         local value="$2"
+        local active_re="^[[:space:]]*define[[:space:]]*\\([[:space:]]*['\"]${name}['\"]"
+        local tmp_cfg
+        tmp_cfg=$(umask 077; mktemp "$WP_PATH/.wp-config.def.XXXXXX")
 
-        if grep -qP "define\s*\(\s*['\"]${name}['\"]" "$WP_CONFIG"; then
-            # Update existing define
-            sed -i "s|define\s*(\s*['\"]${name}['\"].*|define('${name}', ${value});|" "$WP_CONFIG"
+        if grep -Eq "$active_re" "$WP_CONFIG"; then
+            WP_DEF_NAME="$name" WP_DEF_VAL="$value" awk '
+                BEGIN {
+                    re = "^[[:space:]]*define[[:space:]]*\\([[:space:]]*[\x27\"]" ENVIRON["WP_DEF_NAME"] "[\x27\"]"
+                }
+                !updated && $0 ~ re {
+                    printf "define(\x27%s\x27, %s);\n", ENVIRON["WP_DEF_NAME"], ENVIRON["WP_DEF_VAL"]
+                    updated = 1
+                    next
+                }
+                { print }
+            ' "$WP_CONFIG" > "$tmp_cfg"
+            chown root:http "$tmp_cfg" 2>/dev/null || true
+            chmod 0640 "$tmp_cfg"
+            mv -f -- "$tmp_cfg" "$WP_CONFIG"
             info "Updated: define('${name}', ${value})"
         else
-            # Insert before "stop editing" marker, or append before closing PHP tag
-            if grep -q "stop editing" "$WP_CONFIG"; then
-                sed -i "/stop editing/i define('${name}', ${value});" "$WP_CONFIG"
-            else
-                # Append before the last line (usually require_once ABSPATH)
-                sed -i "$ i define('${name}', ${value});" "$WP_CONFIG"
-            fi
+            WP_DEF_NAME="$name" WP_DEF_VAL="$value" awk '
+                !inserted && (/stop editing/ || /^[[:space:]]*require(_once)?[[:space:]\(].*wp-settings\.php/) {
+                    printf "define(\x27%s\x27, %s);\n", ENVIRON["WP_DEF_NAME"], ENVIRON["WP_DEF_VAL"]
+                    inserted = 1
+                }
+                { print }
+                END {
+                    if (!inserted) {
+                        printf "define(\x27%s\x27, %s);\n", ENVIRON["WP_DEF_NAME"], ENVIRON["WP_DEF_VAL"]
+                    }
+                }
+            ' "$WP_CONFIG" > "$tmp_cfg"
+            chown root:http "$tmp_cfg" 2>/dev/null || true
+            chmod 0640 "$tmp_cfg"
+            mv -f -- "$tmp_cfg" "$WP_CONFIG"
             info "Added:   define('${name}', ${value})"
         fi
     }
 
+    # --- Apply --db-name / --db-user / --db-host when explicitly passed or still placeholder ---
+    CUR_DB_NAME=$(wp_get_define_val "DB_NAME")
+    CUR_DB_USER=$(wp_get_define_val "DB_USER")
+    CUR_DB_HOST=$(wp_get_define_val "DB_HOST")
+    if [[ "$DB_NAME_SET" == true || "$CUR_DB_NAME" == "database_name_here" ]]; then
+        wp_define "DB_NAME" "'${DB_NAME}'"
+    fi
+    if [[ "$DB_USER_SET" == true || "$CUR_DB_USER" == "username_here" ]]; then
+        wp_define "DB_USER" "'${DB_USER}'"
+    fi
+    if [[ "$DB_HOST_SET" == true || -z "$CUR_DB_HOST" ]]; then
+        wp_define "DB_HOST" "'${DB_HOST}'"
+    fi
+
     # --- Security constants ---
     wp_define "DISALLOW_FILE_EDIT" "true"
     wp_define "DISALLOW_FILE_MODS" "false"
-    wp_define "FORCE_SSL_ADMIN" "true"
+    if [[ "$USE_SSL" == true ]]; then
+        wp_define "FORCE_SSL_ADMIN" "true"
+    else
+        wp_define "FORCE_SSL_ADMIN" "false"
+    fi
     wp_define "WP_AUTO_UPDATE_CORE" "'minor'"
     wp_define "WP_DEBUG" "false"
     wp_define "WP_DEBUG_DISPLAY" "false"
@@ -192,52 +287,96 @@ if [[ -f "$WP_PATH/wp-config.php" ]]; then
     wp_define "WP_MAX_MEMORY_LIMIT" "'512M'"
     wp_define "DISABLE_WP_CRON" "true"
 
-    # --- Generate and set security keys/salts ---
+    # --- Generate and set security keys/salts (pure awk splice, no sed /e shell execution) ---
     msg "Fetching fresh security keys/salts from WordPress API..."
 
-    SALTS=$(curl -sS --max-time 10 "https://api.wordpress.org/secret-key/1.1/salt/" 2>/dev/null || true)
+    SALTS=$(curl -fsS --max-time 10 "https://api.wordpress.org/secret-key/1.1/salt/" 2>/dev/null || true)
+    SALTS_VALID=false
+    if [[ -n "$SALTS" ]]; then
+        SALT_LINE_COUNT=$(awk '
+            /^[[:space:]]*$/ { next }
+            /^define\(['\''"](AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)['\''"],[[:space:]]*['\''"].+['\''"]\);$/ {
+                valid++
+                next
+            }
+            { invalid = 1 }
+            END { print (invalid ? 0 : valid + 0) }
+        ' <<< "$SALTS")
+        (( SALT_LINE_COUNT == 8 )) && SALTS_VALID=true
+    fi
 
-    if [[ -n "$SALTS" && "$SALTS" == *"define("* ]]; then
-        # Remove existing salt definitions
-        for key in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
-            sed -i "/define\s*(\s*['\"]${key}['\"]/d" "$WP_CONFIG"
-        done
+    if [[ "$SALTS_VALID" == true ]]; then
+        WP_DIR=$(dirname -- "$WP_CONFIG")
+        SALT_TMPFILE=$(umask 077; mktemp "$WP_DIR/.wp-salts.XXXXXX")
+        WP_CONFIG_TMP=$(umask 077; mktemp "$WP_DIR/.wp-config.XXXXXX")
+        printf '%s\n' "$SALTS" > "$SALT_TMPFILE"
 
-        # Insert new salts before "stop editing" marker
-        if grep -q "stop editing" "$WP_CONFIG"; then
-            # Write salts to a temp file and insert
-            SALT_TMPFILE=$(mktemp)
-            echo "$SALTS" > "$SALT_TMPFILE"
-            sed -i "/stop editing/e cat $SALT_TMPFILE" "$WP_CONFIG"
-            rm -f "$SALT_TMPFILE"
-        else
-            echo "$SALTS" >> "$WP_CONFIG"
-        fi
+        awk -v salt_file="$SALT_TMPFILE" '
+            /^[[:space:]]*define[[:space:]]*\([[:space:]]*['\''"](AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|SECURE_AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)['\''"]/ { next }
+            !inserted && (/stop editing/ || /^[[:space:]]*require(_once)?[[:space:]\(].*wp-settings\.php/) {
+                while ((getline salt_line < salt_file) > 0) {
+                    print salt_line
+                }
+                close(salt_file)
+                inserted = 1
+            }
+            { print }
+            END {
+                if (!inserted) {
+                    while ((getline salt_line < salt_file) > 0) {
+                        print salt_line
+                    }
+                    close(salt_file)
+                }
+            }
+        ' "$WP_CONFIG" > "$WP_CONFIG_TMP"
+        chown root:http "$WP_CONFIG_TMP"
+        chmod 0640 "$WP_CONFIG_TMP"
+        mv -f -- "$WP_CONFIG_TMP" "$WP_CONFIG"
+        rm -f -- "$SALT_TMPFILE"
         msg "Security keys/salts updated from WordPress API"
     else
-        warn "Could not fetch salts from WordPress API — existing keys unchanged"
+        warn "Could not fetch valid salts from WordPress API — existing keys unchanged"
         warn "Manually visit: https://api.wordpress.org/secret-key/1.1/salt/"
     fi
 
-    # --- Randomize table prefix if still default 'wp_' ---
-    if grep -qP '^\$table_prefix\s*=\s*["\x27]wp_["\x27]' "$WP_CONFIG"; then
-        RANDOM_PREFIX=$(tr -dc 'a-z' </dev/urandom | head -c 4)_
-        sed -i "s|\\\$table_prefix\s*=\s*['\"]wp_['\"]|\$table_prefix = '${RANDOM_PREFIX}'|" "$WP_CONFIG"
-        msg "Table prefix changed from 'wp_' to '${RANDOM_PREFIX}'"
-        warn "IMPORTANT: If WordPress is already installed with data, you must also"
-        warn "rename the database tables to match the new prefix '${RANDOM_PREFIX}'"
+    # --- Randomize table prefix only on unconfigured/fresh installs ---
+    if grep -qE '^[[:space:]]*\$table_prefix[[:space:]]*=[[:space:]]*["\x27]wp_["\x27]' "$WP_CONFIG"; then
+        if [[ "$FRESH_INSTALL" == true || "$INITIAL_DB_PLACEHOLDER" == true ]] || wp_db_has_placeholders; then
+            RANDOM_PREFIX=""
+            while (( ${#RANDOM_PREFIX} < 4 )); do
+                RANDOM_PREFIX+=$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'a-z')
+            done
+            RANDOM_PREFIX="${RANDOM_PREFIX:0:4}_"
+            sed -i "s|^[[:space:]]*\\\$table_prefix[[:space:]]*=[[:space:]]*['\"]wp_['\"]|\$table_prefix = '${RANDOM_PREFIX}'|" "$WP_CONFIG"
+            msg "Table prefix changed from 'wp_' to '${RANDOM_PREFIX}'"
+            if [[ "$FRESH_INSTALL" == true && "$INITIAL_DB_PLACEHOLDER" == false ]]; then
+                warn "IMPORTANT: Ensure database table names match '${RANDOM_PREFIX}' if tables already exist."
+            fi
+        else
+            info "Keeping existing \$table_prefix = 'wp_' (DB credentials are already configured; pass --fresh-install before installation to randomize)"
+        fi
     else
         info "Table prefix is already custom — no change needed"
     fi
 
     # --- Add content directory comment ---
     if ! grep -q "WP_CONTENT_DIR" "$WP_CONFIG"; then
-        if grep -q "stop editing" "$WP_CONFIG"; then
-            sed -i "/stop editing/i \\
-// Optional: Move wp-content outside the web root for extra security\\
-// define('WP_CONTENT_DIR', dirname(__FILE__) . '/wp-content');\\
-// define('WP_CONTENT_URL', 'https://${DOMAIN}/wp-content');" "$WP_CONFIG"
-        fi
+        WP_SCHEME="http"
+        [[ "$USE_SSL" == true ]] && WP_SCHEME="https"
+        WP_CONFIG_TMP=$(umask 077; mktemp "$WP_PATH/.wp-config.cnt.XXXXXX")
+        WP_URL="${WP_SCHEME}://${DOMAIN}/wp-content" awk '
+            !inserted && (/stop editing/ || /^[[:space:]]*require(_once)?[[:space:]\(].*wp-settings\.php/) {
+                print "// Optional: Move wp-content outside the web root for extra security"
+                print "// define(\x27WP_CONTENT_DIR\x27, dirname(__FILE__) . \x27/wp-content\x27);"
+                print "// define(\x27WP_CONTENT_URL\x27, \x27" ENVIRON["WP_URL"] "\x27);"
+                inserted = 1
+            }
+            { print }
+        ' "$WP_CONFIG" > "$WP_CONFIG_TMP"
+        chown root:http "$WP_CONFIG_TMP" 2>/dev/null || true
+        chmod 0640 "$WP_CONFIG_TMP"
+        mv -f -- "$WP_CONFIG_TMP" "$WP_CONFIG"
         info "Added WP_CONTENT_DIR comment block"
     fi
 
@@ -249,6 +388,19 @@ fi
 # =============================================================================
 
 msg "Setting WordPress file permissions..."
+
+# --- Ensure parent webroot hierarchy is traversable by nginx (http) ---
+for base_root in /var/www /srv/http; do
+    if [[ "$WP_PATH" == "$base_root"/* ]]; then
+        chmod 0755 "$base_root"
+        parent_walk=$(dirname -- "$WP_PATH")
+        while [[ "$parent_walk" != "$base_root" && "$parent_walk" != "/" ]]; do
+            chown root:http "$parent_walk"
+            chmod 0750 "$parent_walk"
+            parent_walk=$(dirname -- "$parent_walk")
+        done
+    fi
+done
 
 # --- Ownership: root:http across the installation ---
 chown -R root:http "$WP_PATH"
@@ -324,12 +476,12 @@ if [[ -f "$WP_PATH/xmlrpc.php" ]]; then
     info "xmlrpc.php exists — will be blocked by nginx (not removed)"
 fi
 
-# Remove install.php if WordPress is already installed
+# Remove install.php ONLY when WordPress is already configured (never on --fresh-install
+# or when DB credentials are still placeholders)
 if [[ -f "$WP_PATH/wp-admin/install.php" ]]; then
-    # Check if WordPress appears to be installed (wp_options table exists)
-    if [[ -f "$WP_PATH/wp-config.php" ]] && \
-       [[ -d "$WP_PATH/wp-content/themes" ]] && \
-       [[ -d "$WP_PATH/wp-content/plugins" ]]; then
+    if [[ "$FRESH_INSTALL" == true || "$INITIAL_DB_PLACEHOLDER" == true ]] || wp_db_has_placeholders; then
+        info "Preserving wp-admin/install.php (fresh install or placeholder DB credentials)"
+    else
         rm -f "$WP_PATH/wp-admin/install.php"
         REMOVED_FILES+=("wp-admin/install.php")
     fi
@@ -363,9 +515,32 @@ restore_nginx_conf() {
     fi
 }
 
-# Ensure directories exist
-mkdir -p /etc/nginx/sites-enabled
-mkdir -p /etc/nginx/conf.d
+# Ensure directories exist and sites-enabled is included by nginx.conf
+install -d -m 0755 /etc/nginx/sites-enabled /etc/nginx/conf.d
+
+if [[ -f /etc/nginx/nginx.conf ]] && ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/sites-enabled/' /etc/nginx/nginx.conf; then
+    cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.bak.$(date +%Y%m%d-%H%M%S)"
+    NGINX_TMP=$(mktemp /etc/nginx/.nginx.conf.XXXXXX)
+    awk '
+        !inserted && /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
+        in_http {
+            line = $0
+            gsub(/#.*/, "", line)
+            opens = gsub(/\{/, "{", line)
+            closes = gsub(/\}/, "}", line)
+            depth += opens - closes
+            if (depth == 0) {
+                print "    include /etc/nginx/sites-enabled/*.conf;"
+                in_http = 0
+                inserted = 1
+            }
+        }
+        { print }
+    ' /etc/nginx/nginx.conf > "$NGINX_TMP"
+    install -o root -g root -m 0644 "$NGINX_TMP" /etc/nginx/nginx.conf
+    rm -f -- "$NGINX_TMP"
+    info "Added sites-enabled include to /etc/nginx/nginx.conf"
+fi
 
 # Back up existing config
 if [[ -f "$CONF_FILE" ]]; then
@@ -376,15 +551,38 @@ if [[ -f "$CONF_FILE" ]]; then
     info "Existing nginx config backed up to $BACKUP"
 fi
 
-# Detect SSL certificates
-USE_SSL=false
-CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-if [[ -f "$CERT_DIR/fullchain.pem" && -f "$CERT_DIR/privkey.pem" ]]; then
-    USE_SSL=true
-    info "SSL certificates found for $DOMAIN"
+# Avoid www.www.example.com when $DOMAIN already starts with www. or is single-label
+if [[ "$DOMAIN" == www.* || "$DOMAIN" != *.* ]]; then
+    SERVER_NAMES="$DOMAIN"
 else
-    warn "No SSL certificates found — configuring HTTP-only"
-    warn "Run ../nginx/nginx.sh for HTTPS setup"
+    SERVER_NAMES="$DOMAIN www.$DOMAIN"
+fi
+
+# Warn if /etc/nginx/sites-enabled/default.conf shadows $DOMAIN
+DEFAULT_SITE="/etc/nginx/sites-enabled/default.conf"
+if [[ -f "$DEFAULT_SITE" && "$CONF_FILE" != "$DEFAULT_SITE" ]]; then
+    if DOMAIN_TARGET="$DOMAIN" awk '
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            if (line ~ /^[[:space:]]*server_name[[:space:]]/) {
+                sub(/^[[:space:]]*server_name[[:space:]]+/, "", line)
+                sub(/;.*/, "", line)
+                n = split(line, names, /[[:space:]]+/)
+                for (i = 1; i <= n; i++) {
+                    cand = tolower(names[i])
+                    if (cand == ENVIRON["DOMAIN_TARGET"] || cand == "www." ENVIRON["DOMAIN_TARGET"]) {
+                        found = 1
+                        exit
+                    }
+                }
+            }
+        }
+        END { exit !found }
+    ' "$DEFAULT_SITE"; then
+        warn "$DEFAULT_SITE also declares server_name for '$DOMAIN' and may shadow $CONF_FILE."
+        warn "Remove or update $DEFAULT_SITE after verifying $CONF_FILE."
+    fi
 fi
 
 # Detect PHP-FPM socket
@@ -400,20 +598,32 @@ if [[ ! -S "$PHP_SOCKET" ]]; then
 fi
 info "PHP-FPM socket: $PHP_SOCKET"
 
-# Build listen directives
+# Build listen, SSL, HSTS, and CSP directives
 if [[ "$USE_SSL" == true ]]; then
     LISTEN_BLOCK="    listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;"
+    SSL_PROTOCOLS_LINE=""
+    if [[ ! -f /etc/nginx/conf.d/ssl-hardening.conf ]]; then
+        SSL_PROTOCOLS_LINE=$'\n'"    ssl_protocols       TLSv1.2 TLSv1.3;"
+    fi
     SSL_BLOCK="
     # --- SSL certificates ---
     ssl_certificate     $CERT_DIR/fullchain.pem;
-    ssl_certificate_key $CERT_DIR/privkey.pem;"
+    ssl_certificate_key $CERT_DIR/privkey.pem;${SSL_PROTOCOLS_LINE}"
+    CSP_UPGRADE=" upgrade-insecure-requests;"
+    HSTS_SERVER_LINE=$'    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
+    HSTS_LOC_LINE=$'        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
 else
     LISTEN_BLOCK="    listen 80;
     listen [::]:80;"
     SSL_BLOCK=""
+    CSP_UPGRADE=""
+    HSTS_SERVER_LINE=""
+    HSTS_LOC_LINE=""
 fi
+
+WP_CSP="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https:; frame-ancestors 'self'; form-action 'self'; base-uri 'self';${CSP_UPGRADE}"
 
 cat > "$CONF_FILE" <<EOF
 # =============================================================================
@@ -442,10 +652,10 @@ if [[ "$USE_SSL" == true ]]; then
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN;
+    server_name $SERVER_NAMES;
 
     # ACME challenge (certbot renewal)
-    location /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {
         root $WP_PATH;
         allow all;
     }
@@ -462,7 +672,7 @@ cat >> "$CONF_FILE" <<EOF
 # --- Main server block ---
 server {
 $LISTEN_BLOCK
-    server_name $DOMAIN www.$DOMAIN;
+    server_name $SERVER_NAMES;
 $SSL_BLOCK
 
     root $WP_PATH;
@@ -472,7 +682,7 @@ $SSL_BLOCK
     fastcgi_hide_header X-Powered-By;
 
     # --- Security headers ---
-    add_header X-Content-Type-Options "nosniff" always;
+${HSTS_SERVER_LINE}    add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
@@ -481,7 +691,7 @@ $SSL_BLOCK
     # --- Content-Security-Policy (tuned for WordPress) ---
     # WordPress admin requires 'unsafe-inline' and 'unsafe-eval' for scripts/styles.
     # Adjust connect-src, img-src, and font-src for your themes and plugins.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https:; frame-ancestors 'self'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+    add_header Content-Security-Policy "${WP_CSP}" always;
 
     # =========================================================================
     # WORDPRESS PERMALINKS
@@ -492,35 +702,7 @@ $SSL_BLOCK
     }
 
     # =========================================================================
-    # PHP-FPM
-    # =========================================================================
-
-    location ~ \.php\$ {
-        # Prevent PHP execution of uploaded files
-        try_files \$uri =404;
-
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:$PHP_SOCKET;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-
-        # Performance
-        fastcgi_buffers 16 16k;
-        fastcgi_buffer_size 32k;
-        fastcgi_intercept_errors on;
-
-        # FastCGI cache (uncomment to enable)
-        # fastcgi_cache WPCACHE;
-        # fastcgi_cache_valid 200 60m;
-        # fastcgi_cache_valid 404 1m;
-        # fastcgi_cache_bypass \$skip_cache;
-        # fastcgi_no_cache \$skip_cache;
-        # add_header X-FastCGI-Cache \$upstream_cache_status;
-    }
-
-    # =========================================================================
-    # WORDPRESS-SPECIFIC BLOCKS
+    # EXACT & REGEX DENY RULES (evaluated before FastCGI PHP handler)
     # =========================================================================
 
     # --- Block xmlrpc.php (brute-force and DDoS vector) ---
@@ -548,33 +730,42 @@ $SSL_BLOCK
     }
 
     # --- Block PHP execution in uploads ---
-    location ~* /wp-content/uploads/.*\.php\$ {
+    location ~* /wp-content/uploads/.*\.php$ {
         deny all;
         return 403;
     }
 
-    # --- Block PHP execution in wp-includes ---
-    location ~* /wp-includes/.*\.php\$ {
+    # --- Block direct PHP execution in wp-includes ---
+    location ~* /wp-includes/.*\.php$ {
         deny all;
         return 403;
     }
 
-    # --- Block PHP in wp-content (except index.php) ---
-    location ~* /wp-content/.*\.php\$ {
-        # Allow index.php files in wp-content subdirectories
-        location ~* /wp-content/.*/index\.php\$ {
-            fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-            fastcgi_pass unix:$PHP_SOCKET;
-            fastcgi_index index.php;
-            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-            include fastcgi_params;
-        }
+    # --- Block all direct PHP execution in wp-content (no index.php exception!) ---
+    location ~* /wp-content/.*\.php$ {
         deny all;
         return 403;
     }
+
+    # --- Block access to readme, license, and sample config files ---
+    location ~* /(readme\.html|readme\.txt|license\.txt|wp-config-sample\.php)$ {
+        deny all;
+        return 403;
+    }
+
+    # --- Block access to backup, SQL, editor swap, and log files ---
+    location ~* \.(sql|bak|orig|old|swp|swo|log)$ {
+        deny all;
+        return 404;
+    }
+
+    # =========================================================================
+    # RATE-LIMITED & ADMIN ENDPOINTS
+    # =========================================================================
 
     # --- Rate limit wp-login.php ---
     location = /wp-login.php {
+        try_files \$uri =404;
         limit_req zone=wp_login_${DOMAIN//./_} burst=3 nodelay;
         limit_req_status 429;
 
@@ -583,10 +774,12 @@ $SSL_BLOCK
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
     }
 
     # --- Rate limit admin-ajax.php ---
     location = /wp-admin/admin-ajax.php {
+        try_files \$uri =404;
         limit_req zone=wp_ajax_${DOMAIN//./_} burst=20 nodelay;
         limit_req_status 429;
 
@@ -595,13 +788,30 @@ $SSL_BLOCK
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
     }
 
-    # --- Noindex wp-admin for search engines ---
+    # --- Noindex wp-admin for search engines (re-add server security headers) ---
     location /wp-admin/ {
         add_header X-Robots-Tag "noindex, nofollow" always;
+${HSTS_LOC_LINE}        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Content-Security-Policy "${WP_CSP}" always;
 
-        location ~ \.php\$ {
+        location ~ /\.(?!well-known) {
+            deny all;
+            return 404;
+        }
+
+        location ~* \.(sql|bak|orig|old|swp|swo|log)$ {
+            deny all;
+            return 404;
+        }
+
+        location ~ \.php$ {
             try_files \$uri =404;
             fastcgi_split_path_info ^(.+\.php)(/.+)\$;
             fastcgi_pass unix:$PHP_SOCKET;
@@ -616,44 +826,67 @@ $SSL_BLOCK
     # STATIC ASSET CACHING
     # =========================================================================
 
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|mp4|webm|ogg|pdf)\$ {
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|mp4|webm|ogg|pdf)$ {
         expires 1y;
         add_header Cache-Control "public, immutable" always;
-        add_header X-Content-Type-Options "nosniff" always;
+${HSTS_LOC_LINE}        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         access_log off;
         log_not_found off;
     }
 
     # =========================================================================
-    # BLOCK SENSITIVE FILES
+    # PHP-FPM (evaluated AFTER all deny regexes above!)
     # =========================================================================
 
-    # --- Block access to readme, license, and other info files ---
-    location ~* /(readme\.html|readme\.txt|license\.txt|wp-config-sample\.php)\$ {
-        deny all;
-        return 403;
-    }
+    location ~ \.php$ {
+        try_files \$uri =404;
 
-    # --- Block access to backup and database files ---
-    location ~* \.(sql|bak|orig|old|swp|swo|log)\$ {
-        deny all;
-        return 404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+        fastcgi_pass unix:$PHP_SOCKET;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+
+        # Performance
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+        fastcgi_intercept_errors on;
+
+        # FastCGI cache (uncomment to enable)
+        # fastcgi_cache WPCACHE;
+        # fastcgi_cache_valid 200 60m;
+        # fastcgi_cache_valid 404 1m;
+        # fastcgi_cache_bypass \$skip_cache;
+        # fastcgi_no_cache \$skip_cache;
+        # add_header X-FastCGI-Cache \$upstream_cache_status;
     }
 }
 EOF
 
+chmod 0644 "$CONF_FILE"
 msg "nginx server block written: $CONF_FILE"
 
-# Test nginx configuration
+# Test and start/reload nginx configuration
 if nginx -t 2>&1; then
     msg "nginx configuration test passed"
-    if systemctl reload nginx; then
-        msg "nginx reloaded successfully"
+    NGINX_APPLIED=false
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx && NGINX_APPLIED=true
+    else
+        systemctl enable --now nginx && NGINX_APPLIED=true
+    fi
+    if [[ "$NGINX_APPLIED" == true ]]; then
+        msg "nginx is active and serving the updated configuration"
     else
         restore_nginx_conf
-        systemctl reload nginx 2>/dev/null || \
-            warn "Could not reload nginx after restoring its previous configuration"
-        err "nginx reload failed; the server block was rolled back"
+        if systemctl is-active --quiet nginx; then
+            systemctl reload nginx 2>/dev/null || \
+                warn "Could not reload nginx after restoring its previous configuration"
+        fi
+        err "nginx start/reload failed; the server block was rolled back"
     fi
 else
     restore_nginx_conf
@@ -666,9 +899,9 @@ fi
 
 msg "Configuring fail2ban jails for WordPress..."
 
-# Ensure fail2ban directories exist
-mkdir -p /etc/fail2ban/filter.d
-mkdir -p /etc/fail2ban/jail.d
+# Ensure fail2ban and nginx log directories exist
+install -d -m 0755 /etc/fail2ban/filter.d /etc/fail2ban/jail.d /var/log/nginx
+[[ -f /var/log/nginx/access.log ]] || install -m 0640 -o http -g log /dev/null /var/log/nginx/access.log 2>/dev/null || touch /var/log/nginx/access.log
 
 # --- WordPress authentication filter ---
 cat > /etc/fail2ban/filter.d/wordpress-auth.conf <<'EOF'
@@ -677,16 +910,16 @@ cat > /etc/fail2ban/filter.d/wordpress-auth.conf <<'EOF'
 # Generated by AwesomeArchLinux/hardening/wordpress/wordpress.sh
 #
 # Matches failed WordPress login attempts from nginx access log.
-# Detects POST requests to wp-login.php that result in a redirect (302)
-# back to the login page (indicating failed authentication).
+# Failed logins re-render wp-login.php with HTTP 200; successful logins return
+# HTTP 302 to /wp-admin/ and must NOT be matched here.
 # =============================================================================
 
 [Definition]
-failregex = ^<HOST> .* "POST /wp-login\.php .* 200
-            ^<HOST> .* "POST /wp-login\.php .* 302
+failregex = ^<HOST> .* "POST /wp-login\.php[^"]*" 200\b
 
 ignoreregex =
 EOF
+chmod 0644 /etc/fail2ban/filter.d/wordpress-auth.conf
 
 msg "WordPress auth filter created: /etc/fail2ban/filter.d/wordpress-auth.conf"
 
@@ -706,10 +939,11 @@ failregex = ^<HOST> .* "(GET|POST) /xmlrpc\.php
 
 ignoreregex =
 EOF
+chmod 0644 /etc/fail2ban/filter.d/wordpress-xmlrpc.conf
 
 msg "WordPress xmlrpc filter created: /etc/fail2ban/filter.d/wordpress-xmlrpc.conf"
 
-# --- WordPress jail configuration ---
+# --- WordPress jail configuration (backend = auto for file logpath on Arch) ---
 cat > /etc/fail2ban/jail.d/wordpress.conf <<EOF
 # =============================================================================
 # fail2ban jails: WordPress
@@ -718,6 +952,7 @@ cat > /etc/fail2ban/jail.d/wordpress.conf <<EOF
 
 [wordpress-auth]
 enabled  = true
+backend  = auto
 filter   = wordpress-auth
 port     = http,https
 logpath  = /var/log/nginx/access.log
@@ -727,6 +962,7 @@ findtime = 10m
 
 [wordpress-xmlrpc]
 enabled  = true
+backend  = auto
 filter   = wordpress-xmlrpc
 port     = http,https
 logpath  = /var/log/nginx/access.log
@@ -734,6 +970,7 @@ maxretry = 2
 bantime  = 24h
 findtime = 1h
 EOF
+chmod 0644 /etc/fail2ban/jail.d/wordpress.conf
 
 msg "WordPress jails created: /etc/fail2ban/jail.d/wordpress.conf"
 
@@ -751,12 +988,18 @@ fi
 
 msg "Creating .user.ini for PHP hardening..."
 
+install -d -o http -g http -m 0750 /var/log/php
+[[ -f /var/log/php/wordpress-errors.log ]] || install -o http -g http -m 0640 /dev/null /var/log/php/wordpress-errors.log
+
+COOKIE_SECURE=0
+[[ "$USE_SSL" == true ]] && COOKIE_SECURE=1
+
 cat > "$WP_PATH/.user.ini" <<EOF
 ; =============================================================================
 ; PHP .user.ini — WordPress runtime hardening
 ; Generated by AwesomeArchLinux/hardening/wordpress/wordpress.sh
 ;
-; This file is read -r by PHP-FPM at runtime (no restart needed, cached for
+; This file is read by PHP-FPM at runtime (no restart needed, cached for
 ; user_ini.cache_ttl seconds, default 300s).
 ; =============================================================================
 
@@ -770,22 +1013,22 @@ max_input_time = 60
 max_input_vars = 3000
 
 ; --- Path restriction ---
-; Restrict PHP file access to WordPress directory and /tmp (for uploads)
-open_basedir = ${WP_PATH}:/tmp
+; Restrict PHP file access to WordPress directory, /tmp, and dedicated PHP log dir
+open_basedir = ${WP_PATH}:/tmp:/var/log/php:/usr/share/php
 
 ; --- Session hardening ---
 session.cookie_httponly = 1
-session.cookie_secure = 1
+session.cookie_secure = ${COOKIE_SECURE}
 session.use_strict_mode = 1
 
 ; --- Disable dangerous functions (WordPress does not need these) ---
 ; Note: Some plugins may require proc_open or exec. Add exceptions as needed.
 ; disable_functions = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source
 
-; --- Error handling (production) ---
+; --- Error handling (production, logged outside public webroot) ---
 display_errors = Off
 log_errors = On
-error_log = ${WP_PATH}/wp-content/php-errors.log
+error_log = /var/log/php/wordpress-errors.log
 EOF
 
 chown root:http "$WP_PATH/.user.ini"
@@ -793,13 +1036,77 @@ chmod 640 "$WP_PATH/.user.ini"
 
 msg ".user.ini created at $WP_PATH/.user.ini"
 
+# Check php.ini / php-fpm pool overrides (e.g. from ../php/php.sh) for conflicts
+PHP_INI_FILE="/etc/php/php.ini"
+shopt -s nullglob
+FPM_POOL_FILES=(/etc/php/php-fpm.d/*.conf)
+shopt -u nullglob
+
+CURL_EXEC_DISABLED=false
+URL_FOPEN_OFF=false
+if [[ -f "$PHP_INI_FILE" ]]; then
+    if grep -Eq '^[[:space:]]*disable_functions[[:space:]]*=.*(^|[,[:space:]])curl_exec([,[:space:]]|$)' "$PHP_INI_FILE"; then
+        CURL_EXEC_DISABLED=true
+    fi
+    if grep -Eqi '^[[:space:]]*allow_url_fopen[[:space:]]*=[[:space:]]*(off|0|false|no)([[:space:];]|$)' "$PHP_INI_FILE"; then
+        URL_FOPEN_OFF=true
+    fi
+fi
+for pool_conf in "${FPM_POOL_FILES[@]}"; do
+    if grep -Eq '^[[:space:]]*php_admin_value\[disable_functions\][[:space:]]*=.*(^|[,[:space:]])curl_exec([,[:space:]]|$)' "$pool_conf"; then
+        CURL_EXEC_DISABLED=true
+    fi
+    if grep -Eqi '^[[:space:]]*php_admin_(flag|value)\[allow_url_fopen\][[:space:]]*=[[:space:]]*(off|0|false|no)([[:space:];]|$)' "$pool_conf"; then
+        URL_FOPEN_OFF=true
+    fi
+    while IFS= read -r basedir_val; do
+        [[ -n "$basedir_val" ]] || continue
+        wp_covered=false
+        log_covered=false
+        IFS=':' read -r -a basedir_paths <<< "$basedir_val"
+        for bd_path in "${basedir_paths[@]}"; do
+            bd_clean="${bd_path%/}"
+            [[ -n "$bd_clean" ]] || continue
+            if [[ "$WP_PATH" == "$bd_clean" || "$WP_PATH" == "$bd_clean"/* ]]; then
+                wp_covered=true
+            fi
+            if [[ "/var/log/php" == "$bd_clean" || "/var/log/php" == "$bd_clean"/* ]]; then
+                log_covered=true
+            fi
+        done
+        if [[ "$wp_covered" == false || "$log_covered" == false ]]; then
+            warn "$pool_conf sets php_admin_value[open_basedir]='$basedir_val', which overrides .user.ini and excludes $( [[ "$wp_covered" == false ]] && printf '%s ' "$WP_PATH" )$( [[ "$log_covered" == false ]] && printf '/var/log/php' )."
+            warn "Add $WP_PATH and /var/log/php to php_admin_value[open_basedir] in $pool_conf, then reload php-fpm."
+        fi
+    done < <(
+        awk '/^[[:space:]]*php_admin_value\[open_basedir\][[:space:]]*=/ {
+            val = substr($0, index($0, "=") + 1)
+            sub(/;.*/, "", val)
+            gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "", val)
+            print val
+        }' "$pool_conf"
+    )
+done
+if [[ "$CURL_EXEC_DISABLED" == true && "$URL_FOPEN_OFF" == true ]]; then
+    warn "PHP has both curl_exec disabled and allow_url_fopen=Off (e.g. from ../php/php.sh)."
+    warn "WordPress updates, loopback cron, and remote API calls require outbound HTTP — re-enable curl_exec in /etc/php/php.ini and reload php-fpm."
+fi
+
 # =============================================================================
-# 7. WORDPRESS CRON REPLACEMENT (systemd timer)
+# 7. WORDPRESS CRON REPLACEMENT (per-domain systemd timer)
 # =============================================================================
 
 msg "Setting up systemd wp-cron timer..."
 
 # DISABLE_WP_CRON was already added in wp-config.php hardening (step 2)
+CRON_UNIT_BASE="wordpress-cron-${DOMAIN//./-}"
+
+# Clean up legacy single-site unit if it belonged to this exact domain
+if [[ -f /etc/systemd/system/wordpress-cron.service ]] && \
+   grep -Fqx "Description=WordPress cron for $DOMAIN" /etc/systemd/system/wordpress-cron.service; then
+    systemctl disable --now wordpress-cron.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/wordpress-cron.service /etc/systemd/system/wordpress-cron.timer
+fi
 
 # Determine cron method: wp-cli if available, curl fallback
 CRON_METHOD="curl"
@@ -810,8 +1117,9 @@ else
     info "wp-cli not found — using curl to trigger wp-cron.php"
 fi
 
-# Create the systemd service
-cat > /etc/systemd/system/wordpress-cron.service <<EOF
+install -d -m 0755 /etc/systemd/system
+# Create the per-domain systemd service
+cat > "/etc/systemd/system/${CRON_UNIT_BASE}.service" <<EOF
 [Unit]
 Description=WordPress cron for $DOMAIN
 After=network-online.target
@@ -824,31 +1132,34 @@ Group=http
 EOF
 
 if [[ "$CRON_METHOD" == "wp-cli" ]]; then
-    cat >> /etc/systemd/system/wordpress-cron.service <<EOF
+    cat >> "/etc/systemd/system/${CRON_UNIT_BASE}.service" <<EOF
 ExecStart=/usr/bin/wp cron event run --due-now --path=$WP_PATH
 EOF
 else
-    # Use curl — determine protocol
     if [[ "$USE_SSL" == true ]]; then
-        CRON_URL="https://$DOMAIN/wp-cron.php"
+        CRON_PORT=443
+        CRON_URL="https://${DOMAIN}/wp-cron.php?doing_wp_cron"
     else
-        CRON_URL="http://$DOMAIN/wp-cron.php"
+        CRON_PORT=80
+        CRON_URL="http://${DOMAIN}/wp-cron.php?doing_wp_cron"
     fi
-    cat >> /etc/systemd/system/wordpress-cron.service <<EOF
-ExecStart=/usr/bin/curl -sS --max-time 30 "$CRON_URL" -o /dev/null
+    cat >> "/etc/systemd/system/${CRON_UNIT_BASE}.service" <<EOF
+ExecStart=/usr/bin/curl -fsS --max-time 30 --resolve "${DOMAIN}:${CRON_PORT}:127.0.0.1" "${CRON_URL}" -o /dev/null
 EOF
 fi
 
-cat >> /etc/systemd/system/wordpress-cron.service <<EOF
+cat >> "/etc/systemd/system/${CRON_UNIT_BASE}.service" <<EOF
 
 # Security hardening
+ProtectSystem=strict
+ReadWritePaths=-${WP_PATH}/wp-content/uploads -${WP_PATH}/wp-content/cache -/var/log/php
 PrivateTmp=true
 ProtectHome=yes
 NoNewPrivileges=yes
 EOF
 
-# Create the systemd timer
-cat > /etc/systemd/system/wordpress-cron.timer <<EOF
+# Create the per-domain systemd timer
+cat > "/etc/systemd/system/${CRON_UNIT_BASE}.timer" <<EOF
 [Unit]
 Description=Run WordPress cron every 15 minutes for $DOMAIN
 
@@ -860,13 +1171,13 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+chmod 0644 "/etc/systemd/system/${CRON_UNIT_BASE}.service" "/etc/systemd/system/${CRON_UNIT_BASE}.timer"
 
 systemctl daemon-reload
-systemctl enable wordpress-cron.timer
-systemctl start wordpress-cron.timer
+systemctl enable --now "${CRON_UNIT_BASE}.timer"
 
-msg "WordPress cron timer active (every 15 minutes)"
-info "Check: systemctl list-timers wordpress-cron.timer"
+msg "WordPress cron timer active: ${CRON_UNIT_BASE}.timer (every 15 minutes)"
+info "Check: systemctl list-timers ${CRON_UNIT_BASE}.timer"
 
 # =============================================================================
 # 8. SUMMARY
@@ -889,7 +1200,7 @@ echo
 echo -e "${C_BLUE}Security hardening applied:${C_NC}"
 echo "  - wp-config.php: security constants, fresh salts, custom table prefix"
 echo "  - File editor disabled (DISALLOW_FILE_EDIT)"
-echo "  - SSL forced for admin (FORCE_SSL_ADMIN)"
+echo "  - Admin SSL policy: FORCE_SSL_ADMIN = $USE_SSL"
 echo "  - Auto-update minor core versions (WP_AUTO_UPDATE_CORE = 'minor')"
 echo "  - Debug output disabled in production"
 echo "  - Script concatenation disabled (CONCATENATE_SCRIPTS)"
@@ -924,14 +1235,15 @@ echo
 echo -e "${C_BLUE}PHP hardening:${C_NC}"
 echo "  .user.ini:         $WP_PATH/.user.ini"
 echo "  upload limit:      10M"
-echo "  open_basedir:      $WP_PATH:/tmp"
+echo "  open_basedir:      $WP_PATH:/tmp:/var/log/php:/usr/share/php"
+echo "  error_log:         /var/log/php/wordpress-errors.log"
 echo "  max_input_vars:    3000"
 echo
 
 echo -e "${C_BLUE}WP-Cron:${C_NC}"
 echo "  Built-in wp-cron:  Disabled (DISABLE_WP_CRON = true)"
-echo "  systemd timer:     wordpress-cron.timer (every 15 minutes)"
-echo "  Check status:      systemctl list-timers wordpress-cron.timer"
+echo "  systemd timer:     ${CRON_UNIT_BASE}.timer (every 15 minutes)"
+echo "  Check status:      systemctl list-timers ${CRON_UNIT_BASE}.timer"
 echo
 
 echo -e "${C_YELLOW}WordPress security checklist:${C_NC}"

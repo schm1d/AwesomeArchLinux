@@ -34,9 +34,10 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
@@ -155,9 +156,32 @@ fi
 
 info "nginx found: $(nginx -v 2>&1)"
 
-# Ensure directories exist
-mkdir -p /etc/nginx/sites-enabled
-mkdir -p /etc/nginx/conf.d
+# Ensure directories exist and sites-enabled is included by nginx.conf
+install -d -m 0755 /etc/nginx/sites-enabled /etc/nginx/conf.d
+
+if [[ -f /etc/nginx/nginx.conf ]] && ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/sites-enabled/' /etc/nginx/nginx.conf; then
+    cp /etc/nginx/nginx.conf "/etc/nginx/nginx.conf.bak.$(date +%Y%m%d-%H%M%S)"
+    NGINX_TMP=$(mktemp /etc/nginx/.nginx.conf.XXXXXX)
+    awk '
+        !inserted && /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
+        in_http {
+            line = $0
+            gsub(/#.*/, "", line)
+            opens = gsub(/\{/, "{", line)
+            closes = gsub(/\}/, "}", line)
+            depth += opens - closes
+            if (depth == 0) {
+                print "    include /etc/nginx/sites-enabled/*.conf;"
+                in_http = 0
+                inserted = 1
+            }
+        }
+        { print }
+    ' /etc/nginx/nginx.conf > "$NGINX_TMP"
+    install -o root -g root -m 0644 "$NGINX_TMP" /etc/nginx/nginx.conf
+    rm -f -- "$NGINX_TMP"
+    info "Added sites-enabled include to /etc/nginx/nginx.conf"
+fi
 
 # =============================================================================
 # 3. DETECT SSL CERTIFICATES
@@ -203,20 +227,62 @@ if [[ -f "$CONF_FILE" ]]; then
     info "Existing config backed up to $BACKUP"
 fi
 
-# Build the listen directive
+# Warn if /etc/nginx/sites-enabled/default.conf also claims $DOMAIN on port 80/443
+DEFAULT_SITE="/etc/nginx/sites-enabled/default.conf"
+if [[ -f "$DEFAULT_SITE" && "$CONF_FILE" != "$DEFAULT_SITE" ]]; then
+    if DOMAIN_TARGET="$DOMAIN" awk '
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            if (line ~ /^[[:space:]]*server_name[[:space:]]/) {
+                sub(/^[[:space:]]*server_name[[:space:]]+/, "", line)
+                sub(/;.*/, "", line)
+                n = split(line, names, /[[:space:]]+/)
+                for (i = 1; i <= n; i++) {
+                    if (tolower(names[i]) == ENVIRON["DOMAIN_TARGET"]) {
+                        found = 1
+                        exit
+                    }
+                }
+            }
+        }
+        END { exit !found }
+    ' "$DEFAULT_SITE"; then
+        warn "$DEFAULT_SITE also declares server_name '$DOMAIN' (on port 80/443)."
+        if [[ "$PORT" == "80" || "$PORT" == "443" ]]; then
+            warn "Remove or update $DEFAULT_SITE so it does not shadow $CONF_FILE on port $PORT."
+        else
+            warn "Requests to $DOMAIN on port 80/443 will still hit $DEFAULT_SITE unless updated."
+        fi
+    fi
+fi
+
+# Build the listen, SSL, HSTS, and CSP directives
 if [[ "$USE_SSL" == true ]]; then
     LISTEN_DIRECTIVE="listen $PORT ssl;
     listen [::]:$PORT ssl;
     http2 on;"
+    SSL_PROTOCOLS_LINE=""
+    if [[ ! -f /etc/nginx/conf.d/ssl-hardening.conf ]]; then
+        SSL_PROTOCOLS_LINE=$'\n'"    ssl_protocols       TLSv1.2 TLSv1.3;"
+    fi
     SSL_BLOCK="
     # --- SSL certificates ---
     ssl_certificate     $CERT_DIR/fullchain.pem;
-    ssl_certificate_key $CERT_DIR/privkey.pem;"
+    ssl_certificate_key $CERT_DIR/privkey.pem;${SSL_PROTOCOLS_LINE}"
+    CSP_UPGRADE=" upgrade-insecure-requests;"
+    HSTS_SERVER_LINE=$'    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
+    HSTS_LOC_LINE=$'        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
 else
     LISTEN_DIRECTIVE="listen $PORT;
     listen [::]:$PORT;"
     SSL_BLOCK=""
+    CSP_UPGRADE=""
+    HSTS_SERVER_LINE=""
+    HSTS_LOC_LINE=""
 fi
+
+CSP_POLICY="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'self';${CSP_UPGRADE}"
 
 cat > "$CONF_FILE" <<EOF
 # =============================================================================
@@ -257,10 +323,10 @@ $SSL_BLOCK
     # React does NOT need unsafe-inline or unsafe-eval for scripts in production.
     # CSS-in-JS libraries (styled-components, emotion) may need 'unsafe-inline' for styles.
     # Adjust connect-src for your API endpoints and WebSocket connections.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+    add_header Content-Security-Policy "${CSP_POLICY}" always;
 
     # --- Standard security headers ---
-    add_header X-Content-Type-Options "nosniff" always;
+${HSTS_SERVER_LINE}    add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header X-XSS-Protection "0" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -278,6 +344,22 @@ $SSL_BLOCK
     }
 
     # =========================================================================
+    # SOURCE MAP & DOTFILE PROTECTION (evaluated BEFORE static asset regex!)
+    # =========================================================================
+
+    # --- Block source maps in production ---
+    location ~* \.map$ {
+        deny all;
+        return 404;
+    }
+
+    # --- Block hidden files (except .well-known for ACME) ---
+    location ~ /\.(?!well-known) {
+        deny all;
+        return 404;
+    }
+
+    # =========================================================================
     # CACHE CONTROL
     # =========================================================================
 
@@ -287,8 +369,8 @@ $SSL_BLOCK
         add_header Pragma "no-cache" always;
         expires 0;
 
-        # Re-add security headers (nginx clears add_header in nested locations)
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+        # Re-add security headers (nginx clears server-level add_header in nested locations)
+${HSTS_LOC_LINE}        add_header Content-Security-Policy "${CSP_POLICY}" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header X-XSS-Protection "0" always;
@@ -305,8 +387,14 @@ $SSL_BLOCK
         expires 0;
 
         # Re-add security headers
+${HSTS_LOC_LINE}        add_header Content-Security-Policy "${CSP_POLICY}" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
+        add_header X-XSS-Protection "0" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
     }
 
     # --- Hashed static assets: cache aggressively (1 year, immutable) ---
@@ -316,24 +404,9 @@ $SSL_BLOCK
         add_header Cache-Control "public, immutable" always;
 
         # Re-add security headers
-        add_header X-Content-Type-Options "nosniff" always;
+${HSTS_LOC_LINE}        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cross-Origin-Resource-Policy "same-origin" always;
-    }
-
-    # =========================================================================
-    # SOURCE MAP & DOTFILE PROTECTION
-    # =========================================================================
-
-    # --- Block source maps in production ---
-    location ~* \.map$ {
-        deny all;
-        return 404;
-    }
-
-    # --- Block hidden files (except .well-known for ACME) ---
-    location ~ /\.(?!well-known) {
-        deny all;
-        return 404;
     }
 
     # =========================================================================
@@ -361,20 +434,35 @@ $SSL_BLOCK
 }
 EOF
 
+chmod 0644 "$CONF_FILE"
 msg "nginx server block written: $CONF_FILE"
 
 # =============================================================================
 # 5. FILE PERMISSIONS
 # =============================================================================
 
-msg "Setting file permissions on build directory..."
+msg "Setting file permissions on application and build directories..."
+
+# Ensure parent APP_PATH (and any intermediate dir under /var/www or /srv/http)
+# is traversable by nginx (0750 root:http) so BUILD_DIR can be reached.
+for base_root in /var/www /srv/http; do
+    if [[ "$APP_PATH" == "$base_root"/* ]]; then
+        chmod 0755 "$base_root"
+        parent_walk="$APP_PATH"
+        while [[ "$parent_walk" != "$base_root" && "$parent_walk" != "/" ]]; do
+            chown root:http "$parent_walk"
+            chmod 0750 "$parent_walk"
+            parent_walk=$(dirname -- "$parent_walk")
+        done
+    fi
+done
 
 # Build directory owned by root:http
 # Directories: 750 (rwxr-x---) — root can write, http can read+traverse
 # Files: 640 (rw-r-----) — root can write, http can read, no one else
 chown -R root:http "$BUILD_DIR"
-find "$BUILD_DIR" -type d -exec chmod 750 {} \;
-find "$BUILD_DIR" -type f -exec chmod 640 {} \;
+find "$BUILD_DIR" -type d -exec chmod 0750 {} +
+find "$BUILD_DIR" -type f -exec chmod 0640 {} +
 
 msg "Permissions set: dirs=750, files=640, owner=root:http"
 
@@ -392,7 +480,7 @@ if [[ ! -f "$ENV_EXAMPLE" ]]; then
 # Generated by AwesomeArchLinux/hardening/react/react.sh
 #
 # IMPORTANT: Environment variables in React/Vite are embedded at BUILD TIME
-# into the JavaScript bundle. They are NOT secret — anyone can read -r them
+# into the JavaScript bundle. They are NOT secret — anyone can read them
 # by inspecting the built JS files.
 #
 # NEVER put secrets (API keys, database passwords, JWT secrets) in these
@@ -432,13 +520,21 @@ msg "Testing nginx configuration..."
 
 if nginx -t 2>&1; then
     msg "Configuration test passed"
-    if systemctl reload nginx; then
-        msg "nginx reloaded successfully"
+    NGINX_APPLIED=false
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx && NGINX_APPLIED=true
+    else
+        systemctl enable --now nginx && NGINX_APPLIED=true
+    fi
+    if [[ "$NGINX_APPLIED" == true ]]; then
+        msg "nginx is active and serving the updated configuration"
     else
         restore_nginx_conf
-        systemctl reload nginx 2>/dev/null || \
-            warn "Could not reload nginx after restoring its previous configuration"
-        err "nginx reload failed; the server block was rolled back"
+        if systemctl is-active --quiet nginx; then
+            systemctl reload nginx 2>/dev/null || \
+                warn "Could not reload nginx after restoring its previous configuration"
+        fi
+        err "nginx start/reload failed; the server block was rolled back"
     fi
 else
     restore_nginx_conf

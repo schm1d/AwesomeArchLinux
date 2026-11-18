@@ -20,13 +20,14 @@ Author: [Bruno Schmid](https://www.linkedin.com/in/schmidbruno/) X: @brulliant
 ### Server Hardening
 
 ```bash
-sudo ./ssh.sh -u <username> [-p <port>]
+sudo ./ssh.sh -u <username> [-p <port>] [-k]
 ```
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-u USER` | User to allow SSH access (required, must not be root) | `$SUDO_USER` if available |
 | `-p PORT` | SSH listening port | 22 |
+| `-k` | Skip `authorized_keys` lockout check (bare-metal console installs only; never use on VPS) | off |
 | `-h` | Show help | — |
 
 The script automatically detects `SUDO_USER` when run via `sudo`, so in most cases:
@@ -61,7 +62,7 @@ Edit the variables at the top of the script before running:
 Writes a complete hardened `sshd_config` (truncate, not append — avoids first-match-wins issues). Backs up the original before overwriting.
 
 **Network:**
-- Configurable port, IPv4 only (`AddressFamily inet`), `StrictModes yes`
+- Configurable port, dual-stack IPv4/IPv6 (`AddressFamily any`), `StrictModes yes`
 
 **Cryptographic Algorithms (OpenSSH 9.x+ modern):**
 - Host keys: `ssh-ed25519-cert-v01`, `ssh-ed25519`, `rsa-sha2-512`, `rsa-sha2-256`
@@ -189,7 +190,7 @@ After running the script:
 
 - **Backup access:** Ensure you have console or out-of-band access before applying. The script backs up the original config automatically.
 - **Authorized keys:** Copy your public key to `~/.ssh/authorized_keys` on the server *before* disconnecting, as password authentication is disabled.
-- **Firewall persistence:** nftables rules persist in a marked block in `/etc/nftables.conf`. The iptables fallback persists through `awesome-ssh-rate-limit.service` and `/usr/local/libexec/awesome-ssh-rate-limit`.
+- **Firewall persistence:** nftables rules persist in a marked block in `/etc/nftables.conf` (exempting loopback `lo`). The iptables fallback persists through `awesome-ssh-rate-limit.service` and `/usr/local/lib/awesomearchlinux/ssh-rate-limit.sh`.
 - **Banner:** Modify `/etc/issue.net` to match your organization's legal requirements.
 
 ---

@@ -5,9 +5,11 @@ the selected FireHOL aggregate list plus `fullbogons`, and creates a default-den
 iptables policy.
 
 FireHOL is an alternative firewall backend. It must not be stacked on the
-installer-owned nftables `inet filter` chains: an accept in one firewall cannot
-override a drop in the other. The script detects that configuration and refuses
-to proceed rather than silently producing a partially effective ruleset.
+installer-owned nftables `inet filter` chains or enabled alongside
+`nftables.service` (which can shadow or flush rules across reboots): an accept in
+one firewall cannot override a drop in the other. The script detects active
+`inet filter` chains as well as active or enabled `nftables.service` units and
+refuses to proceed rather than silently producing a conflicting ruleset.
 
 ## Usage
 
@@ -42,8 +44,16 @@ sudo ./firehol.sh --update-only --allow-ssh 22
 
 ## Installation safety
 
-- Repository dependencies are installed with a complete `pacman -Syu`; partial
+- Repository dependencies (including `curl` and `unzip` required by
+  `update-ipsets`) are installed with a complete `pacman -Syu`; partial
   `pacman -Sy` upgrades are not used.
+- Configuration staging uses `/etc/firehol/.firehol.conf.XXXXXX` (`0600`, cleaned
+  up via `EXIT` trap) and preserves `0600` permissions on configuration backups.
+- FireHOL compiles temporary helper scripts at runtime, which fails on hardened
+  hosts where `/tmp` is mounted `noexec`. The script creates `/run/firehol-tmp`
+  (`0700`) and sets `TMPDIR=/run/firehol-tmp` and
+  `FIREHOL_TMP_DIR=/run/firehol-tmp` across direct invocations,
+  `firehol.service.d/runtime-tmp.conf`, and `/etc/cron.d/firehol-ipsets`.
 - Mutable AUR HEAD is never executed automatically. The complete `iprange` and
   `firehol` recipes are displayed with terminal control characters escaped,
   and each exact AUR commit requires an `INSTALL <package> <full-commit>`
@@ -70,9 +80,11 @@ The script writes `/etc/firehol/firehol.conf` with:
 - unrestricted outbound client traffic;
 - only the inbound services explicitly selected on the command line.
 
-The daily `/etc/cron.d/firehol-ipsets` job reloads the active firewall only when
-`update-ipsets` succeeds. It uses `firehol condrestart`; the interactive
-30-second `firehol try` command is reserved for attended manual testing.
+The daily `/etc/cron.d/firehol-ipsets` job sets explicit `SHELL=/usr/bin/bash`
+and `PATH`, ensures `/run/firehol-tmp` (`0700`) exists, and reloads the active
+firewall only when `update-ipsets` succeeds. It uses `firehol condrestart`; the
+interactive 30-second `firehol try` command is reserved for attended manual
+testing.
 
 ## Verification
 

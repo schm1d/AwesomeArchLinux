@@ -24,17 +24,17 @@
 #   1. Reviews and builds CrowdSec from an exact AUR commit
 #   2. Configures log acquisition (journalctl, syslog, optionally nginx)
 #   3. Installs CrowdSec detection collections (linux, sshd, nginx)
-#   4. Optionally installs and configures the nftables firewall bouncer
-#   5. Optionally installs and configures the nginx bouncer
-#   6. Hardens the CrowdSec systemd service
-#   7. Enables and starts CrowdSec
-#   8. Prints enrollment instructions and status
+#   4. Hardens and starts CrowdSec systemd service (initializing LAPI)
+#   5. Optionally installs and configures the nftables firewall bouncer
+#   6. Optionally installs and configures the nginx bouncer
+#   7. Prints enrollment instructions and status
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/aur-review.sh"
 
 # --- Colors ---
@@ -89,9 +89,8 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 
 # Bouncer registration returns credentials. Keep the installation log
-# root-only even when the caller starts the script with a permissive umask.
-umask 077
-LOGFILE=$(mktemp "/var/log/crowdsec-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
+# root-only while maintaining umask 022 for directories and drop-ins.
+LOGFILE=$(umask 077; mktemp "/var/log/crowdsec-setup-$(date +%Y%m%d-%H%M%S).XXXXXX.log")
 chmod 0600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
@@ -127,7 +126,7 @@ if ! command -v cscli &>/dev/null; then
     err "CrowdSec installation failed — cscli not found in PATH"
 fi
 
-CROWDSEC_VER=$(cscli version 2>&1 | head -1)
+CROWDSEC_VER=$(cscli version 2>&1 | head -1 || true)
 info "CrowdSec version: $CROWDSEC_VER"
 
 # =============================================================================
@@ -135,6 +134,8 @@ info "CrowdSec version: $CROWDSEC_VER"
 # =============================================================================
 
 msg "Configuring log acquisition..."
+
+install -d -m 0755 /etc/crowdsec
 
 # Back up existing acquis.yaml if present
 if [[ -f "$ACQUIS_CONF" ]]; then
@@ -191,26 +192,28 @@ labels:
   type: syslog
 EOF
 
-# Add nginx acquisition if requested
+# Add nginx acquisition if requested (use globs so CrowdSec starts cleanly
+# even before nginx creates its first log files and captures vhost logs)
 if [[ "$WITH_NGINX" == true ]]; then
     cat >> "$ACQUIS_CONF" <<'EOF'
 
 # --- nginx: Access and error logs ---
 ---
 filenames:
-  - /var/log/nginx/access.log
+  - /var/log/nginx/*access*.log
 labels:
   type: nginx
 
 ---
 filenames:
-  - /var/log/nginx/error.log
+  - /var/log/nginx/*error*.log
 labels:
   type: nginx
 EOF
     info "Added nginx log acquisition"
 fi
 
+chmod 0644 "$ACQUIS_CONF"
 msg "Acquisition config written to $ACQUIS_CONF"
 
 # =============================================================================
@@ -237,7 +240,101 @@ cscli parsers install crowdsecurity/whitelists
 info "Installed parser: crowdsecurity/whitelists"
 
 # =============================================================================
-# 5. NFTABLES BOUNCER (optional)
+# 5. HARDEN AND START CROWDSEC SERVICE (INITIALIZE LAPI BEFORE BOUNCERS)
+# =============================================================================
+
+msg "Hardening CrowdSec systemd service..."
+
+install -d -m 0755 /etc/systemd/system/crowdsec.service.d
+TMP_DROPIN=$(mktemp /etc/systemd/system/crowdsec.service.d/.hardening.conf.XXXXXX)
+cat > "$TMP_DROPIN" <<'EOF'
+[Service]
+# --- Filesystem protection ---
+ProtectSystem=strict
+StateDirectory=crowdsec
+ReadWritePaths=
+ReadWritePaths=-/var/lib/crowdsec /etc/crowdsec /var/log -/run
+ProtectHome=yes
+PrivateTmp=yes
+
+# --- Kernel protection ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# --- Capabilities ---
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SYSLOG
+
+# --- System call filtering ---
+SystemCallArchitectures=native
+SystemCallFilter=
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+
+# --- Network ---
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# --- Misc hardening ---
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+PrivateDevices=yes
+DevicePolicy=closed
+
+# --- Resource limits ---
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=5s
+EOF
+install -o root -g root -m 0644 "$TMP_DROPIN" /etc/systemd/system/crowdsec.service.d/hardening.conf
+rm -f -- "$TMP_DROPIN"
+
+systemctl daemon-reload
+msg "systemd hardening applied to crowdsec.service"
+
+msg "Enabling and starting CrowdSec (initializing LAPI)..."
+if [[ ! -s /etc/crowdsec/local_api_credentials.yaml ]] || \
+    ! grep -q 'password:' /etc/crowdsec/local_api_credentials.yaml 2>/dev/null; then
+    cscli machines add -a 2>/dev/null || true
+fi
+if [[ ! -s /etc/crowdsec/online_api_credentials.yaml ]] || \
+    ! grep -q 'password:' /etc/crowdsec/online_api_credentials.yaml 2>/dev/null; then
+    cscli capi register 2>/dev/null || true
+fi
+
+systemctl enable crowdsec.service
+systemctl restart crowdsec.service
+
+# Wait for LAPI to become ready before registering bouncers
+LAPI_READY=false
+for _ in {1..15}; do
+    if systemctl is-active --quiet crowdsec.service && cscli lapi status &>/dev/null; then
+        LAPI_READY=true
+        break
+    fi
+    sleep 1
+done
+
+if [[ "$LAPI_READY" == true ]]; then
+    msg "CrowdSec LAPI is running and ready"
+elif systemctl is-active --quiet crowdsec.service; then
+    msg "CrowdSec is running"
+else
+    warn "CrowdSec service may not have started correctly. Check: journalctl -u crowdsec"
+fi
+
+# =============================================================================
+# 6. NFTABLES BOUNCER (optional)
 # =============================================================================
 
 if [[ "$WITH_NFTABLES" == true ]]; then
@@ -246,9 +343,12 @@ if [[ "$WITH_NFTABLES" == true ]]; then
     # The requested nftables package is built by this split package base.
     aur_install "crowdsec-firewall-bouncer-nftables" "crowdsec-firewall-bouncer"
 
+    install -d -m 0755 "$(dirname "$BOUNCER_CONF")"
+
     # Back up existing bouncer config
     if [[ -f "$BOUNCER_CONF" ]]; then
-        cp "$BOUNCER_CONF" "${BOUNCER_CONF}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -a "$BOUNCER_CONF" "${BOUNCER_CONF}.bak.$(date +%Y%m%d-%H%M%S)"
+        chmod 0600 "${BOUNCER_CONF}.bak."* 2>/dev/null || true
         info "Backed up existing $BOUNCER_CONF"
     fi
 
@@ -272,7 +372,9 @@ if [[ "$WITH_NFTABLES" == true ]]; then
 
     # Write bouncer configuration
     if [[ "$WRITE_BOUNCER_CONFIG" == true ]]; then
-        cat > "$BOUNCER_CONF" <<EOF
+        (
+            umask 077
+            cat > "$BOUNCER_CONF" <<EOF
 # =============================================================================
 # CrowdSec Firewall Bouncer Configuration (nftables)
 # Generated by AwesomeArchLinux/hardening/crowdsec/crowdsec.sh
@@ -281,7 +383,7 @@ if [[ "$WITH_NFTABLES" == true ]]; then
 mode: nftables
 pid_dir: /var/run/
 update_frequency: 10s
-daemonize: true
+daemonize: false
 log_mode: file
 log_dir: /var/log/
 log_level: info
@@ -297,8 +399,6 @@ deny_action: DROP
 deny_log: false
 supported_decisions_types:
   - ban
-  - captcha
-  - throttle
 
 # --- nftables configuration ---
 nftables:
@@ -315,19 +415,22 @@ nftables:
     chain: crowdsec6-chain
     priority: -10
 EOF
-
+        )
         chown root:root "$BOUNCER_CONF"
         chmod 0600 "$BOUNCER_CONF"
         msg "Bouncer config written to $BOUNCER_CONF (mode 600)"
     fi
 
-    # Enable the bouncer service
+    # Enable and start the bouncer service
     systemctl enable crowdsec-firewall-bouncer.service
-    info "Enabled crowdsec-firewall-bouncer.service"
+    systemctl restart crowdsec-firewall-bouncer.service || warn "Could not start firewall bouncer. Check configuration."
+    if systemctl is-active --quiet crowdsec-firewall-bouncer.service; then
+        msg "nftables firewall bouncer is running"
+    fi
 fi
 
 # =============================================================================
-# 6. NGINX BOUNCER (optional)
+# 7. NGINX BOUNCER (optional)
 # =============================================================================
 
 if [[ "$WITH_NGINX" == true ]]; then
@@ -343,7 +446,10 @@ if [[ "$WITH_NGINX" == true ]]; then
         warn "Bouncer 'nginx-bouncer' may already be registered."
         warn "If you need to re-register, run: cscli bouncers delete nginx-bouncer"
     else
-        printf '%s\n' "$NGINX_BOUNCER_KEY" > "$NGINX_BOUNCER_KEY_FILE"
+        (
+            umask 077
+            printf '%s\n' "$NGINX_BOUNCER_KEY" > "$NGINX_BOUNCER_KEY_FILE"
+        )
         chown root:root "$NGINX_BOUNCER_KEY_FILE"
         chmod 0600 "$NGINX_BOUNCER_KEY_FILE"
         info "Nginx bouncer API key saved to $NGINX_BOUNCER_KEY_FILE (mode 600)"
@@ -352,89 +458,7 @@ if [[ "$WITH_NGINX" == true ]]; then
 fi
 
 # =============================================================================
-# 7. HARDEN CROWDSEC SYSTEMD SERVICE
-# =============================================================================
-
-msg "Hardening CrowdSec systemd service..."
-
-mkdir -p /etc/systemd/system/crowdsec.service.d/
-cat > /etc/systemd/system/crowdsec.service.d/hardening.conf <<'EOF'
-[Service]
-# --- Filesystem protection ---
-ProtectSystem=strict
-ReadWritePaths=/var/lib/crowdsec /etc/crowdsec /var/log
-ProtectHome=yes
-PrivateTmp=yes
-
-# --- Kernel protection ---
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-
-# --- Capabilities ---
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-# --- System call filtering ---
-SystemCallArchitectures=native
-SystemCallFilter=@system-service @network-io
-SystemCallErrorNumber=EPERM
-
-# --- Network ---
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-
-# --- Misc hardening ---
-NoNewPrivileges=yes
-LockPersonality=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-RestrictNamespaces=yes
-PrivateDevices=yes
-DevicePolicy=closed
-
-# --- Resource limits ---
-LimitNOFILE=65536
-LimitNPROC=4096
-
-# --- Restart policy ---
-Restart=on-failure
-RestartSec=5s
-EOF
-
-systemctl daemon-reload
-msg "systemd hardening applied to crowdsec.service"
-
-# =============================================================================
-# 8. ENABLE AND START CROWDSEC
-# =============================================================================
-
-msg "Enabling and starting CrowdSec..."
-
-systemctl enable crowdsec.service
-systemctl restart crowdsec.service
-
-# Wait briefly for service to stabilize
-sleep 3
-
-if systemctl is-active --quiet crowdsec.service; then
-    msg "CrowdSec is running"
-else
-    warn "CrowdSec service may not have started correctly. Check: journalctl -u crowdsec"
-fi
-
-# Start the nftables bouncer if configured
-if [[ "$WITH_NFTABLES" == true ]]; then
-    systemctl restart crowdsec-firewall-bouncer.service || warn "Could not start firewall bouncer. Check configuration."
-    if systemctl is-active --quiet crowdsec-firewall-bouncer.service; then
-        msg "nftables firewall bouncer is running"
-    fi
-fi
-
-# =============================================================================
-# 9. SHOW STATUS
+# 8. SHOW STATUS
 # =============================================================================
 
 msg "CrowdSec status:"
@@ -470,14 +494,24 @@ echo -e "${C_GREEN}=============================================================
 echo
 echo -e "${C_BLUE}Components installed:${C_NC}"
 echo "  - CrowdSec engine (LAPI + agent)"
-echo "  - Collections: linux, sshd$([ "$WITH_NGINX" == true ] && echo ', nginx')"
-[ "$WITH_NFTABLES" == true ] && echo "  - nftables firewall bouncer"
-[ "$WITH_NGINX" == true ]    && echo "  - nginx bouncer"
+if [[ "$WITH_NGINX" == true ]]; then
+    echo "  - Collections: linux, sshd, nginx"
+else
+    echo "  - Collections: linux, sshd"
+fi
+if [[ "$WITH_NFTABLES" == true ]]; then
+    echo "  - nftables firewall bouncer"
+fi
+if [[ "$WITH_NGINX" == true ]]; then
+    echo "  - nginx bouncer"
+fi
 echo
 echo -e "${C_BLUE}Configuration files:${C_NC}"
 echo "  Acquisition:    $ACQUIS_CONF"
 echo "  Main config:    /etc/crowdsec/config.yaml"
-[ "$WITH_NFTABLES" == true ] && echo "  Bouncer config:  $BOUNCER_CONF"
+if [[ "$WITH_NFTABLES" == true ]]; then
+    echo "  Bouncer config:  $BOUNCER_CONF"
+fi
 echo "  systemd drop-in: /etc/systemd/system/crowdsec.service.d/hardening.conf"
 echo "  Log:            $LOGFILE"
 echo

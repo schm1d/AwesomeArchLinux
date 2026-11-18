@@ -39,16 +39,16 @@ The configuration requires `minsources 3`, meaning chrony will not adjust the cl
 2. **Disables systemd-timesyncd** (conflicts with chrony on NTP port)
 3. **Backs up** the existing `/etc/chrony.conf`
 4. **Writes a hardened** `/etc/chrony.conf` with all 6 NTS servers
-5. **Creates** `/etc/chrony.keys` with permissions `640 root:chrony`
-6. **Creates** `/var/log/chrony/` with permissions `750 root:chrony`
-7. **Hardens the chronyd systemd service** with a drop-in override:
-   - `ProtectSystem=strict` (read-only filesystem except explicit paths)
-   - `ProtectHome=yes` (no access to /home)
+5. **Ensures** the `chrony` user/group exist via `systemd-sysusers`, then creates `/etc/chrony.keys` with permissions `640 root:chrony`
+6. **Creates** `/var/lib/chrony/` and `/var/log/chrony/` with permissions `750 chrony:chrony`
+7. **Hardens the chronyd systemd service** with a drop-in override (clearing upstream list directives before applying strict allowlists):
+   - `ProtectSystem=strict` and `ReadWritePaths=/run /var/lib/chrony -/var/log/chrony` (`RuntimeDirectory=chrony` is intentionally omitted so `chronyd` creates `/run/chrony` as `chrony:chrony 0750` instead of `root:root 0755`, which Chrony 4.9 rejects)
+   - `ProtectHome=yes` (no access to `/home`) and `PrivateTmp=yes`
    - `NoNewPrivileges=yes` (no privilege escalation)
-   - `CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID`
+   - `CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_TIME CAP_NET_BIND_SERVICE`
    - `SystemCallFilter=@system-service @clock` (restrict syscalls)
-   - `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`
-   - `MemoryDenyWriteExecute=yes`
+   - `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`
+   - `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `MemoryDenyWriteExecute=yes`
 8. **Enables and starts** chronyd
 9. **Verifies** NTS authentication is working
 
@@ -172,16 +172,16 @@ systemctl is-active systemd-timesyncd
 sudo systemctl disable --now systemd-timesyncd
 ```
 
-### Checking NTS vs Plain NTP
+### Checking NTS Authentication Status
 
-To confirm packets are actually NTS-authenticated (not falling back to plain NTP):
+To confirm packets are NTS-authenticated:
 
 ```bash
-# The "Authenticated" field should show "yes" for NTS servers
-chronyc -N ntpdata | grep -A2 "Name\|Authenticated"
+# The "Authenticated" field shows "Yes" once an NTS-authenticated NTP packet is accepted
+chronyc -N ntpdata | grep -E "Remote address|Authenticated"
 ```
 
-If a server shows `Authenticated: no`, chrony has fallen back to unauthenticated NTP for that server. Check the NTS-KE handshake status with `chronyc -N authdata`.
+When `nts` is configured on a `server` directive, Chrony **never** falls back to unauthenticated plain NTP. If `chronyc -N ntpdata` shows `Authenticated   : No`, it means no valid NTS-authenticated measurement has been received from that server yet (for example, right after startup or while NTS-KE is failing); Chrony ignores unauthenticated packets until NTS succeeds. Check handshake status and cookies with `chronyc -N authdata`.
 
 ## Configuration File Reference
 
@@ -189,7 +189,7 @@ If a server shows `Authenticated: no`, chrony has fallen back to unauthenticated
 |------|---------|
 | `/etc/chrony.conf` | Main chrony configuration |
 | `/etc/chrony.keys` | Authentication keys (640 root:chrony) |
-| `/var/lib/chrony/chrony.drift` | Clock drift rate data |
+| `/var/lib/chrony/drift` | Clock drift rate data |
 | `/var/lib/chrony/*.nts` | Cached NTS cookies (survives restart) |
 | `/var/log/chrony/` | Tracking, measurement, and statistics logs |
 | `/etc/systemd/system/chronyd.service.d/hardening.conf` | systemd hardening |

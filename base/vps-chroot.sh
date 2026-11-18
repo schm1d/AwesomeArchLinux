@@ -8,6 +8,7 @@
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
 set -euo pipefail
+umask 022
 source /root/.install-env || { echo "Failed to source /root/.install-env"; exit 1; }
 
 # Set up the variables
@@ -25,20 +26,25 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# --- Variables from installer ---
-DISK="${_INSTALL_DISK}"
-USERNAME="${_INSTALL_USER}"
-HOSTNAME="${_INSTALL_HOST}"
-SSH_PORT="${_INSTALL_SSH_PORT:-22}"
-SSH_PUBKEY="${_INSTALL_SSH_PUBKEY:-}"
+# --- Variables from installer (accept both INSTALL_* and _INSTALL_*) ---
+DISK="${INSTALL_DISK:-${_INSTALL_DISK:-}}"
+USERNAME="${INSTALL_USER:-${_INSTALL_USER:-}}"
+HOSTNAME="${INSTALL_HOST:-${_INSTALL_HOST:-}}"
+: "${DISK:?Missing INSTALL_DISK/_INSTALL_DISK}"
+: "${USERNAME:?Missing INSTALL_USER/_INSTALL_USER}"
+: "${HOSTNAME:?Missing INSTALL_HOST/_INSTALL_HOST}"
+SSH_PORT="${INSTALL_SSH_PORT:-${_INSTALL_SSH_PORT:-22}}"
+SSH_PUBKEY="${INSTALL_SSH_PUBKEY:-${_INSTALL_SSH_PUBKEY:-}}"
+ALLOW_NO_SSH_KEY="${INSTALL_ALLOW_NO_SSH_KEY:-${_INSTALL_ALLOW_NO_SSH_KEY:-false}}"
+INSTALL_TYPE_VAL="${INSTALL_TYPE:-${_INSTALL_TYPE:-vps}}"
 # shellcheck disable=SC2034  # Cross-script env vars from installer
-TIMEZONE="${_INSTALL_TIMEZONE:-UTC}"
+TIMEZONE="${INSTALL_TIMEZONE:-${_INSTALL_TIMEZONE:-UTC}}"
 # shellcheck disable=SC2034
-LOCALE="${_INSTALL_LOCALE:-en_US.UTF-8}"
+LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-en_US.UTF-8}}"
 # shellcheck disable=SC2034
-KEYMAP="${_INSTALL_KEYMAP:-us}"
-SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
-SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
+KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-us}}"
+SYSCTL_PROFILE="${INSTALL_SYSCTL_PROFILE:-${_INSTALL_SYSCTL_PROFILE:-workstation}}"
+SYSCTL_DISABLE_IPV6="${INSTALL_DISABLE_IPV6:-${_INSTALL_DISABLE_IPV6:-false}}"
 
 case "$SYSCTL_DISABLE_IPV6" in
     true|false) ;;
@@ -80,10 +86,11 @@ groupdel games 2>/dev/null || true
 # --- Timezone & Locale (set once) ---
 echo -e "${BBlue}Setting timezone to $TIMEZONE...${NC}"
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-hwclock --systohc --utc
+echo "$TIMEZONE" > /etc/timezone
+hwclock --systohc --utc || echo -e "${BYellow}Warning: hwclock --systohc failed (RTC unavailable); continuing.${NC}"
 
 echo -e "${BBlue}Setting up locale to $LOCALE...${NC}"
-sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+sed -i -E "s/^#(${LOCALE//./\\.}[[:space:]])/\1/" /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 export LANG="$LOCALE"
@@ -158,7 +165,7 @@ install -d /etc/X11/xorg.conf.d
 
 # --- Hostname ---
 echo -e "${BBlue}Setting hostname...${NC}"
-hostnamectl set-hostname "$HOSTNAME"
+hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || true
 echo "$HOSTNAME" > /etc/hostname
 
 echo -e "${BBlue}Configuring /etc/hosts...${NC}"
@@ -269,8 +276,8 @@ EOF
 fi
 
 echo -e "${BBlue}Enabling systemd-resolved...${NC}"
-systemctl daemon-reload
-if [ "${_INSTALL_TYPE:-}" = "vps-harden" ]; then
+systemctl daemon-reload 2>/dev/null || true
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
     echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
@@ -288,7 +295,7 @@ fi
 # Prefer IPv4 over IPv6 — many VPS providers lack IPv6 routing, and
 # sshd is configured with AddressFamily inet (IPv4 only)
 echo -e "${BBlue}Configuring IPv4 preference...${NC}"
-echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+grep -qxF 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 echo -e "${BBlue}DNS-over-TLS configuration completed!${NC}"
 
@@ -341,15 +348,21 @@ EOF
 sed -i "s/\$SSH_PORT/$SSH_PORT/g" /etc/nftables.conf
 
 systemctl enable nftables.service
+FAIL2BAN_BANACTION="nftables-multiport"
 
-# Start nftables — may fail on VPS kernels without nf_tables module support
+# Start nftables on live systems — may fail on VPS kernels without nf_tables module support
 if nft list ruleset &>/dev/null; then
-    systemctl start nftables.service
+    if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+        systemctl start nftables.service
+    fi
     echo -e "${BGreen}Firewall configuration with nftables completed.${NC}"
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
-    # nft backend unavailable but iptables works (legacy kernel module present)
+    # nft backend unavailable but iptables works (legacy kernel module present).
+    # Remove /etc/nftables.conf so ssh.sh does not falsely enter its nft branch.
     echo -e "${BYellow}WARNING: nftables kernel module not available — falling back to iptables.${NC}"
     systemctl disable nftables.service 2>/dev/null || true
+    rm -f /etc/nftables.conf
+    FAIL2BAN_BANACTION="iptables-multiport"
 
     # Flush existing rules and set default deny
     iptables -F
@@ -426,20 +439,14 @@ pacman -S --noconfirm clamav
 
 echo -e "${BBlue}Configuring ClamAV...${NC}"
 
-if [ ! -f /etc/clamav/freshclam.conf ]; then
-  clamconf -g freshclam.conf
-  mv freshclam.conf /etc/clamav/freshclam.conf
-fi
-
-if [ ! -f /etc/clamav/clamd.conf ]; then
-  clamconf -g clamd.conf
-  mv clamd.conf /etc/clamav/clamd.conf
-fi
-
-if [ ! -f /etc/clamav/clamav-milter.conf ]; then
-  clamconf -g clamav-milter.conf
-  mv clamav-milter.conf /etc/clamav/clamav-milter.conf
-fi
+install -d -m 0755 /etc/clamav
+for clam_cfg in freshclam.conf clamd.conf clamav-milter.conf; do
+  if [ ! -f "/etc/clamav/$clam_cfg" ]; then
+    clamconf -g "$clam_cfg" | sed 's/^Example/#Example/' > "/etc/clamav/$clam_cfg"
+  else
+    sed -i 's/^Example/#Example/' "/etc/clamav/$clam_cfg"
+  fi
+done
 
 CLAMD_CONF="/etc/clamav/clamd.conf"
 
@@ -485,22 +492,23 @@ chmod 600 /var/log/clamav/freshclam.log
 chown clamav:clamav /var/log/clamav/freshclam.log
 
 systemctl enable clamav-freshclam.service
-systemctl start clamav-freshclam.service || true
-freshclam || true
-
 systemctl enable clamav-daemon.service
-systemctl start clamav-daemon.service || true
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+    systemctl start clamav-freshclam.service || true
+    freshclam || true
+    systemctl start clamav-daemon.service || true
+fi
 
 echo -e "${BBlue}ClamAV configuration completed!${NC}"
 
 ###############################################################################
-# RKHUNTER
+# RKHUNTER (rkhunter --propupd runs near the end after all packages and
+# binary permission adjustments are finalized)
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
 pacman -S --noconfirm rkhunter
 
-rkhunter --propupd
 cat <<EOF > /etc/systemd/system/rkhunter-check.service
 [Unit]
 Description=Run rkhunter daily check
@@ -562,14 +570,20 @@ grep -qxF 'umask 027' /etc/bash.bashrc || echo "umask 027" >> /etc/bash.bashrc
 
 # Disable unwanted protocols
 echo -e "${BBlue}Disabling unwanted protocols...${NC}"
-grep -qxF 'install dccp /bin/false' /etc/modprobe.d/disable-protocols.conf 2>/dev/null || echo "install dccp /bin/false" >> /etc/modprobe.d/disable-protocols.conf
-grep -qxF 'install sctp /bin/false' /etc/modprobe.d/disable-protocols.conf 2>/dev/null || echo "install sctp /bin/false" >> /etc/modprobe.d/disable-protocols.conf
-grep -qxF 'install rds /bin/false' /etc/modprobe.d/disable-protocols.conf 2>/dev/null || echo "install rds /bin/false" >> /etc/modprobe.d/disable-protocols.conf
-grep -qxF 'install tipc /bin/false' /etc/modprobe.d/disable-protocols.conf 2>/dev/null || echo "install tipc /bin/false" >> /etc/modprobe.d/disable-protocols.conf
+cat > /etc/modprobe.d/disable-protocols.conf << 'MODPROBE_EOF'
+blacklist dccp
+blacklist sctp
+blacklist rds
+blacklist tipc
+install dccp /bin/false
+install sctp /bin/false
+install rds /bin/false
+install tipc /bin/false
+MODPROBE_EOF
 
 # Disable core dumps
 echo -e "${BBlue}Disabling core dump...${NC}"
-grep -qxF '* hard core 0' /etc/security/limits.conf || echo "* hard core 0" >> /etc/security/limits.conf
+grep -qxF '* hard core 0' /etc/security/limits.conf 2>/dev/null || echo "* hard core 0" >> /etc/security/limits.conf
 
 ###############################################################################
 # NTP — chrony only (no conflict with ntpd)
@@ -577,6 +591,7 @@ grep -qxF '* hard core 0' /etc/security/limits.conf || echo "* hard core 0" >> /
 
 echo -e "${BBlue}Installing chrony for NTP...${NC}"
 pacman -S --noconfirm chrony
+install -d -o chrony -g chrony -m 0750 /var/log/chrony
 systemctl enable chronyd
 
 ###############################################################################
@@ -638,12 +653,21 @@ ln -sf /dev/null /etc/systemd/system/systemd-time-wait-sync.service 2>/dev/null 
 echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
 pacman -S --noconfirm fail2ban
 
+install -d -m 0755 /etc/fail2ban/filter.d /etc/fail2ban/jail.d
+cat <<'EOF' > /etc/fail2ban/filter.d/sshd.local
+[Definition]
+_daemon = sshd(?:-session|-auth)?
+
+[Init]
+journalmatch = _SYSTEMD_UNIT=sshd.service
+EOF
+
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
 port    = ${SSH_PORT}
 maxretry = 5
-banaction = nftables-multiport
+banaction = ${FAIL2BAN_BANACTION}
 # OpenSSH 10.x splits into sshd, sshd-auth, sshd-session — match all via journal
 backend = systemd
 journalmatch = _SYSTEMD_UNIT=sshd.service
@@ -667,16 +691,18 @@ echo -e "${BBlue}Hardening sudo...${NC}"
 groupadd -r proc 2>/dev/null || true
 groupadd sudo 2>/dev/null || true
 
-# Write sudoers atomically via temp file + visudo validation
-cat > /tmp/sudoers.new << 'SUDOERS_EOF'
+# Write sudoers atomically via private /etc temp file + visudo validation
+SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
+chmod 0440 "$SUDOERS_TMP"
+cat > "$SUDOERS_TMP" << 'SUDOERS_EOF'
 # Hardened sudoers — generated by vps-chroot.sh
 
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Defaults !rootpw
 Defaults umask=077
-Defaults editor=/usr/bin/vim
+Defaults editor=/usr/bin/vim:/usr/bin/nvim:/usr/bin/nano:/usr/bin/vi
 Defaults env_reset
-Defaults env_reset,env_keep="COLORS DISPLAY HOSTNAME HISTSIZE INPUTRC KDEDIR LS_COLORS"
+Defaults env_keep="COLORS DISPLAY HOSTNAME HISTSIZE INPUTRC KDEDIR LS_COLORS"
 Defaults env_keep += "MAIL PS1 PS2 QTDIR USERNAME LANG LC_ADDRESS LC_CTYPE"
 Defaults env_keep += "LC_COLLATE LC_IDENTIFICATION LC_MEASUREMENT LC_MESSAGES"
 Defaults env_keep += "LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER LC_TELEPHONE"
@@ -691,24 +717,23 @@ Defaults passwd_tries=3
 Defaults loglinelen=0
 Defaults insults
 Defaults lecture=once
-Defaults requiretty
 Defaults logfile=/var/log/sudo.log
 Defaults log_input, log_output
 
 root ALL=(ALL:ALL) ALL
-%sudo ALL=(ALL) ALL
+%sudo ALL=(ALL:ALL) ALL
 
 @includedir /etc/sudoers.d
 SUDOERS_EOF
 
 # Validate before installing
-if visudo -c -f /tmp/sudoers.new; then
-    install -m 0440 -o root -g root /tmp/sudoers.new /etc/sudoers
+if visudo -c -f "$SUDOERS_TMP"; then
+    install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers
     echo -e "${BGreen}Sudoers validated and installed successfully.${NC}"
 else
     echo -e "${BRed}ERROR: sudoers validation failed! Keeping original file.${NC}" >&2
 fi
-rm -f /tmp/sudoers.new
+rm -f "$SUDOERS_TMP"
 
 ###############################################################################
 # ARCH-AUDIT
@@ -743,10 +768,11 @@ else
     echo "User $USERNAME already exists." >&2
 fi
 
-# Nano config
-echo "set backup" >> /home/"$USERNAME"/.nanorc
-echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/"$USERNAME"/.nanorc
-chmod 600 /home/"$USERNAME"/.nanorc
+# Pre-create private user cache directories (including nano backups)
+install -d -m 0700 -o "$USERNAME" -g "$USERNAME" \
+    "/home/$USERNAME/.cache" \
+    "/home/$USERNAME/.cache/nano" \
+    "/home/$USERNAME/.cache/nano/backups"
 
 # Set passwords
 echo -e "${BBlue}Configuring password policy before setting passwords...${NC}"
@@ -776,22 +802,31 @@ while true; do
 done
 set -e
 
-# Install nano syntax highlighting (packaged version)
+# Install nano syntax highlighting (packaged version) and write .nanorc idempotently
 echo -e "${BBlue}Installing nano syntax highlighting...${NC}"
-pacman -S --noconfirm nano-syntax-highlighting
+pacman -S --needed --noconfirm nano-syntax-highlighting 2>/dev/null || true
 
-echo "set constantshow" >> /home/"$USERNAME"/.nanorc
-echo "set locking" >> /home/"$USERNAME"/.nanorc
-echo "set nohelp" >> /home/"$USERNAME"/.nanorc
-echo "set nonewlines" >> /home/"$USERNAME"/.nanorc
-echo "set nowrap" >> /home/"$USERNAME"/.nanorc
-echo "set minibar" >> /home/"$USERNAME"/.nanorc
-echo "set zap" >> /home/"$USERNAME"/.nanorc
-echo "set linenumbers" >> /home/"$USERNAME"/.nanorc
-echo "set tabsize 4" >> /home/"$USERNAME"/.nanorc
-echo "set tabstospaces" >> /home/"$USERNAME"/.nanorc
-echo "set wordbounds punct,alnum" >> /home/"$USERNAME"/.nanorc
-echo "set regexp ^[A-Za-z_][A-Za-z0-9_]*$" >> /home/"$USERNAME"/.nanorc
+{
+    cat << 'NANO_EOF'
+set backup
+set backupdir "~/.cache/nano/backups/"
+set constantshow
+set locking
+set nohelp
+set nonewlines
+set nowrap
+set minibar
+set zap
+set linenumbers
+set tabsize 4
+set tabstospaces
+NANO_EOF
+    if compgen -G '/usr/share/nano-syntax-highlighting/*.nanorc' >/dev/null; then
+        echo 'include "/usr/share/nano-syntax-highlighting/*.nanorc"'
+    fi
+} > "/home/$USERNAME/.nanorc"
+chown "$USERNAME:$USERNAME" "/home/$USERNAME/.nanorc"
+chmod 600 "/home/$USERNAME/.nanorc"
 
 ###############################################################################
 # SSH CONFIGURATION
@@ -835,10 +870,13 @@ EOF
 
   touch "/home/$USERNAME/.ssh/authorized_keys"
   if [[ -n "$SSH_PUBKEY" ]]; then
-      echo "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
+      grep -qxF "$SSH_PUBKEY" "/home/$USERNAME/.ssh/authorized_keys" 2>/dev/null || \
+          printf '%s\n' "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
       echo -e "${BGreen}SSH public key installed for $USERNAME.${NC}"
+  elif [[ -s "/home/$USERNAME/.ssh/authorized_keys" ]]; then
+      echo -e "${BGreen}Existing SSH authorized_keys preserved for $USERNAME.${NC}"
   else
-      echo -e "${BYellow}No SSH public key provided — add one manually before disconnecting.${NC}"
+      echo -e "${BYellow}No SSH public key provided — add one manually via console before disconnecting.${NC}"
   fi
   chmod 700 "/home/$USERNAME/.ssh"
   chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
@@ -847,12 +885,18 @@ EOF
 
 configure_ssh
 
-# Now harden sshd — authorized_keys is already in place, so disabling
-# password auth won't cause a lockout.
+# Harden sshd — defer shredding /ssh.sh until the end of vps-chroot.sh so
+# recovery/resume can retry cleanly if a subsequent step fails.
 echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
-/ssh.sh -u "$USERNAME" -p "$SSH_PORT"
-shred -u /ssh.sh 2>/dev/null || true
-
+if [[ -s "/home/$USERNAME/.ssh/authorized_keys" ]]; then
+    /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+elif [[ "$ALLOW_NO_SSH_KEY" == "true" ]]; then
+    echo -e "${BYellow}Proceeding without authorized_keys because console-only access was explicitly confirmed (-k).${NC}"
+    /ssh.sh -u "$USERNAME" -p "$SSH_PORT" -k
+else
+    echo -e "${BRed}ERROR: /home/$USERNAME/.ssh/authorized_keys is empty and console-only override was not confirmed.${NC}" >&2
+    exit 1
+fi
 
 sleep 1
 
@@ -861,35 +905,102 @@ sleep 1
 ###############################################################################
 
 echo -e "${BBlue}Applying hardened compiler flags...${NC}"
-sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
-sed -i '/^CXXFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
-sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
-sed -i '/^OPTIONS=/ s/!pie/pie/' /etc/makepkg.conf
+harden_makepkg_conf() {
+    local conf="/etc/makepkg.conf"
+    [[ -f "$conf" ]] || return 0
+    if ! grep -q -- '-fstack-protector-strong' "$conf"; then
+        awk '
+            /^CFLAGS="/ { in_cflags = 1 }
+            in_cflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -fstack-protector-strong\"")
+                in_cflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    if ! grep -q -- '_FORTIFY_SOURCE' "$conf"; then
+        awk '
+            /^CFLAGS="/ { in_cflags = 1 }
+            in_cflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -Wp,-D_FORTIFY_SOURCE=3\"")
+                in_cflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    if ! grep -q -- '-z,now' "$conf"; then
+        awk '
+            /^LDFLAGS="/ { in_ldflags = 1 }
+            in_ldflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -Wl,-z,relro,-z,now\"")
+                in_ldflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    sed -i '/^OPTIONS=/ s/!pie/pie/' "$conf"
+}
+harden_makepkg_conf
 
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
 groupadd compilers 2>/dev/null || true
 usermod -aG compilers "$USERNAME"
-for compiler in gcc g++ clang make as ld; do
-    compiler_path=$(command -v "$compiler" 2>/dev/null) || continue
-    chown root:compilers "$compiler_path"
-    chmod 750 "$compiler_path"
-done
 
-# Set default ACLs on home directories
-echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
-setfacl -d -m u::rwx,g::---,o::--- ~
+install -Dm0755 /dev/stdin /usr/local/lib/awesomearchlinux/fix-compilers-perms.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+getent group compilers >/dev/null 2>&1 || exit 0
+for compiler in gcc g++ clang make as ld ld.bfd ld.lld; do
+    compiler_path=$(command -v "$compiler" 2>/dev/null) || continue
+    resolved=$(realpath -e "$compiler_path" 2>/dev/null) || continue
+    [[ -f "$resolved" ]] || continue
+    chown root:compilers "$resolved"
+    chmod 0750 "$resolved"
+done
+EOF
+
+install -Dm0644 /dev/stdin /etc/pacman.d/hooks/90-awesome-compilers.hook <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/gcc
+Target = usr/bin/g++
+Target = usr/bin/clang
+Target = usr/bin/make
+Target = usr/bin/as
+Target = usr/bin/ld
+Target = usr/bin/ld.bfd
+Target = usr/bin/ld.lld
+
+[Action]
+Description = Restoring compiler group permissions (root:compilers 0750)...
+When = PostTransaction
+Exec = /usr/local/lib/awesomearchlinux/fix-compilers-perms.sh
+EOF
+
+/usr/local/lib/awesomearchlinux/fix-compilers-perms.sh
+
+# Keep /root private (0700) without default ACLs, and exclude ~/.cache/{yay,paru}
+# from default ACL inheritance so AUR makepkg builds never create broken packages.
+echo -e "${BBlue}Configuring /root permissions and default ACLs on /home/$USERNAME...${NC}"
+chmod 0700 /root
+setfacl -b -k /root 2>/dev/null || true
 setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
+mkdir -p "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru" "/home/$USERNAME/.cache/nano/backups"
+chmod 0700 "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/nano" "/home/$USERNAME/.cache/nano/backups"
+setfacl -b -k "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru"
+chown -hR "$USERNAME:$USERNAME" "/home/$USERNAME/.cache"
 
 ###############################################################################
 # GRUB SETUP (NO ENCRYPTION — VPS)
 ###############################################################################
 
 # Skip GRUB/mkinitcpio on live systems — bootloader is already configured
-# _INSTALL_TYPE is set via env export, INSTALL_TYPE via /root/.install-env
-if [[ "${_INSTALL_TYPE:-${INSTALL_TYPE:-}}" != "vps-harden" ]]; then
+if [[ "$INSTALL_TYPE_VAL" != "vps-harden" ]]; then
 
 echo -e "${BBlue}Setting up GRUB (no encryption for VPS)...${NC}"
-pacman -S grub efibootmgr os-prober --noconfirm
+pacman -S --needed --noconfirm grub efibootmgr os-prober
 
 # mkinitcpio — simple, no encrypt/lvm hooks needed
 echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf...${NC}"
@@ -903,20 +1014,23 @@ GRUBSEC="\"slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 pti=
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=${GRUBSEC}|" /etc/default/grub
 sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"\"|" /etc/default/grub
 
-# Enable serial console in GRUB for VPS provider console access
-cat >> /etc/default/grub <<EOF
+# Enable serial console in GRUB idempotently for VPS provider console access
+if ! grep -q '^GRUB_TERMINAL="console serial"' /etc/default/grub; then
+    sed -i -E '/^#?GRUB_TERMINAL=/d; /^#?GRUB_SERIAL_COMMAND=/d' /etc/default/grub
+    cat >> /etc/default/grub <<'EOF'
 
 # VPS serial console support
 GRUB_TERMINAL="console serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
 EOF
+fi
 
 # CPU Microcode
 echo -e "${BBlue}Installing CPU microcode...${NC}"
 if [[ "$CPU_VENDOR_ID" =~ "GenuineIntel" ]]; then
-    pacman -S --noconfirm intel-ucode 2>/dev/null || true
+    pacman -S --needed --noconfirm intel-ucode 2>/dev/null || true
 elif [[ "$CPU_VENDOR_ID" =~ "AuthenticAMD" ]]; then
-    pacman -S --noconfirm amd-ucode 2>/dev/null || true
+    pacman -S --needed --noconfirm amd-ucode 2>/dev/null || true
 fi
 
 # NOTE: GPU detection skipped — VPS doesn't have physical GPUs
@@ -936,11 +1050,28 @@ grub-mkconfig -o /boot/grub/grub.cfg
 
 else
     echo -e "${BBlue}Skipping GRUB/mkinitcpio (live system — bootloader already configured)${NC}"
-fi # end _INSTALL_TYPE guard
+fi # end INSTALL_TYPE_VAL guard
 
 ###############################################################################
-# FILE PERMISSIONS
+# LOGIN BANNER & FILE PERMISSIONS
 ###############################################################################
+
+echo -e "${BBlue}Creating Banners (/etc/issue and /etc/issue.net).${NC}"
+
+cat > /etc/issue.net << 'EOF'
+********************************************************************
+*                                                                  *
+* This system is for the use of authorized users only. Usage of    *
+* this system may be monitored and recorded by system personnel.   *
+*                                                                  *
+* Anyone using this system expressly consents to such monitoring   *
+* and is advised that if such monitoring reveals possible          *
+* evidence of criminal activity, system personnel may provide the  *
+* evidence from such monitoring to law enforcement officials.      *
+*                                                                  *
+********************************************************************
+EOF
+cp /etc/issue.net /etc/issue
 
 echo -e "${BBlue}Setting permissions on config files...${NC}"
 
@@ -965,41 +1096,26 @@ chown root:root /etc/gshadow
 chown root:root /etc/ssh/sshd_config
 chmod 600 /etc/ssh/sshd_config
 chown root:root /etc/fstab
-chown root:root /etc/issue
-chmod 644 /etc/issue
-chown root:root /boot/grub/grub.cfg
-chmod og-rwx /boot/grub/grub.cfg
+chmod 644 /etc/fstab
+chown root:root /etc/issue /etc/issue.net
+chmod 644 /etc/issue /etc/issue.net
+if [[ -f /boot/grub/grub.cfg ]]; then
+    chown root:root /boot/grub/grub.cfg
+    chmod og-rwx /boot/grub/grub.cfg
+fi
 chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
 chown -c root:root /etc/sudoers
 chmod -c 0440 /etc/sudoers
-chmod 02750 /bin/ping
-chmod 02750 /usr/bin/w
-chmod 02750 /usr/bin/who
-chmod 02750 /usr/bin/whereis
+# Never set the 2000 setgid bit on root-owned binaries or break normal user ping/whereis.
+if [[ -g /usr/bin/ping ]]; then
+    chmod 00755 /usr/bin/ping
+    setcap cap_net_raw=ep /usr/bin/ping 2>/dev/null || true
+fi
+chmod 00755 /usr/bin/whereis
+chown root:proc /usr/bin/w /usr/bin/who
+chmod 00750 /usr/bin/w /usr/bin/who
 chmod 0644 /etc/login.defs
-
-###############################################################################
-# LOGIN BANNER
-###############################################################################
-
-echo -e "${BBlue}Creating Banner (/etc/issue.net).${NC}"
-
-cat > /etc/issue.net << EOF
-Arch Linux \r (\l)
-
-********************************************************************
-*                                                                  *
-* This system is for the use of authorized users only. Usage of    *
-* this system may be monitored and recorded by system personnel.   *
-*                                                                  *
-* Anyone using this system expressly consents to such monitoring   *
-* and is advised that if such monitoring reveals possible          *
-* evidence of criminal activity, system personnel may provide the  *
-* evidence from such monitoring to law enforcement officials.      *
-*                                                                  *
-********************************************************************
-EOF
 
 ###############################################################################
 # PAM HARDENING
@@ -1014,7 +1130,7 @@ EOF
 
 echo -e "${BBlue}Setting up daily package update checks...${NC}"
 pacman -S --noconfirm pacman-contrib
-cat <<EOF > /etc/systemd/system/pacman-autoupdate.timer
+cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.timer
 [Unit]
 Description=Run package update check daily
 
@@ -1035,7 +1151,10 @@ After=network-online.target
 Type=oneshot
 # checkupdates syncs a temporary database, leaving pacman's live sync database
 # untouched. Exit 2 means there are no pending updates and is not an error.
-ExecStart=/bin/sh -c '/usr/bin/checkupdates > /var/log/pacman-updates.log 2>&1; rc=$$?; [ "$$rc" -eq 0 ] || [ "$$rc" -eq 2 ]'
+ExecStart=/usr/bin/checkupdates
+StandardOutput=file:/var/log/pacman-updates.log
+StandardError=inherit
+SuccessExitStatus=2
 EOF
 systemctl enable pacman-autoupdate.timer
 
@@ -1052,29 +1171,17 @@ echo -e "${BBlue}Hardening SSH service...${NC}"
 mkdir -p /etc/systemd/system/sshd.service.d/
 cat > /etc/systemd/system/sshd.service.d/hardening.conf <<'EOF'
 [Service]
-PrivateTmp=yes
-# sshd spawns user shells that need sudo/su and PTY allocation.
-# NoNewPrivileges/RestrictSUIDSGID break sudo; PrivateDevices breaks PTYs;
-# RemoveIPC destroys shared memory on last session close;
-# RestrictNamespaces blocks containers/unshare in SSH sessions.
+# sshd spawns interactive user sessions: PrivateTmp=yes and ProtectControlGroups=yes
+# isolate local /tmp IPC sockets and break rootless container cgroup delegation.
+PrivateTmp=no
 NoNewPrivileges=no
-# sshd spawns interactive user sessions — ProtectSystem/ProtectHome must be
-# 'no' or users can't install packages, write to /var, /etc, or /home.
 ProtectSystem=no
 ProtectHome=no
-# ProtectKernel*=yes bind-mounts /run/systemd/inaccessible/dir over
-# /usr/lib/modules, /proc/kcore, /proc/kallsyms, /proc/kmsg, /dev/kmsg
-# in sshd's mount namespace. PAM-spawned user sessions inherit that
-# namespace, breaking modinfo/nvidia-modprobe/DKMS/GTK GSK device probes
-# in every SSH login. Must be off on sshd for the same reason
-# ProtectSystem and ProtectHome are off here: sshd spawns interactive
-# user sessions that need normal kernel-info access.
 ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectKernelLogs=no
-ProtectControlGroups=yes
+ProtectControlGroups=no
 # AF_NETLINK is required for PAM/auditd communication during session setup.
-# Without it, sshd drops connections immediately after authentication.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 IPAddressAllow=any
 IPAddressDeny=
@@ -1091,14 +1198,6 @@ echo -e "${BBlue}Hardening NetworkManager...${NC}"
 mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
-# RuntimeDirectory= / StateDirectory= make systemd create /run/NetworkManager
-# and /var/lib/NetworkManager (with correct ownership) before ExecStart runs.
-# Listing them in ReadWritePaths= instead would fail on first boot because
-# ProtectSystem=strict bind-mounts every ReadWritePaths= entry, and those
-# directories do not yet exist. The remaining ReadWritePaths= entries are
-# prefixed with "-" so a missing path is treated as optional rather than a
-# namespacing failure (relevant when /etc/resolv.conf is a symlink managed
-# by systemd-resolved).
 RuntimeDirectory=NetworkManager
 StateDirectory=NetworkManager
 ProtectSystem=strict
@@ -1108,7 +1207,7 @@ ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_SYS_MODULE
 NoNewPrivileges=no
 PrivateDevices=no
 DevicePolicy=auto
@@ -1123,11 +1222,10 @@ echo -e "${BBlue}Hardening auditd...${NC}"
 mkdir -p /etc/systemd/system/auditd.service.d/
 cat > /etc/systemd/system/auditd.service.d/hardening.conf <<'EOF'
 [Service]
-# auditd manages the kernel audit subsystem — it needs broad access to
-# /proc, /sys/kernel, and netlink sockets. Heavy sandboxing breaks it.
+# auditd manages the kernel audit subsystem — ProtectControlGroups=yes breaks
+# /proc audit rule operations and is explicitly unsupported upstream.
 ProtectSystem=full
 ProtectHome=yes
-ProtectControlGroups=yes
 ReadWritePaths=/var/log/audit /run
 CapabilityBoundingSet=CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH CAP_SYS_NICE CAP_SYS_RESOURCE
 PrivateDevices=yes
@@ -1174,10 +1272,12 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
 NoNewPrivileges=no
 PrivateTmp=yes
 PrivateDevices=yes
+RestrictAddressFamilies=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
@@ -1195,12 +1295,14 @@ EOF
 
 # Chrony NTP hardening
 echo -e "${BBlue}Hardening Chrony NTP...${NC}"
+install -d -o chrony -g chrony -m 0750 /var/log/chrony
 mkdir -p /etc/systemd/system/chronyd.service.d/
 cat > /etc/systemd/system/chronyd.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/chrony /var/log/chrony /run
+ReadWritePaths=
+ReadWritePaths=/run /var/lib/chrony -/var/log/chrony
 ProtectKernelTunables=no
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -1208,12 +1310,14 @@ ProtectControlGroups=yes
 ProtectClock=no
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
-CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_SYS_TIME
+PrivateDevices=no
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_TIME CAP_NET_BIND_SERVICE
+SystemCallFilter=
 SystemCallFilter=@system-service @clock
 SystemCallErrorNumber=EPERM
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
 Restart=on-failure
@@ -1245,7 +1349,9 @@ SYSTEMD_HARDENING_CANDIDATES=(
     arch-audit-alert.service
     arch-audit.timer
     rkhunter-check.service
+    rkhunter-check.timer
     pacman-autoupdate.service
+    pacman-autoupdate.timer
 )
 SYSTEMD_HARDENED_UNITS=()
 for unit in "${SYSTEMD_HARDENING_CANDIDATES[@]}"; do
@@ -1273,7 +1379,7 @@ harden_sysctl() {
 
   if [ -x "/sysctl-profile/sysctl.sh" ]; then
     local -a sysctl_args=("$SYSCTL_PROFILE")
-    if [[ "${_INSTALL_TYPE:-${INSTALL_TYPE:-}}" != "vps-harden" ]]; then
+    if [[ "$INSTALL_TYPE_VAL" != "vps-harden" ]]; then
       sysctl_args+=("--no-apply")
     fi
     if [[ "$SYSCTL_DISABLE_IPV6" == true ]]; then
@@ -1307,9 +1413,14 @@ harden_sysctl() {
 
 harden_sysctl
 
+# Finalize rkhunter file property baseline AFTER all packages and binary
+# permission changes (compilers group, w/who, sshd, bootloaders) are in place.
+echo -e "${BBlue}Updating rkhunter file property database...${NC}"
+rkhunter --propupd
+
 sleep 2
 
-if [ "${_INSTALL_TYPE:-}" != "vps-harden" ]; then
+if [[ "$INSTALL_TYPE_VAL" != "vps-harden" ]]; then
     echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub for first boot...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null || true
     umount /etc/resolv.conf 2>/dev/null || true
@@ -1318,5 +1429,8 @@ if [ "${_INSTALL_TYPE:-}" != "vps-harden" ]; then
 fi
 
 echo -e "${BGreen}VPS chroot configuration completed! You can reboot the system now.${NC}"
-shred -u /vps-chroot.sh 2>/dev/null || true
+shred -u /ssh.sh 2>/dev/null || true
+shred -u /nftables.sh 2>/dev/null || true
+shred -u /root/.install-env 2>/dev/null || true
+[[ -f /vps-chroot.sh ]] && shred -u /vps-chroot.sh 2>/dev/null || true
 exit

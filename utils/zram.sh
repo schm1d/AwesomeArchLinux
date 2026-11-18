@@ -3,14 +3,16 @@
 # =============================================================================
 # Script:      zram.sh
 # Description: Configures systemd-zram-generator as high-priority compressed
-#              RAM swap and leaves disk swap as overflow. Does not enable
-#              zswap — zswap plus zram double-compresses pages.
+#              RAM swap and leaves disk swap as overflow. Disables built-in
+#              zswap across boots via tmpfiles.d so pages are not compressed twice.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 # =============================================================================
 
 set -euo pipefail
+
+umask 022
 
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -27,6 +29,8 @@ SIZE_EXPR="ram / 2"
 DO_DISABLE=false
 DO_STATUS=false
 CONF="/etc/systemd/zram-generator.conf"
+ZSWAP_MODPROBE="/etc/modprobe.d/99-disable-zswap.conf"
+ZSWAP_TMPFILES="/etc/tmpfiles.d/99-disable-zswap.conf"
 
 usage() {
     cat <<EOF
@@ -38,7 +42,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --size)     SIZE_EXPR="${2:-}"; [[ -n "$SIZE_EXPR" ]] || err "--size needs an expression"; shift 2 ;;
+        --size)
+            [[ $# -ge 2 && -n "${2:-}" ]] || err "--size needs an expression"
+            [[ "$2" != *$'\n'* && "$2" != *$'\r'* && "$2" =~ ^[a-zA-Z0-9_.+/*()\ -]+$ ]] || err "Invalid --size expression: $2"
+            SIZE_EXPR="$2"
+            shift 2
+            ;;
         --disable)  DO_DISABLE=true; shift ;;
         --status)   DO_STATUS=true; shift ;;
         -h|--help)  usage ;;
@@ -74,22 +83,31 @@ if [[ "$DO_STATUS" == true ]]; then
 fi
 
 if [[ "$DO_DISABLE" == true ]]; then
-    rm -f "$CONF"
+    systemctl stop systemd-zram-setup@zram0.service 2>/dev/null || true
     [[ -b /dev/zram0 ]] && swapoff /dev/zram0 2>/dev/null || true
+    rm -f "$CONF" "$ZSWAP_MODPROBE" "$ZSWAP_TMPFILES"
     systemctl daemon-reload
-    msg "Removed $CONF"
+    msg "Disabled zram and removed $CONF"
     show_status
     exit 0
 fi
 
-if [[ -r /sys/module/zswap/parameters/enabled ]] && [[ "$(cat /sys/module/zswap/parameters/enabled)" == "Y" ]]; then
-    warn "zswap is enabled. Disabling it so pages are not compressed twice."
-    mkdir -p /etc/modprobe.d
-    echo "options zswap enabled=0" > /etc/modprobe.d/99-disable-zswap.conf
-    echo 0 > /sys/module/zswap/parameters/enabled 2>/dev/null || true
+# Arch compiles CONFIG_ZSWAP=y built-in, so modprobe.d alone does not disable it
+# across reboots; persist via tmpfiles.d as well as modprobe.d + live sysfs.
+if [[ -e /sys/module/zswap/parameters/enabled ]]; then
+    if [[ "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo N)" == "Y" ]]; then
+        warn "zswap is enabled. Disabling it so pages are not compressed twice."
+    fi
+    install -d -m 0755 /etc/modprobe.d /etc/tmpfiles.d
+    printf '%s\n' 'options zswap enabled=0' > "$ZSWAP_MODPROBE"
+    chmod 0644 "$ZSWAP_MODPROBE"
+    printf '%s\n' 'w /sys/module/zswap/parameters/enabled - - - - 0' > "$ZSWAP_TMPFILES"
+    chmod 0644 "$ZSWAP_TMPFILES"
+    systemd-tmpfiles --create "$ZSWAP_TMPFILES" 2>/dev/null || echo 0 > /sys/module/zswap/parameters/enabled 2>/dev/null || true
 fi
 
 pacman -Syu --noconfirm --needed zram-generator
+install -d -m 0755 /etc/systemd
 cat > "$CONF" <<EOF
 [zram0]
 zram-size = ${SIZE_EXPR}

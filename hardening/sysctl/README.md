@@ -82,9 +82,10 @@ The old profile names remain accepted as deprecated CLI aliases:
 - `security-performance` and `full-performance` map to `performance`
 
 New installer runs record only `workstation`, `strict`, or `performance`.
-When switching a running host away from `strict`, the installer warns if the
-one-way BPF or kexec controls remain active; removing their configuration only
-restores the less restrictive policy after reboot.
+When switching a running host away from `strict`, the installer warns if
+strict runtime controls (`unprivileged_bpf_disabled`, `kexec_load_disabled`,
+`io_uring_disabled`, `unprivileged_userns_clone`, `panic_on_oops`) remain active;
+removing their configuration restores the less restrictive policy after reboot.
 
 ## Why the old tuning set was removed
 
@@ -112,9 +113,11 @@ sudo ./lock-modules-now.sh --runtime --confirm LOCK-MODULES
 sudo ./lock-modules-now.sh --persist --confirm LOCK-MODULES
 ```
 
-Use `--runtime` first. `--persist` creates
-`/etc/sysctl.d/90-awesome-modules-lockdown.conf`; remove that file from recovery
-media if the machine cannot boot or initialize required hardware.
+Use `--runtime` first. `--persist` installs and enables a late-boot `Type=oneshot`
+unit (`/etc/systemd/system/awesome-lock-modules.service`, ordered after
+`multi-user.target`, `network-online.target`, and `nftables.service` so early-boot
+filesystems like `vfat` and firewall modules load first); disable or remove that
+unit from recovery media if the machine cannot initialize required hardware.
 
 See [`WORKSTATION.md`](./WORKSTATION.md) for higher-value non-sysctl workstation
 decisions such as swap, THP, IRQ balancing, CPU policy, and measurement.

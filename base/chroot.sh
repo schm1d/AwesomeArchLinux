@@ -5,6 +5,7 @@
 # LinkedIn: https://www.linkedin.com/in/schmidbruno/
 
 set -euo pipefail
+umask 022
 source /root/.install-env || { echo "Failed to source /root/.install-env"; exit 1; }
 # shellcheck source=bootloader.sh
 source /bootloader.sh || { echo "Failed to source /bootloader.sh"; exit 1; }
@@ -39,20 +40,30 @@ LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-en_US.UTF-8}}"
 # shellcheck disable=SC2034
 KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-us}}"
 LUKS_KEYS="${INSTALL_LUKS_KEYS:-${_INSTALL_LUKS_KEYS:-/etc/luksKeys/boot.key}}" # Location of the root partition key
-SSH_PORT=22
+SSH_PORT="${INSTALL_SSH_PORT:-${_INSTALL_SSH_PORT:-22}}"
 SSH_PUBKEY="${INSTALL_SSH_PUBKEY:-${_INSTALL_SSH_PUBKEY:-}}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 CRYPT_NAME="${INSTALL_CRYPT:-${_INSTALL_CRYPT:-crypt_lvm}}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 LVM_NAME="${INSTALL_LVM:-${_INSTALL_LVM:-lvm_arch}}"
 INSTALL_TPM="${INSTALL_TPM:-${_INSTALL_TPM:-false}}"
-SYSCTL_PROFILE="${_INSTALL_SYSCTL_PROFILE:-${INSTALL_SYSCTL_PROFILE:-workstation}}"
-SYSCTL_DISABLE_IPV6="${_INSTALL_DISABLE_IPV6:-${INSTALL_DISABLE_IPV6:-false}}"
+SYSCTL_PROFILE="${INSTALL_SYSCTL_PROFILE:-${_INSTALL_SYSCTL_PROFILE:-workstation}}"
+SYSCTL_DISABLE_IPV6="${INSTALL_DISABLE_IPV6:-${_INSTALL_DISABLE_IPV6:-false}}"
 INSTALL_BOOTLOADER="${INSTALL_BOOTLOADER:-${_INSTALL_BOOTLOADER:-}}"
 : "${INSTALL_BOOTLOADER:?Missing INSTALL_BOOTLOADER/_INSTALL_BOOTLOADER}"
 # shellcheck disable=SC2034  # Consumed by sourced bootloader.sh functions.
 TPM_PCRS="${INSTALL_TPM_PCRS:-${_INSTALL_TPM_PCRS:-7}}"
+INSTALL_GPU_UNLOCK="${INSTALL_GPU_UNLOCK:-${_INSTALL_GPU_UNLOCK:-false}}"
+GPU_UNLOCK_TARGETS="${INSTALL_GPU_UNLOCK_TARGETS:-${_INSTALL_GPU_UNLOCK_TARGETS:-all}}"
 BOOT_EXTRA_CMDLINE=()
+
+case "$INSTALL_GPU_UNLOCK" in
+    true|false) ;;
+    *)
+        echo "Invalid INSTALL_GPU_UNLOCK value: $INSTALL_GPU_UNLOCK" >&2
+        exit 1
+        ;;
+esac
 
 case "$INSTALL_BOOTLOADER" in
     grub|uki) ;;
@@ -117,9 +128,9 @@ groupdel games 2>/dev/null || true
 # NULL timezone and misbehave. Use the classic symlink approach instead.
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 echo "$TIMEZONE" > /etc/timezone
-hwclock --systohc --utc
+hwclock --systohc --utc || echo -e "${BYellow}Warning: hwclock --systohc failed (RTC unavailable); continuing.${NC}"
 
-sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+sed -i -E "s/^#(${LOCALE//./\\.}[[:space:]])/\1/" /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 export LANG="$LOCALE"
@@ -193,7 +204,7 @@ install -d /etc/X11/xorg.conf.d
 
 # Set hostname
 echo -e "${BBlue}Setting hostname...${NC}"
-hostnamectl set-hostname "$HOSTNAME"
+hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || true
 echo "$HOSTNAME" > /etc/hostname
 
 echo -e "${BBlue}Configuring /etc/hosts...${NC}"
@@ -350,7 +361,7 @@ systemctl enable systemd-resolved
 # Prefer IPv4 over IPv6 — many VPS providers lack IPv6 routing, and
 # sshd is configured with AddressFamily inet (IPv4 only)
 echo -e "${BBlue}Configuring IPv4 preference...${NC}"
-echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
+grep -qxF 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96 100" >> /etc/gai.conf
 
 echo -e "${BBlue}DNS-over-TLS configuration completed!${NC}"
 
@@ -438,25 +449,16 @@ pacman -S --noconfirm clamav
 echo -e "${BBlue}Configuring ClamAV...${NC}"
 
 # 1) Generate default configuration files if they do not exist.
-#    clamconf creates freshclam.conf, clamd.conf, and clamav-milter.conf
-#    into the current directory. Then we can move them to /etc/clamav/.
-if [ ! -f /etc/clamav/freshclam.conf ]; then
-  echo "Generating /etc/clamav/freshclam.conf..."
-  clamconf -g freshclam.conf
-  mv freshclam.conf /etc/clamav/freshclam.conf
-fi
-
-if [ ! -f /etc/clamav/clamd.conf ]; then
-  echo "Generating /etc/clamav/clamd.conf..."
-  clamconf -g clamd.conf
-  mv clamd.conf /etc/clamav/clamd.conf
-fi
-
-if [ ! -f /etc/clamav/clamav-milter.conf ]; then
-  echo "Generating /etc/clamav/clamav-milter.conf..."
-  clamconf -g clamav-milter.conf
-  mv clamav-milter.conf /etc/clamav/clamav-milter.conf
-fi
+#    clamconf -g writes sample config to stdout with an active Example line.
+install -d -m 0755 /etc/clamav
+for clam_cfg in freshclam.conf clamd.conf clamav-milter.conf; do
+  if [ ! -f "/etc/clamav/$clam_cfg" ]; then
+    echo "Generating /etc/clamav/$clam_cfg..."
+    clamconf -g "$clam_cfg" | sed 's/^Example/#Example/' > "/etc/clamav/$clam_cfg"
+  else
+    sed -i 's/^Example/#Example/' "/etc/clamav/$clam_cfg"
+  fi
+done
 
 # 2) Update /etc/clamav/clamd.conf with recommended settings.
 #    You can fine-tune or remove options you do not need.
@@ -509,16 +511,8 @@ touch /var/log/clamav/freshclam.log
 chmod 600 /var/log/clamav/freshclam.log
 chown clamav:clamav /var/log/clamav/freshclam.log
 
-# 4) Enable daily updates of virus definitions.
-#    You can choose either:
-#       - 'clamav-freshclam.service': runs as a daemon every 2 hours (12/day).
-#       - 'clamav-freshclam-once.timer': runs once a day (24h).
-#
-# Uncomment whichever you prefer. For example:
-systemctl enable clamav-freshclam.service
-# systemctl enable clamav-freshclam-once.timer
-
-# 5) Enable freshclam and clamd (will start on first boot)
+# 4) Enable freshclam and clamd (will start on first boot)
+#    Alternatively, clamav-freshclam-once.timer can be used instead of the daemon.
 echo "Enabling ClamAV services..."
 systemctl enable clamav-freshclam.service
 systemctl enable clamav-daemon.service
@@ -526,26 +520,20 @@ systemctl enable clamav-daemon.service
 # freshclam update will run on first boot — cannot reliably update in chroot
 echo -e "${BYellow}ClamAV definitions will update on first boot via freshclam.${NC}"
 
-# If it's not in the official repos, install from AUR (requires e.g. yay):
-#if ! pacman -Qi clamav-unofficial-sigs &>/dev/null; then
-#  echo "Installing clamav-unofficial-sigs from AUR..."
-#  yay -S --noconfirm clamav-unofficial-sigs
-#fi
-
-# 9) Final check of ClamAV config
+# 5) Final check of ClamAV config
 echo -e "${BBlue}Running clamconf to check ClamAV configuration...${NC}"
-clamconf
-echo -e "${BBlue}ClamAV + Unofficial Signatures configuration completed!\n${NC}"
+clamconf >/dev/null || true
+echo -e "${BBlue}ClamAV configuration completed!\n${NC}"
 
 ###############################################################################
 # END OF CLAMAV CONFIGURATION
 ###############################################################################
 
-# Rootkit Hunter
+# Rootkit Hunter (rkhunter --propupd runs near the end after all packages and
+# binary permission adjustments are finalized)
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
 pacman -S --noconfirm rkhunter
 
-rkhunter --propupd
 cat <<EOF > /etc/systemd/system/rkhunter-check.service
 [Unit]
 Description=Run rkhunter daily check
@@ -624,8 +612,7 @@ systemctl enable smartd.service
 if [[ -r /sys/class/dmi/id/board_vendor && -r /sys/class/dmi/id/board_name ]] &&
     [[ "$(</sys/class/dmi/id/board_vendor)" == "ASUSTeK COMPUTER INC." &&
        "$(</sys/class/dmi/id/board_name)" == "ROG ZENITH II EXTREME ALPHA" ]]; then
-    pacman -S --noconfirm --needed python
-    python3 /usr/local/lib/awesomearchlinux/board-health.py --install --enable-only
+    /usr/local/lib/awesomearchlinux/board-health.sh --install --enable-only
 fi
 
 echo -e "${BBlue}Configuring usbguard...${NC}"
@@ -753,11 +740,12 @@ MODPROBE_EOF
 
 # Disabling core dump. Please feel free to comment if you need it.
 echo -e "${BBlue}Disabling core dump...${NC}"
-echo "* hard core 0" >> /etc/security/limits.conf
+grep -qxF '* hard core 0' /etc/security/limits.conf 2>/dev/null || echo "* hard core 0" >> /etc/security/limits.conf
 
 # Using chrony for NTP (preferred over ntpd — lighter, more accurate, handles VM clock drift)
 echo -e "${BBlue}Installing chrony for NTP...${NC}"
 pacman -S --noconfirm chrony
+install -d -o chrony -g chrony -m 0750 /var/log/chrony
 systemctl enable chronyd
 
 # Sysstem monitoring tool
@@ -820,6 +808,15 @@ fi
 echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
 pacman -S --noconfirm fail2ban
 
+install -d -m 0755 /etc/fail2ban/filter.d /etc/fail2ban/jail.d
+cat <<'EOF' > /etc/fail2ban/filter.d/sshd.local
+[Definition]
+_daemon = sshd(?:-session|-auth)?
+
+[Init]
+journalmatch = _SYSTEMD_UNIT=sshd.service
+EOF
+
 cat <<EOF > /etc/fail2ban/jail.d/sshd.conf
 [sshd]
 enabled = true
@@ -843,16 +840,18 @@ echo -e "${BBlue}Hardening sudo...${NC}"
 groupadd -r proc 2>/dev/null || true
 groupadd sudo 2>/dev/null || true
 
-# Write sudoers atomically via temp file + visudo validation
-cat > /tmp/sudoers.new << 'SUDOERS_EOF'
+# Write sudoers atomically via private /etc temp file + visudo validation
+SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
+chmod 0440 "$SUDOERS_TMP"
+cat > "$SUDOERS_TMP" << 'SUDOERS_EOF'
 # Hardened sudoers — generated by chroot.sh
 
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Defaults !rootpw
 Defaults umask=077
-Defaults editor=/usr/bin/vim
+Defaults editor=/usr/bin/vim:/usr/bin/nvim:/usr/bin/nano:/usr/bin/vi
 Defaults env_reset
-Defaults env_reset,env_keep="COLORS DISPLAY HOSTNAME HISTSIZE INPUTRC KDEDIR LS_COLORS"
+Defaults env_keep="COLORS DISPLAY HOSTNAME HISTSIZE INPUTRC KDEDIR LS_COLORS"
 Defaults env_keep += "MAIL PS1 PS2 QTDIR USERNAME LANG LC_ADDRESS LC_CTYPE"
 Defaults env_keep += "LC_COLLATE LC_IDENTIFICATION LC_MEASUREMENT LC_MESSAGES"
 Defaults env_keep += "LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER LC_TELEPHONE"
@@ -878,13 +877,13 @@ root ALL=(ALL:ALL) ALL
 SUDOERS_EOF
 
 # Validate before installing
-if visudo -c -f /tmp/sudoers.new; then
-    install -m 0440 -o root -g root /tmp/sudoers.new /etc/sudoers
+if visudo -c -f "$SUDOERS_TMP"; then
+    install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers
     echo -e "${BGreen}Sudoers validated and installed successfully.${NC}"
 else
     echo -e "${BRed}ERROR: sudoers validation failed! Keeping original file.${NC}" >&2
 fi
-rm -f /tmp/sudoers.new
+rm -f "$SUDOERS_TMP"
 
 # arch-audit was installed above; enable the scheduled check for first boot.
 configure_vulnerability_check
@@ -926,12 +925,11 @@ else
     echo "User $USERNAME already exists." >&2
 fi
 
-# Enable and set a working backup directory
-echo "set backup" >> /home/"$USERNAME"/.nanorc           # Creates backups of your current file.
-echo "set backupdir \"~/.cache/nano/backups/\"" >> /home/"$USERNAME"/.nanorc # The location of the backups.
-
-# Set permissions on the configuration file to prevent unauthorized changes
-chmod 600 /home/"$USERNAME"/.nanorc
+# Pre-create private user cache directories (including nano backups)
+install -d -m 0700 -o "$USERNAME" -g "$USERNAME" \
+    "/home/$USERNAME/.cache" \
+    "/home/$USERNAME/.cache/nano" \
+    "/home/$USERNAME/.cache/nano/backups"
 
 # Set password for user (with loop for incorrect input)
 echo -e "${BBlue}Configuring password policy before setting passwords...${NC}"
@@ -962,13 +960,14 @@ while true; do
 done
 set -e # Re-enable 'exit on error'
 
-# --- Now configure Nano settings (after user creation) ---
+# --- Configure Nano settings idempotently (after user creation) ---
 echo -e "${BBlue}Installing nano syntax highlighting...${NC}"
-# Use the Arch package instead of piping curl to sh (security best practice)
-pacman -S --noconfirm nano-syntax-highlighting 2>/dev/null || true
+pacman -S --needed --noconfirm nano-syntax-highlighting 2>/dev/null || true
 
-# Append nano settings (after backup/backupdir lines already written above)
-cat >> /home/"$USERNAME"/.nanorc << 'NANO_EOF'
+{
+    cat << 'NANO_EOF'
+set backup
+set backupdir "~/.cache/nano/backups/"
 set constantshow
 set locking
 set nohelp
@@ -979,8 +978,13 @@ set zap
 set linenumbers
 set tabsize 4
 set tabstospaces
-include "/usr/share/nano-syntax-highlighting/*.nanorc"
 NANO_EOF
+    if compgen -G '/usr/share/nano-syntax-highlighting/*.nanorc' >/dev/null; then
+        echo 'include "/usr/share/nano-syntax-highlighting/*.nanorc"'
+    fi
+} > "/home/$USERNAME/.nanorc"
+chown "$USERNAME:$USERNAME" "/home/$USERNAME/.nanorc"
+chmod 600 "/home/$USERNAME/.nanorc"
 
 echo -e "${BBlue}Staging SSH access for $USERNAME (authorized_keys first)...${NC}"
 
@@ -1029,7 +1033,8 @@ ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true # Suppre
 
 touch "/home/$USERNAME/.ssh/authorized_keys"
 if [[ -n "$SSH_PUBKEY" ]]; then
-    echo "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
+    grep -qxF "$SSH_PUBKEY" "/home/$USERNAME/.ssh/authorized_keys" 2>/dev/null || \
+        printf '%s\n' "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
     echo -e "${BGreen}SSH public key installed for $USERNAME.${NC}"
 else
     echo -e "${BYellow}No SSH public key provided — add one manually before disconnecting.${NC}"
@@ -1046,8 +1051,10 @@ configure_ssh # Call the SSH configuration function
 # Now harden sshd. If the user pasted a pubkey at install time it is already
 # in authorized_keys; otherwise pass -k to bypass the lockout check (bare-metal
 # only — console access guarantees the user can add a key post-reboot).
+# Defer shredding /ssh.sh until the end of chroot.sh so recovery-mount.sh can
+# resume cleanly if a later step fails.
 echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
-if [[ -n "$SSH_PUBKEY" ]]; then
+if [[ -s "/home/$USERNAME/.ssh/authorized_keys" ]]; then
     /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
 else
     echo -e "${BYellow}No SSH pubkey was provided — invoking ssh.sh with -k (console fallback).${NC}"
@@ -1055,34 +1062,99 @@ else
     echo -e "${BYellow}before attempting any remote SSH login.${NC}"
     /ssh.sh -u "$USERNAME" -p "$SSH_PORT" -k
 fi
-shred -u /ssh.sh 2>/dev/null || true
-
 
 sleep 1
 
 echo -e "${BBlue}Applying hardened compiler flags...${NC}"
-sed -i '/^CFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
-sed -i '/^CXXFLAGS=/ s/"$/ -fstack-protector-strong -D_FORTIFY_SOURCE=2"/' /etc/makepkg.conf
-sed -i '/^LDFLAGS=/ s/"$/ -Wl,-z,relro,-z,now"/' /etc/makepkg.conf
-# Enable PIE: replace !pie with pie (if present), otherwise no change needed
-sed -i '/^OPTIONS=/ s/!pie/pie/' /etc/makepkg.conf
+harden_makepkg_conf() {
+    local conf="/etc/makepkg.conf"
+    [[ -f "$conf" ]] || return 0
+    if ! grep -q -- '-fstack-protector-strong' "$conf"; then
+        awk '
+            /^CFLAGS="/ { in_cflags = 1 }
+            in_cflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -fstack-protector-strong\"")
+                in_cflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    if ! grep -q -- '_FORTIFY_SOURCE' "$conf"; then
+        awk '
+            /^CFLAGS="/ { in_cflags = 1 }
+            in_cflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -Wp,-D_FORTIFY_SOURCE=3\"")
+                in_cflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    if ! grep -q -- '-z,now' "$conf"; then
+        awk '
+            /^LDFLAGS="/ { in_ldflags = 1 }
+            in_ldflags && /"[[:space:]]*$/ {
+                sub(/"[[:space:]]*$/, " -Wl,-z,relro,-z,now\"")
+                in_ldflags = 0
+            }
+            { print }
+        ' "$conf" > "${conf}.tmp" && cat "${conf}.tmp" > "$conf" && rm -f "${conf}.tmp"
+    fi
+    sed -i '/^OPTIONS=/ s/!pie/pie/' "$conf"
+}
+harden_makepkg_conf
 
-# Harden Compilers by Restricting Access to Root User Only
+# Restrict compiler access via the 'compilers' group and persist across pacman upgrades
 echo -e "${BBlue}Restricting access to compilers using a 'compilers' group...${NC}"
-
-# Alternative approach using a 'compilers' group
 groupadd compilers 2>/dev/null || true
 usermod -aG compilers "$USERNAME"
-for compiler in gcc g++ clang make as ld; do
-    compiler_path=$(command -v "$compiler" 2>/dev/null) || continue
-    chown root:compilers "$compiler_path"
-    chmod 750 "$compiler_path"
-done
 
-# Set default ACLs on home directory
-echo -e "${BBlue}Setting default ACLs on root and home directory${NC}"
-setfacl -d -m u::rwx,g::---,o::--- ~
+install -Dm0755 /dev/stdin /usr/local/lib/awesomearchlinux/fix-compilers-perms.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+getent group compilers >/dev/null 2>&1 || exit 0
+for compiler in gcc g++ clang make as ld ld.bfd ld.lld; do
+    compiler_path=$(command -v "$compiler" 2>/dev/null) || continue
+    resolved=$(realpath -e "$compiler_path" 2>/dev/null) || continue
+    [[ -f "$resolved" ]] || continue
+    chown root:compilers "$resolved"
+    chmod 0750 "$resolved"
+done
+EOF
+
+install -Dm0644 /dev/stdin /etc/pacman.d/hooks/90-awesome-compilers.hook <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/gcc
+Target = usr/bin/g++
+Target = usr/bin/clang
+Target = usr/bin/make
+Target = usr/bin/as
+Target = usr/bin/ld
+Target = usr/bin/ld.bfd
+Target = usr/bin/ld.lld
+
+[Action]
+Description = Restoring compiler group permissions (root:compilers 0750)...
+When = PostTransaction
+Exec = /usr/local/lib/awesomearchlinux/fix-compilers-perms.sh
+EOF
+
+/usr/local/lib/awesomearchlinux/fix-compilers-perms.sh
+
+# Keep /root private (0700) without default ACLs so root-built files/configs do
+# not inherit 0600 masks. On /home/$USERNAME, set a private default ACL while
+# clearing default ACLs from ~/.cache/{yay,paru} so AUR makepkg $pkgdir trees
+# never inherit group/other --- permissions into built packages.
+echo -e "${BBlue}Configuring /root permissions and default ACLs on /home/$USERNAME...${NC}"
+chmod 0700 /root
+setfacl -b -k /root 2>/dev/null || true
 setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
+mkdir -p "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru" "/home/$USERNAME/.cache/nano/backups"
+chmod 0700 "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/nano" "/home/$USERNAME/.cache/nano/backups"
+setfacl -b -k "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru"
+chown -hR "$USERNAME:$USERNAME" "/home/$USERNAME/.cache"
 
 # Establish the profile-specific encryption hooks before hardware-specific
 # modules are discovered. The final image/UKI is generated after GPU setup.
@@ -1189,14 +1261,15 @@ EOF
 
 sleep 2
 
-# --- Variables ---
+# --- GPU Detection & Driver Installation ---
 NVIDIA_CARD=false
+NVIDIA_OPEN_SUPPORTED=false
 AMD_CARD=false
+INTEL_CARD=false
 
-# Select prebuilt NVIDIA modules from the kernels installed in the target,
-# never from uname(1): inside arch-chroot uname reports the live ISO kernel.
-# If neither official kernel is present, use DKMS for a custom kernel; that
-# kernel's matching headers must already be installed for the build to work.
+# Select prebuilt NVIDIA open-kernel modules from the kernels installed in the
+# target, never from uname(1): inside arch-chroot uname reports the live ISO
+# kernel. Only Turing+ (GSP-equipped) GPUs are supported by nvidia-open.
 install_nvidia_driver_for_installed_kernels() {
     local -a driver_packages=(nvidia-utils)
     local found_prebuilt_kernel=false
@@ -1213,145 +1286,138 @@ install_nvidia_driver_for_installed_kernels() {
         driver_packages+=(dkms nvidia-open-dkms)
     fi
 
-    echo "Installing NVIDIA packages for the installed kernel(s): ${driver_packages[*]}"
+    echo "Installing NVIDIA Turing+ packages for the installed kernel(s): ${driver_packages[*]}"
     pacman -S --needed --noconfirm "${driver_packages[@]}"
 }
 
-# --- Detect NVIDIA ---
-if lspci | grep -E "VGA|3D" | grep -i nvidia &>/dev/null; then
+# --- Detect NVIDIA (discrete or primary) ---
+if lspci | grep -Ei "VGA|3D|Display" | grep -qi nvidia &>/dev/null; then
     NVIDIA_CARD=true
     echo -e "${BBlue}Found an NVIDIA GPU...${NC}"
 fi
 
-# --- If NVIDIA is found, handle NVIDIA drivers ---
 if [[ "$NVIDIA_CARD" == true ]]; then
-    echo -e "${BBlue}Installing NVIDIA drivers...${NC}"
-    # Blacklist nouveau
-    mkdir -p /etc/modprobe.d
-    touch /etc/modprobe.d/blacklist-nouveau.conf
-    if ! grep -q "blacklist nouveau" /etc/modprobe.d/blacklist-nouveau.conf; then
-        echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
-    fi
+    nvidia_gpu_model=$(lspci | grep -Ei 'vga|3d|2d|display' | grep -i nvidia | cut -d ':' -f3-)
+    echo "Detected NVIDIA GPU:$nvidia_gpu_model"
 
-    gpu_model=$(lspci | grep -i 'vga\|3d\|2d' | grep -i nvidia | cut -d ':' -f3)
-    echo "Detected GPU: $gpu_model"
-
-    # Choose correct NVIDIA driver package based on model:
-    case $gpu_model in
-        *"Tesla"*|"*NV50"*|"*G80"*|"*G90"*|"*GT2XX"*)
-            pacman -S --noconfirm nvidia-340xx-dkms nvidia-340xx-utils
+    case "$nvidia_gpu_model" in
+        # Pre-Turing architectures (Tesla, Fermi, Kepler, Maxwell, Pascal, Volta):
+        # nvidia-open requires Turing+ GSP firmware, and legacy closed drivers live
+        # only in the AUR. Fall back to open-source mesa (nouveau) so the system
+        # boots reliably with KMS, and advise the operator on AUR driver packages.
+        *"Tesla"*|*"NV50"*|*"G80"*|*"G90"*|*"GT2"*|\
+        *"Fermi"*|*"GeForce 400"*|*"GeForce 500"*|*"GT 6"*|*"GTX 4"*|*"GTX 5"*|*"NVC"*|*"NVD"*|*"GF1"*|\
+        *"Kepler"*|*"GTX 6"*|*"GTX 7"*|*"GT 7"*|*"NVE"*|*"NVF"*|*"GK1"*|*"GK2"*|*"Quadro K"*|\
+        *"Maxwell"*|*"GTX 750"*|*"GTX 8"*|*"GTX 9"*|*"GM1"*|*"GM2"*|*"NV11"*|*"NV12"*|*"Quadro M"*|\
+        *"Pascal"*|*"GTX 10"*|*"GT 10"*|*"GP10"*|*"NV13"*|*"TITAN X"*|*"TITAN Xp"*|*"Quadro P"*|\
+        *"Volta"*|*"TITAN V"*|*"GV100"*)
+            echo -e "${BYellow}WARNING: Pre-Turing NVIDIA GPU detected ($nvidia_gpu_model).${NC}"
+            echo -e "${BYellow}Arch's official nvidia-open package requires Turing (RTX 20 / GTX 16) or newer.${NC}"
+            echo -e "${BYellow}Installing open-source mesa (nouveau) so the system boots cleanly.${NC}"
+            echo -e "${BYellow}Optional proprietary AUR drivers after reboot: nvidia-580xx-dkms (Maxwell/Pascal/Volta) or nvidia-470xx-dkms (Kepler).${NC}"
+            pacman -S --needed --noconfirm mesa libva-utils
             ;;
-        *"GeForce 400"*|"*GeForce 500"*|"*600"*|"*NVCx"*|"*NVDx"*)
-            pacman -S --noconfirm nvidia-390xx-dkms nvidia-390xx-utils
-            ;;
-        *"Kepler"*|"*NVE0"*)
-            pacman -S --noconfirm nvidia-470xx-dkms nvidia-470xx-utils
-            ;;
-        # Maxwell, Pascal, Turing, Ampere, Ada, etc.:
-        *"Maxwell"*|*"NV110"*|*"GA102"*)  # Maxwell fallback: Usually the standard driver works
-            install_nvidia_driver_for_installed_kernels
-            ;;
-        *"Pascal"*|*"GTX 10"*|*"GP10"*|*"Turing"*|*"RTX 20"*|*"TU10"*|\
-         *"Ampere"*|*"RTX 30"*|*"GA10"*|*"Ada"*|*"RTX 40"*|*"AD10"*|*"RTX 50"* )
-            install_nvidia_driver_for_installed_kernels
+        # Turing, Ampere, Ada Lovelace, Hopper, Blackwell+:
+        *"Turing"*|*"RTX 20"*|*"GTX 16"*|*"TU10"*|*"TU11"*|*"Quadro RTX"*|*"T4"*|*"T500"*|*"T600"*|*"T1000"*|*"T1200"*|*"T2000"*|\
+        *"Ampere"*|*"RTX 30"*|*"GA10"*|*"RTX A"*|*"A100"*|*"A10"*|*"A30"*|*"A40"*|\
+        *"Ada"*|*"RTX 40"*|*"AD10"*|\
+        *"Hopper"*|*"GH100"*|*"H100"*|\
+        *"Blackwell"*|*"RTX 50"*|*"GB10"*|*"GB20"*)
+            NVIDIA_OPEN_SUPPORTED=true
             ;;
         *)
-            echo "No matching NVIDIA driver found for: $gpu_model"
-            echo "Installing standard nvidia driver as a fallback..."
-            pacman -S --noconfirm nvidia-open nvidia-utils
+            echo -e "${BYellow}WARNING: Unrecognized NVIDIA GPU model ($nvidia_gpu_model).${NC}"
+            echo -e "${BYellow}Falling back to open-source mesa (nouveau) to avoid blacklisting KMS on potentially pre-Turing hardware.${NC}"
+            echo -e "${BYellow}If this is a Turing+ GPU, install nvidia-open and nvidia-utils after reboot; for Maxwell/Pascal use AUR nvidia-580xx-dkms.${NC}"
+            pacman -S --needed --noconfirm mesa libva-utils
             ;;
     esac
 
-    # Ensure egl-wayland is installed (Wayland-EGL adapter; usually pulled
-    # in by nvidia-utils but belt + braces).
-    pacman -S --needed --noconfirm egl-wayland libva-nvidia-driver libva-utils || true
+    if [[ "$NVIDIA_OPEN_SUPPORTED" == true ]]; then
+        echo -e "${BBlue}Installing official NVIDIA Turing+ open-kernel drivers...${NC}"
+        mkdir -p /etc/modprobe.d
+        touch /etc/modprobe.d/blacklist-nouveau.conf
+        if ! grep -qxF "blacklist nouveau" /etc/modprobe.d/blacklist-nouveau.conf; then
+            echo "blacklist nouveau" >> /etc/modprobe.d/blacklist-nouveau.conf
+        fi
 
-    # Adjust mkinitcpio.conf
-    echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
-    bl_set_hooks \
-        --hook kms \
-        --module nvidia \
-        --module nvidia_drm \
-        --module nvidia_uvm \
-        --module nvidia_modeset
+        install_nvidia_driver_for_installed_kernels
+        pacman -S --needed --noconfirm egl-wayland libva-nvidia-driver libva-utils || true
 
-    # NVreg_PreserveVideoMemoryAllocations=1 is required for reliable
-    # suspend / resume on NVIDIA. Without it, GPU VRAM is not restored
-    # and gnome-shell logs "Page flip failed: drmModeAtomicCommit:
-    # Invalid argument" on wake. Combined with the nvidia-suspend /
-    # nvidia-resume / nvidia-hibernate systemd services (enabled
-    # below), this is the current (nvidia 470+) correct setup.
-    echo -e "${BBlue}Writing NVIDIA modprobe options for suspend/resume...${NC}"
-    cat > /etc/modprobe.d/nvidia.conf <<'EOF'
+        echo -e "${BBlue}Adjusting /etc/mkinitcpio.conf for NVIDIA...${NC}"
+        bl_set_hooks \
+            --hook kms \
+            --module nvidia \
+            --module nvidia_drm \
+            --module nvidia_uvm \
+            --module nvidia_modeset
+
+        echo -e "${BBlue}Writing NVIDIA modprobe options for suspend/resume...${NC}"
+        cat > /etc/modprobe.d/nvidia.conf <<'EOF'
 # Preserve GPU memory across suspend/hibernate.
 # Pair with nvidia-suspend.service / nvidia-resume.service / nvidia-hibernate.service.
 options nvidia NVreg_PreserveVideoMemoryAllocations=1
 EOF
 
-    # Enable NVIDIA suspend/resume/hibernate helpers. These save and
-    # restore VRAM around power state transitions. With
-    # NVreg_PreserveVideoMemoryAllocations=1 above, this is the modern
-    # correct way to handle suspend on NVIDIA proprietary.
-    systemctl enable nvidia-suspend.service 2>/dev/null || true
-    systemctl enable nvidia-resume.service 2>/dev/null || true
-    systemctl enable nvidia-hibernate.service 2>/dev/null || true
+        systemctl enable nvidia-suspend.service 2>/dev/null || true
+        systemctl enable nvidia-resume.service 2>/dev/null || true
+        systemctl enable nvidia-hibernate.service 2>/dev/null || true
 
-    # Add NVIDIA DRM settings to either GRUB's command line or the embedded UKI
-    # command line. The selected bootloader function writes the final value.
-    # nvidia-drm.modeset=1  -> DRM KMS (required for Wayland, smooth boot)
-    # nvidia-drm.fbdev=1    -> expose DRM framebuffer console (nicer tty
-    #                          on NVIDIA, required by modern GDM/KMS path)
-    BOOT_EXTRA_CMDLINE+=(nvidia-drm.modeset=1 nvidia-drm.fbdev=1)
-fi
-
-# --- If not NVIDIA, check for AMD/Radeon ---
-if [[ "$NVIDIA_CARD" == false ]]; then
-    if lspci | grep -E "VGA|3D" | grep -Ei 'amd|radeon' &>/dev/null; then
-        AMD_CARD=true
-        echo -e "${BBlue}Found an AMD/Radeon GPU...${NC}"
-    fi
-
-    if [[ "$AMD_CARD" == true ]]; then
-        # Extract AMD GPU model
-        gpu_model=$(lspci | grep -Ei 'vga|3d|2d' | grep -Ei 'amd|radeon' | cut -d ':' -f3)
-        echo "Detected GPU: $gpu_model"
-
-        # A simple case for AMD/Radeon
-        case "$gpu_model" in
-            *"Radeon"*|*"RX 500"*|*"RX Vega"*|*"RDNA"*|*"RX 6000"*|*"RX 7000"*)
-                pacman -S --noconfirm xf86-video-amdgpu mesa vulkan-radeon lib32-mesa lib32-vulkan-radeon libva-mesa-driver mesa-vdpau libva-utils
-                ;;
-            *"APU"*|*"Ryzen"*|*"Athlon"*|*"PRO"*)
-                # Typically these APUs work fine with mesa + integrated AMD driver
-                pacman -S --noconfirm mesa lib32-mesa libva-mesa-driver mesa-vdpau libva-utils
-                ;;
-            *)
-                echo "Unknown AMD GPU. Installing default AMD drivers (xf86-video-amdgpu, mesa)."
-                pacman -S --noconfirm xf86-video-amdgpu mesa libva-mesa-driver libva-utils
-                ;;
-        esac
+        BOOT_EXTRA_CMDLINE+=(nvidia-drm.modeset=1 nvidia-drm.fbdev=1)
     fi
 fi
 
-# --- Intel iGPU (was previously falling through to vesa) ---
-INTEL_CARD=false
-if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false ]]; then
-    if lspci | grep -E "VGA|3D|Display" | grep -qi intel &>/dev/null; then
-        INTEL_CARD=true
-        echo -e "${BBlue}Found an Intel GPU...${NC}"
-        gpu_model=$(lspci | grep -Ei 'vga|3d|display' | grep -i intel | cut -d ':' -f3)
-        echo "Detected GPU: $gpu_model"
-        # xf86-video-intel is deprecated and fights modesetting. mesa +
-        # intel-media-driver (iHD) + libva-intel-driver (i965 fallback)
-        # covers Gen5 through current Arc.
-        pacman -S --noconfirm mesa vulkan-intel intel-media-driver libva-intel-driver libva-utils intel-gpu-tools
+# --- Optional NVIDIA tensor-core unlock (Zagitta/gpu-unlock) ---
+if [[ "$INSTALL_GPU_UNLOCK" == "true" ]]; then
+    echo -e "${BBlue}Installing optional NVIDIA tensor-core unlock (Zagitta/gpu-unlock)...${NC}"
+    if /usr/local/lib/awesomearchlinux/gpu-unlock.sh \
+        --install \
+        --yes \
+        --no-bootloader \
+        --build-user "$USERNAME" \
+        --targets "$GPU_UNLOCK_TARGETS"; then
+        BOOT_EXTRA_CMDLINE+=("gpu_unlock.targets=${GPU_UNLOCK_TARGETS}")
+        echo -e "${BGreen}gpu-unlock installed; queued gpu_unlock.targets=${GPU_UNLOCK_TARGETS} for bootloader configuration.${NC}"
+    else
+        echo -e "${BYellow}WARNING: gpu-unlock build/install failed during chroot (e.g. transient network download issue).${NC}" >&2
+        echo -e "${BYellow}Continuing bootloader configuration so the system remains bootable. Retry after first boot with:${NC}" >&2
+        echo -e "${BYellow}  sudo awesome-gpu-unlock --install --targets ${GPU_UNLOCK_TARGETS}${NC}" >&2
     fi
+fi
+
+# --- Detect AMD/Radeon (standalone or hybrid iGPU + NVIDIA dGPU) ---
+if lspci | grep -Ei "VGA|3D|Display" | grep -Ei 'amd|radeon|advanced micro devices' &>/dev/null; then
+    AMD_CARD=true
+    echo -e "${BBlue}Found an AMD/Radeon GPU...${NC}"
+    amd_gpu_model=$(lspci | grep -Ei 'vga|3d|2d|display' | grep -Ei 'amd|radeon|advanced micro devices' | cut -d ':' -f3-)
+    echo "Detected AMD GPU:$amd_gpu_model"
+
+    case "$amd_gpu_model" in
+        *"APU"*|*"Ryzen"*|*"Athlon"*|*"Radeon Graphics"*)
+            pacman -S --needed --noconfirm mesa vulkan-radeon libva-utils
+            ;;
+        *)
+            pacman -S --needed --noconfirm xf86-video-amdgpu mesa vulkan-radeon libva-utils
+            ;;
+    esac
+fi
+
+# --- Detect Intel GPU (standalone or hybrid Optimus iGPU + NVIDIA dGPU) ---
+if lspci | grep -Ei "VGA|3D|Display" | grep -qi intel &>/dev/null; then
+    INTEL_CARD=true
+    echo -e "${BBlue}Found an Intel GPU...${NC}"
+    intel_gpu_model=$(lspci | grep -Ei 'vga|3d|display' | grep -i intel | cut -d ':' -f3-)
+    echo "Detected Intel GPU:$intel_gpu_model"
+    # xf86-video-intel is deprecated and fights modesetting. mesa +
+    # intel-media-driver (iHD) + libva-intel-driver (i965 fallback)
+    # covers Gen5 through current Arc.
+    pacman -S --needed --noconfirm mesa vulkan-intel intel-media-driver libva-intel-driver libva-utils intel-gpu-tools
 fi
 
 # --- If neither NVIDIA, AMD, nor Intel was found, install basic drivers ---
 if [[ "$NVIDIA_CARD" == false && "$AMD_CARD" == false && "$INTEL_CARD" == false ]]; then
     echo -e "${BBlue}No supported NVIDIA, AMD, or Intel GPU detected. Installing basic drivers...${NC}"
-    pacman -S --noconfirm xf86-video-vesa mesa
+    pacman -S --needed --noconfirm xf86-video-vesa mesa
     # Do NOT touch mkinitcpio or grub in this fallback.
 fi
 
@@ -1382,43 +1448,41 @@ if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
     chmod 600 "$LUKS_KEYS"
 fi
 
-# Creating a cool /etc/issue
-echo -e "${BBlue}Creating Banner (/etc/issue).${NC}"
+# Creating pre-login banners (/etc/issue for console, /etc/issue.net for SSH without getty escapes)
+echo -e "${BBlue}Creating Banners (/etc/issue and /etc/issue.net).${NC}"
 
-cat > /etc/issue.net << EOF
-Arch Linux \r (\l)
-
-                     .ed"""" """\$\$\$\$be.
-                   -"           ^""**\$\$\$e.
-                 ."                   '\$\$\$c
-                /                      "4\$\$b
-               d  3                     \$\$\$\$
-               \$  *                   .\$\$\$\$\$\$
-              .\$  ^c           \$\$\$\$\$e\$\$\$\$\$\$\$\$.
-              d\$L  4.         4\$\$\$\$\$\$\$\$\$\$\$\$\$\$b
-              \$\$\$\$b ^ceeeee. 4\$\$ECL.F*\$\$\$\$\$\$\$
-  e\$""=.      \$\$\$\$P d\$\$\$\$F \$ \$\$\$\$\$\$\$\$- \$\$\$\$\$\$
- z\$\$b. ^c     3\$\$\$F "\$\$\$\$b   \$"\$\$\$\$\$\$\$  \$\$\$\$*"      .=""\$c
-4\$\$\$\$L   \     \$\$P"  "\$\$b   .\$ \$\$\$\$\$...e\$\$        .=  e\$\$\$.
-^*\$\$\$\$\$c  %..   *c    ..    \$\$ 3\$\$\$\$\$\$\$\$\$\$eF     zP  d\$\$\$\$\$
-  "**\$\$\$ec   "\   %ce""    \$\$\$  \$\$\$\$\$\$\$\$\$\$*    .r" =\$\$\$\$P""
-        "*\$b. "c  *\$e.    *** d\$\$\$\$\$"L\$\$    .d"  e\$\$***"
-          ^*\$\$c ^\$c \$\$\$      4J\$\$\$\$\$% \$\$\$ .e*".eeP"
-             "\$\$\$\$\$\$"'\$=e....\$*\$\$**\$cz\$\$" "..d\$*"
-               "*\$\$\$  *=%4.\$ L L\$ P3\$\$\$F \$\$\$P"
-                  "\$   "%*ebJLzb\$e\$\$\$\$\$b \$P"
-                    %..      4\$\$\$\$\$\$\$\$\$\$ "
-                     \$\$\$e   z\$\$\$\$\$\$\$\$\$\$%
-                      "*\$c  "\$\$\$\$\$\$\$P"
-                       ."""*\$\$\$\$\$\$\$\$bc
-                    .-"    .\$***\$\$\$"""*e.
-                 .-"    .e\$"     "*\$c  ^*b.
-          .=*""""    .e\$*"          "*bc  "*\$e..
-        .\$"        .z*"               ^*\$e.   "*****e.
-        \$\$ee\$c   .d"                     "*\$.        3.
-        ^*\$E")\$..\$"                         *   .ee==d%
-           \$.d\$\$\$*                           *  J\$\$\$e*
-            """""                             "\$\$\$"
+cat > /etc/issue.net << 'EOF'
+                     .ed"""" """$$$$be.
+                   -"           ^""**$$$e.
+                 ."                   '$$$c
+                /                      "4$$b
+               d  3                     $$$$
+               $  *                   .$$$$$$
+              .$  ^c           $$$$$e$$$$$$$$.
+              d$L  4.         4$$$$$$$$$$$$$$b
+              $$$$b ^ceeeee. 4$$ECL.F*$$$$$$$
+  e$""=.      $$$$P d$$$$F $ $$$$$$$$- $$$$$$
+ z$$b. ^c     3$$$F "$$$$b   $"$$$$$$$  $$$$*"      .=""$c
+4$$$$L   \     $$P"  "$$b   .$ $$$$$...e$$        .=  e$$$.
+^*$$$$$c  %..   *c    ..    $$ 3$$$$$$$$$$eF     zP  d$$$$$
+  "**$$$ec   "\   %ce""    $$$  $$$$$$$$$$*    .r" =$$$$P""
+        "*$b. "c  *$e.    *** d$$$$$"L$$    .d"  e$$***"
+          ^*$$c ^$c $$$      4J$$$$$% $$$ .e*".eeP"
+             "$$$$$$"'$=e....$*$$**$cz$$" "..d$*"
+               "*$$$  *=%4.$ L L$ P3$$$F $$$P"
+                  "$   "%*ebJLzb$e$$$$$b $P"
+                    %..      4$$$$$$$$$$ "
+                     $$$e   z$$$$$$$$$$%
+                      "*$c  "$$$$$$$P"
+                       ."""*$$$$$$$$bc
+                    .-"    .$***$$$"""*e.
+                 .-"    .e$"     "*$c  ^*b.
+          .=*""""    .e$*"          "*bc  "*$e..
+        .$"        .z*"               ^*$e.   "*****e.
+        $$ee$c   .d"                     "*$.        3.
+        ^*$E")$..$"                         *   .ee==d%
+           $.d$$$*                           *  J$$$e*
+            """""                             "$$$"
 
 ********************************************************************
 *                                                                  *
@@ -1432,6 +1496,7 @@ Arch Linux \r (\l)
 *                                                                  *
 ********************************************************************
 EOF
+cp /etc/issue.net /etc/issue
 
 echo -e "${BBlue}Setting permission on config files...${NC}"
 
@@ -1460,9 +1525,10 @@ chown root:root /etc/gshadow
 chown root:root /etc/ssh/sshd_config
 chmod 600 /etc/ssh/sshd_config
 chown root:root /etc/fstab
-chown root:root /etc/issue
-chmod 644 /etc/issue
-if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
+chmod 644 /etc/fstab
+chown root:root /etc/issue /etc/issue.net
+chmod 644 /etc/issue /etc/issue.net
+if [[ "$INSTALL_BOOTLOADER" == "grub" && -f /boot/grub/grub.cfg ]]; then
     chown root:root /boot/grub/grub.cfg
     chmod og-rwx /boot/grub/grub.cfg
 fi
@@ -1470,10 +1536,14 @@ chown root:root /etc/sudoers.d/
 chmod 750 /etc/sudoers.d
 chown -c root:root /etc/sudoers
 chmod -c 0440 /etc/sudoers
-chmod 02750 /bin/ping
-chmod 02750 /usr/bin/w
-chmod 02750 /usr/bin/who
-chmod 02750 /usr/bin/whereis
+# Never set the 2000 setgid bit on root-owned binaries or break normal user ping/whereis.
+if [[ -g /usr/bin/ping ]]; then
+    chmod 00755 /usr/bin/ping
+    setcap cap_net_raw=ep /usr/bin/ping 2>/dev/null || true
+fi
+chmod 00755 /usr/bin/whereis
+chown root:proc /usr/bin/w /usr/bin/who
+chmod 00750 /usr/bin/w /usr/bin/who
 chmod 0644 /etc/login.defs
 
 sleep 1
@@ -1483,7 +1553,7 @@ sleep 1
 
 echo -e "${BBlue}Setting up daily package update checks...${NC}"
 pacman -S --noconfirm pacman-contrib
-cat <<EOF > /etc/systemd/system/pacman-autoupdate.timer
+cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.timer
 [Unit]
 Description=Run package update check daily
 
@@ -1504,7 +1574,10 @@ After=network-online.target
 Type=oneshot
 # checkupdates syncs a temporary database, leaving pacman's live sync database
 # untouched. Exit 2 means there are no pending updates and is not an error.
-ExecStart=/bin/sh -c '/usr/bin/checkupdates > /var/log/pacman-updates.log 2>&1; rc=$$?; [ "$$rc" -eq 0 ] || [ "$$rc" -eq 2 ]'
+ExecStart=/usr/bin/checkupdates
+StandardOutput=file:/var/log/pacman-updates.log
+StandardError=inherit
+SuccessExitStatus=2
 EOF
 systemctl enable pacman-autoupdate.timer
 
@@ -1513,39 +1586,22 @@ sleep 2
 # --- Systemd Services Hardening ---
 echo -e "${BBlue}Hardening systemd services...${NC}"
 
-# SSH Service - Already partially done, but let's enhance it
+# SSH Service
 echo -e "${BBlue}Hardening SSH service...${NC}"
 mkdir -p /etc/systemd/system/sshd.service.d/
 cat > /etc/systemd/system/sshd.service.d/hardening.conf <<'EOF'
 [Service]
-PrivateTmp=yes
-# sshd spawns user shells that need sudo/su and PTY allocation.
-# NoNewPrivileges/RestrictSUIDSGID break sudo; PrivateDevices breaks PTYs;
-# RemoveIPC destroys shared memory on last session close;
-# RestrictNamespaces blocks containers/unshare in SSH sessions.
+# sshd spawns interactive user sessions: PrivateTmp=yes and ProtectControlGroups=yes
+# isolate local /tmp IPC sockets and break rootless container cgroup delegation.
+PrivateTmp=no
 NoNewPrivileges=no
-# sshd spawns interactive user sessions — ProtectSystem/ProtectHome must be
-# 'no' or users can't install packages, write to /var, /etc, or /home.
 ProtectSystem=no
 ProtectHome=no
-# ProtectKernel*=yes bind-mounts /run/systemd/inaccessible/dir over
-# /usr/lib/modules, /proc/kcore, /proc/kallsyms, /proc/kmsg, /dev/kmsg
-# in sshd's mount namespace. PAM-spawned user sessions INHERIT that
-# namespace, so every SSH login (and any GNOME/Wayland session started
-# from one) gets:
-#   - "modinfo: Module nvidia not found" (modules.dep unreadable)
-#   - "nvidia-modprobe -c0 -u failed exit 1" (no module deps)
-#   - DKMS "Built modules are missing in the kernel modules folder"
-#   - GTK GSK / EGL device probes degrade silently
-#   - dmesg / sysctl reads fail in user shells
-# These must be off on sshd for the same reason ProtectSystem and
-# ProtectHome are off here: sshd spawns interactive user sessions.
 ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectKernelLogs=no
-ProtectControlGroups=yes
+ProtectControlGroups=no
 # AF_NETLINK is required for PAM/auditd communication during session setup.
-# Without it, sshd drops connections immediately after authentication.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 IPAddressAllow=any
 IPAddressDeny=
@@ -1562,14 +1618,6 @@ echo -e "${BBlue}Hardening NetworkManager...${NC}"
 mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
-# RuntimeDirectory= / StateDirectory= make systemd create /run/NetworkManager
-# and /var/lib/NetworkManager (with correct ownership) before ExecStart runs.
-# Listing them in ReadWritePaths= instead would fail on first boot because
-# ProtectSystem=strict bind-mounts every ReadWritePaths= entry, and those
-# directories do not yet exist. The remaining ReadWritePaths= entries are
-# prefixed with "-" so a missing path is treated as optional rather than a
-# namespacing failure (relevant when /etc/resolv.conf is a symlink managed
-# by systemd-resolved).
 RuntimeDirectory=NetworkManager
 StateDirectory=NetworkManager
 ProtectSystem=strict
@@ -1579,7 +1627,7 @@ ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_SYS_MODULE
 NoNewPrivileges=no
 PrivateDevices=no
 DevicePolicy=auto
@@ -1594,11 +1642,10 @@ echo -e "${BBlue}Hardening auditd...${NC}"
 mkdir -p /etc/systemd/system/auditd.service.d/
 cat > /etc/systemd/system/auditd.service.d/hardening.conf <<'EOF'
 [Service]
-# auditd manages the kernel audit subsystem — it needs broad access to
-# /proc, /sys/kernel, and netlink sockets. Heavy sandboxing breaks it.
+# auditd manages the kernel audit subsystem — ProtectControlGroups=yes breaks
+# /proc audit rule operations and is explicitly unsupported upstream.
 ProtectSystem=full
 ProtectHome=yes
-ProtectControlGroups=yes
 ReadWritePaths=/var/log/audit /run
 CapabilityBoundingSet=CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_DAC_READ_SEARCH CAP_SYS_NICE CAP_SYS_RESOURCE
 PrivateDevices=yes
@@ -1640,15 +1687,18 @@ cat > /etc/systemd/system/fail2ban.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
 ProtectHome=yes
+ReadWritePaths=
 ReadWritePaths=/var/lib/fail2ban /var/log /run/fail2ban
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE
 NoNewPrivileges=no
 PrivateTmp=yes
 PrivateDevices=yes
+RestrictAddressFamilies=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
@@ -1666,12 +1716,14 @@ EOF
 
 # Chrony NTP hardening
 echo -e "${BBlue}Hardening Chrony NTP...${NC}"
+install -d -o chrony -g chrony -m 0750 /var/log/chrony
 mkdir -p /etc/systemd/system/chronyd.service.d/
 cat > /etc/systemd/system/chronyd.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/chrony /var/log/chrony /run
+ReadWritePaths=
+ReadWritePaths=/run /var/lib/chrony -/var/log/chrony
 ProtectKernelTunables=no
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -1679,12 +1731,14 @@ ProtectControlGroups=yes
 ProtectClock=no
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
-CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_SYS_TIME
+PrivateDevices=no
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_TIME CAP_NET_BIND_SERVICE
+SystemCallFilter=
 SystemCallFilter=@system-service @clock
 SystemCallErrorNumber=EPERM
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 LockPersonality=yes
 Restart=on-failure
@@ -1709,6 +1763,8 @@ SYSTEMD_HARDENING_CANDIDATES=(
     audit-rules.service
     awesome-journal-sealing.service
     systemd-journal-flush.service
+    awesome-board-health.service
+    awesome-board-health.timer
     clamav-daemon.service
     fail2ban.service
     chronyd.service
@@ -1718,7 +1774,9 @@ SYSTEMD_HARDENING_CANDIDATES=(
     arch-audit-alert.service
     arch-audit.timer
     rkhunter-check.service
+    rkhunter-check.timer
     pacman-autoupdate.service
+    pacman-autoupdate.timer
 )
 SYSTEMD_HARDENED_UNITS=()
 for unit in "${SYSTEMD_HARDENING_CANDIDATES[@]}"; do
@@ -1775,6 +1833,11 @@ harden_sysctl() {
 
 harden_sysctl
 
+# Finalize rkhunter file property baseline AFTER all packages and binary
+# permission changes (compilers group, w/who, sshd, bootloaders) are in place.
+echo -e "${BBlue}Updating rkhunter file property database...${NC}"
+rkhunter --propupd
+
 sleep 2
 
 echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub for first boot...${NC}"
@@ -1784,8 +1847,11 @@ rm -f /etc/resolv.conf
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
-# Securely remove sensitive files
+# Securely remove sensitive files at the very end so intermediate failures
+# remain resumable via recovery-mount.sh
+shred -u /ssh.sh 2>/dev/null || true
+shred -u /nftables.sh 2>/dev/null || true
 shred -u /root/.install-env 2>/dev/null || true
 shred -u /bootloader.sh 2>/dev/null || true
-shred -u /chroot.sh
+shred -u /chroot.sh 2>/dev/null || true
 exit

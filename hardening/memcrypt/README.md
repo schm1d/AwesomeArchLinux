@@ -1,6 +1,6 @@
 # Memory Encryption (AMD SME / Intel TME)
 
-Opt-in only. The installer never injects `mem_encrypt=on`.
+Opt-in only. The installer never injects `mem_encrypt=on`. Supports signed UKIs (`/etc/kernel/cmdline` + `mkinitcpio -P` + `sbctl sign-all` when `sbctl` / `awesome-secureboot` keys are present), Type-1 `systemd-boot` entries, and GRUB (`0600 root:root` on `grub.cfg`). Active SME status is verified directly from kernel logs (`dmesg` / `journalctl -k -b 0`), never inferred solely from CPU capability flags and `/proc/cmdline`.
 
 ```bash
 sudo ./memcrypt.sh              # Probe CPU flags and current state

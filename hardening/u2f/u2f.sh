@@ -15,6 +15,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
@@ -59,9 +60,10 @@ EOF
     exit 0
 }
 
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -u)               USERNAME="${2:-}"; [[ -n "$USERNAME" ]] || err "-u requires a username"; shift 2 ;;
+        -u)               need_arg "$@"; USERNAME="$2"; shift 2 ;;
         --enroll)         DO_ENROLL=true; shift ;;
         --login)          DO_LOGIN=true; shift ;;
         --no-login)       DO_LOGIN=false; shift ;;
@@ -85,7 +87,27 @@ if [[ -z "$USERNAME" ]]; then
 fi
 
 id "$USERNAME" &>/dev/null || err "User '$USERNAME' does not exist"
-ORIGIN="pam://$(hostname -s)"
+[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || err "Invalid username format: $USERNAME"
+
+# Derive hostname strictly from system sources (never trust inherited $HOSTNAME)
+HOST_RAW=""
+if [[ -s /etc/hostname ]]; then
+    IFS= read -r HOST_RAW < /etc/hostname || true
+fi
+if [[ -z "${HOST_RAW//[[:space:]]/}" ]] && command -v hostnamectl >/dev/null 2>&1; then
+    HOST_RAW=$(hostnamectl --static 2>/dev/null || true)
+fi
+if [[ -z "${HOST_RAW//[[:space:]]/}" ]]; then
+    HOST_RAW=$(uname -n 2>/dev/null || true)
+fi
+HOST_RAW="${HOST_RAW//[[:space:]]/}"
+HOST_RAW="${HOST_RAW,,}"
+HOST_SHORT="${HOST_RAW%%.*}"
+HOST_SHORT="${HOST_SHORT:-localhost}"
+if [[ ! "$HOST_SHORT" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+    err "Invalid system hostname '${HOST_SHORT}' for pam_u2f origin"
+fi
+ORIGIN="pam://${HOST_SHORT}"
 
 pam_options() {
     local extra="cue origin=${ORIGIN} appid=${ORIGIN} authfile=${AUTHFILE}"
@@ -100,23 +122,39 @@ pam_line() {
 }
 
 install_packages() {
-    msg "Installing pam-u2f, libfido2, and pcsc-tools..."
+    msg "Installing pam-u2f, libfido2, pcsclite, and ccid..."
     pacman -Syu --noconfirm --needed pam-u2f libfido2 pcsclite ccid
     systemctl enable --now pcscd.socket 2>/dev/null || systemctl enable --now pcscd.service 2>/dev/null || true
 }
 
 ensure_authfile() {
     if [[ ! -f "$AUTHFILE" ]]; then
-        umask 077
-        touch "$AUTHFILE"
-        chmod 644 "$AUTHFILE"
+        ( umask 077 && : > "$AUTHFILE" )
         chown root:root "$AUTHFILE"
+        chmod 0644 "$AUTHFILE"
         info "Created $AUTHFILE"
     fi
 }
 
 user_enrolled() {
-    grep -E "^${USERNAME}:" "$AUTHFILE" >/dev/null 2>&1
+    [[ -f "$AUTHFILE" ]] || return 1
+    USER_TARGET="$USERNAME" awk -F: '
+        $1 == ENVIRON["USER_TARGET"] { found = 1; exit }
+        END { exit !found }
+    ' "$AUTHFILE"
+}
+
+user_key_count() {
+    [[ -f "$AUTHFILE" ]] || { printf '0\n'; return 0; }
+    USER_TARGET="$USERNAME" awk -F: '
+        $1 == ENVIRON["USER_TARGET"] { print NF - 1; found = 1; exit }
+        END { if (!found) print 0 }
+    ' "$AUTHFILE"
+}
+
+root_enrolled() {
+    [[ -f "$AUTHFILE" ]] || return 1
+    awk -F: '$1 == "root" { found = 1; exit } END { exit !found }' "$AUTHFILE"
 }
 
 enroll_key() {
@@ -128,32 +166,41 @@ enroll_key() {
     echo
 
     local tmp mapping
-    tmp=$(mktemp)
-    if ! su -s /bin/bash "$USERNAME" -c "pamu2fcfg -u '$USERNAME' -o '$ORIGIN' -i '$ORIGIN'" >"$tmp"; then
-        rm -f "$tmp"
+    tmp=$(umask 077; mktemp)
+    # Run pamu2fcfg directly as root with -u "$USERNAME" so /dev/hidraw* seat ACLs
+    # never block enrollment over SSH or when enrolling another local user.
+    if ! pamu2fcfg -u "$USERNAME" -o "$ORIGIN" -i "$ORIGIN" > "$tmp"; then
+        rm -f -- "$tmp"
         err "Enrollment failed. Is the key plugged in? Try: fido2-token -L"
     fi
-    mapping=$(tr -d '\n' <"$tmp")
-    rm -f "$tmp"
+    mapping=$(tr -d '\n' < "$tmp")
+    rm -f -- "$tmp"
     [[ -n "$mapping" ]] || err "pamu2fcfg produced an empty mapping"
 
     if user_enrolled; then
         local extra
         extra=$(printf '%s' "$mapping" | cut -d: -f2-)
-        awk -v user="$USERNAME" -v extra="$extra" -F: '
-            $1 == user { print $0 ":" extra; next }
+        USER_TARGET="$USERNAME" EXTRA_MAPPING="$extra" awk -F: '
+            !done && $1 == ENVIRON["USER_TARGET"] {
+                print $0 ":" ENVIRON["EXTRA_MAPPING"]
+                done = 1
+                next
+            }
             { print }
-        ' "$AUTHFILE" >"${AUTHFILE}.new"
+        ' "$AUTHFILE" > "${AUTHFILE}.new"
+        chown root:root "${AUTHFILE}.new"
+        chmod 0644 "${AUTHFILE}.new"
         mv "${AUTHFILE}.new" "$AUTHFILE"
-        chmod 644 "$AUTHFILE"
         msg "Appended an additional key for $USERNAME"
     else
-        printf '%s\n' "$mapping" >>"$AUTHFILE"
+        printf '%s\n' "$mapping" >> "$AUTHFILE"
+        chown root:root "$AUTHFILE"
+        chmod 0644 "$AUTHFILE"
         msg "Enrolled first key for $USERNAME"
     fi
 
     local count
-    count=$(awk -F: -v user="$USERNAME" '$1==user { print NF-1 }' "$AUTHFILE")
+    count=$(user_key_count)
     if [[ "${count:-0}" -lt 2 ]]; then
         warn "Only $count key(s) enrolled for $USERNAME. Enroll a backup key before you rely on this."
         warn "Re-run: sudo $0 -u $USERNAME --enroll"
@@ -162,50 +209,72 @@ enroll_key() {
 
 insert_pam_line() {
     local pam_file="$1"
-    local line
+    local line ts already_present=false
     line=$(pam_line)
 
     [[ -f "$pam_file" ]] || { warn "Skipping missing PAM stack $pam_file"; return 0; }
 
-    if grep -Eq '^[[:space:]]*auth[[:space:]]+.*pam_u2f\.so' "$pam_file"; then
-        info "pam_u2f already present in $pam_file — refreshing options"
-        local ts
-        ts=$(date +%Y%m%d-%H%M%S)
-        cp "$pam_file" "${pam_file}.bak.${ts}"
-        sed -i -E 's|^[[:space:]]*auth[[:space:]]+.*pam_u2f\.so.*|'"$line"'|' "$pam_file"
-        return 0
+    if grep -Eq '^[[:space:]]*-?auth[[:space:]]+.*pam_u2f\.so' "$pam_file"; then
+        already_present=true
+        info "pam_u2f already present in $pam_file — refreshing options and stack order"
     fi
 
-    local ts
     ts=$(date +%Y%m%d-%H%M%S)
     cp "$pam_file" "${pam_file}.bak.${ts}"
+    chmod 0644 "${pam_file}.bak.${ts}"
 
-    awk -v line="$line" '
-        BEGIN { done=0 }
-        /^[[:space:]]*auth[[:space:]]/ && !done {
-            print "# FIDO2/U2F (added by u2f.sh)"
-            print line
-            done=1
-        }
-        { print }
-        END {
-            if (!done) {
-                print "# FIDO2/U2F (added by u2f.sh)"
-                print line
+    # Place pam_u2f AFTER 'auth include system-login' / 'auth include system-auth'
+    # so pam_faillock preauth and password verification run first (and [default=die]
+    # aborts bad passwords without prompting the FIDO2 key).
+    PAM_U2F_LINE="$line" awk '
+        /^# FIDO2\/U2F \(added by u2f\.sh\)[[:space:]]*$/ { next }
+        /^[[:space:]]*-?auth[[:space:]]+.*pam_u2f\.so/ { next }
+        {
+            n++
+            lines[n] = $0
+            if ($0 ~ /^[[:space:]]*-?auth[[:space:]]+(include|substack)[[:space:]]+(system-login|system-auth)([[:space:]]|$)/) {
+                include_idx = n
+            }
+            if ($0 ~ /^[[:space:]]*-?auth[[:space:]]/) {
+                last_auth_idx = n
             }
         }
-    ' "$pam_file" >"${pam_file}.new"
+        END {
+            insert_after = (include_idx > 0 ? include_idx : last_auth_idx)
+            for (i = 1; i <= n; i++) {
+                print lines[i]
+                if (i == insert_after) {
+                    print "# FIDO2/U2F (added by u2f.sh)"
+                    print ENVIRON["PAM_U2F_LINE"]
+                }
+            }
+            if (insert_after == 0) {
+                print "# FIDO2/U2F (added by u2f.sh)"
+                print ENVIRON["PAM_U2F_LINE"]
+            }
+        }
+    ' "$pam_file" > "${pam_file}.new"
+    chown root:root "${pam_file}.new"
+    chmod 0644 "${pam_file}.new"
     mv "${pam_file}.new" "$pam_file"
-    msg "Wired pam_u2f into $pam_file"
+    if [[ "$already_present" == false ]]; then
+        msg "Wired pam_u2f into $pam_file (after primary password auth)"
+    fi
 }
 
 configure_login() {
     msg "Configuring local login PAM stacks..."
     insert_pam_line /etc/pam.d/system-local-login
-    insert_pam_line /etc/pam.d/gdm-password
-    insert_pam_line /etc/pam.d/sddm
-    insert_pam_line /etc/pam.d/lightdm
-    insert_pam_line /etc/pam.d/login
+
+    local dm_pam
+    for dm_pam in /etc/pam.d/gdm-password /etc/pam.d/sddm /etc/pam.d/lightdm /etc/pam.d/login; do
+        [[ -f "$dm_pam" ]] || continue
+        if grep -Eq '^[[:space:]]*-?auth[[:space:]]+(include|substack)[[:space:]]+system-local-login([[:space:]]|$)' "$dm_pam"; then
+            info "Skipping $dm_pam (already includes system-local-login)"
+            continue
+        fi
+        insert_pam_line "$dm_pam"
+    done
 }
 
 configure_sudo() {
@@ -227,7 +296,7 @@ print_ssh_guidance() {
 OpenSSH FIDO2 (phishing-resistant, no PAM stack change):
 
   # As $USERNAME, with the key plugged in:
-  ssh-keygen -t ed25519-sk -O resident -O verify-required -f ~/.ssh/id_ed25519_sk -C "${USERNAME}@$(hostname -s)"
+  ssh-keygen -t ed25519-sk -O resident -O verify-required -f ~/.ssh/id_ed25519_sk -C "${USERNAME}@${HOST_SHORT}"
   ssh-copy-id -i ~/.ssh/id_ed25519_sk.pub ${USERNAME}@<host>
 
 Resident keys can be pulled onto a new machine with:
@@ -243,7 +312,7 @@ show_status() {
     info "Authfile: $AUTHFILE"
     if [[ -f "$AUTHFILE" ]] && user_enrolled; then
         local count
-        count=$(awk -F: -v user="$USERNAME" '$1==user { print NF-1 }' "$AUTHFILE")
+        count=$(user_key_count)
         msg "$USERNAME has $count enrolled key handle(s)"
     else
         warn "$USERNAME has no mapping in $AUTHFILE"
@@ -289,5 +358,8 @@ echo
 msg "Done. Test a new login before closing this session."
 if [[ "$ALLOW_MISSING" == true ]]; then
     warn "nouserok is set: users without a mapping skip the key. Re-run without --allow-missing after everyone is enrolled."
+elif [[ "$DO_LOGIN" == true ]] && ! root_enrolled; then
+    warn "Local TTY root login ALSO uses system-local-login and requires U2F when nouserok is absent!"
+    warn "Unless you enroll root ('sudo $0 -u root --enroll') or pass --allow-missing, local console root login cannot bypass U2F (lockout recovery requires an open root/SSH session or live/rescue media)."
 fi
-echo -e "${C_YELLOW}If locked out:${C_NC} recover from console and restore the .bak.* files next to the PAM stacks."
+echo -e "${C_YELLOW}If locked out:${C_NC} restore the .bak.* files next to the PAM stacks from an open root/SSH session or live/rescue media."

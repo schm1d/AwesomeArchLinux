@@ -15,7 +15,7 @@ sudo ./nodejs.sh -a /opt/myapp
 | `-a APP_PATH` | Absolute path to the Node.js application | *required* |
 | `-u APP_USER` | System user to run the app | `nodeapp` |
 | `-p PORT` | Application port | `3000` |
-| `-n APP_NAME` | Application/service name | `nodeapp` |
+| `-n APP_NAME` | Application/service name (`[A-Za-z0-9][A-Za-z0-9_-]*`) | `nodeapp` |
 | `-h` | Show help | |
 
 ### Examples
@@ -40,9 +40,7 @@ Creates a system account (`nodeapp` by default) with `/usr/bin/nologin` shell an
 ### 2. Secure Node.js Installation
 
 - Installs `nodejs` and `npm` from the official Arch repositories
-- Sets npm global prefix to `/usr/local`
-- Disables npm telemetry and fund notifications
-- Sets `npm audit-level high`
+- Configures global npm settings (`--location=global`): disables `fund` and `update-notifier` notifications and sets `audit-level high`
 
 ### 3. Hardened systemd Service
 
@@ -64,8 +62,10 @@ Creates a system account (`nodeapp` by default) with `/usr/bin/nologin` shell an
 | `MemoryDenyWriteExecute` | `no` | Required for V8 JIT compilation |
 | `LockPersonality` | `yes` | Cannot change execution domain |
 | `SystemCallFilter` | `@system-service @network-io` | Allowlist of permitted syscalls |
+| `SystemCallErrorNumber` | `EPERM` | Return `EPERM` instead of killing process on filtered syscalls |
 | `SystemCallArchitectures` | `native` | No 32-bit compat syscalls |
 | `CapabilityBoundingSet` | empty / `CAP_NET_BIND_SERVICE` | No capabilities (or bind-only if port < 1024) |
+| `AppArmorProfile` | `-<APP_NAME>` | Binds only this service to the AppArmor profile |
 | `UMask` | `077` | Restrictive file creation mask |
 | `LimitNOFILE` | `65535` | File descriptor limit |
 | `LimitNPROC` | `4096` | Process limit |
@@ -91,11 +91,11 @@ Creates a system account (`nodeapp` by default) with `/usr/bin/nologin` shell an
 
 ### 6. Environment Security
 
-Sensitive configuration is stored in `/etc/<APP_NAME>/env` (mode 640, owned by `root:<APP_USER>`), loaded by systemd via `EnvironmentFile`. This keeps secrets out of process arguments visible in `/proc`.
+Sensitive configuration is stored in `/etc/<APP_NAME>/env` (mode 640, owned by `root:<APP_USER>`), loaded by systemd via `EnvironmentFile`. Existing files are preserved on re-runs so production secrets are never overwritten. This keeps secrets out of process arguments visible in `/proc`.
 
 ### 7. AppArmor Confinement
 
-An enforce-mode AppArmor profile restricts the Node.js process to:
+An unattached enforce-mode AppArmor profile (`profile <APP_NAME> flags=(enforce)`) is applied strictly to `<APP_NAME>.service` via `AppArmorProfile=-<APP_NAME>` without confining host-wide `/usr/bin/node` or `npm`. It restricts the service process to:
 - Network: `inet`/`inet6` stream and dgram, plus unix stream
 - Read: Node.js binary, application source, `node_modules`, SSL trust store
 - Write: application `data/` and `logs/` directories, `/var/log/<APP_NAME>/`
@@ -103,19 +103,17 @@ An enforce-mode AppArmor profile restricts the Node.js process to:
 
 ### 8. Automated npm Audit
 
-A systemd timer runs `npm audit --production` weekly, logs results to `/var/log/<APP_NAME>/`, and optionally sends notifications via mail or webhook.
+A systemd timer runs `npm audit --omit=dev --cache /tmp/npm-cache` weekly as the unprivileged `<APP_USER>` account (with `PrivateTmp=true` and `UMask=0077`), logs results to `/var/log/<APP_NAME>/`, and optionally sends notifications via mail or webhook.
 
-Each application has a separate audit script. If upgrading from the shared
-`npm-security-audit.sh` script, rerun setup for each previously configured app
-using its original name and path to update its timer's service.
+Each application has a separate audit script (`/usr/local/bin/<APP_NAME>-audit.sh`). If upgrading from an older setup, rerun setup for each previously configured app using its original name and path to update its timer's service.
 
 ### 9. File Permissions
 
 | Path | Mode | Purpose |
 |------|------|---------|
-| Source files (`.js`, `.ts`, `.json`) | `640` | Owner read/write, group read |
+| Source files (`.js`, `.ts`, `.json`, `.mjs`, `.cjs` outside `node_modules/`) | `640` | Owner read/write, group read |
 | Directories | `750` | Owner full, group read/execute |
-| `node_modules/` | `750` (dirs) | Same as above |
+| `node_modules/` | `750` (dirs; CLI binary `+x` preserved) | Preserves `node_modules/.bin/*` executable targets |
 | `.env*` files | `600` | Owner read/write only |
 | `/etc/<APP_NAME>/env` | `640` | Root read/write, service user read |
 
@@ -127,8 +125,8 @@ using its original name and path to update its timer's service.
 | `/etc/<APP_NAME>/env` | Production environment variables |
 | `/etc/nginx/sites-enabled/<APP_NAME>.conf` | nginx reverse proxy config |
 | `/etc/logrotate.d/<APP_NAME>` | Log rotation config |
-| `/etc/apparmor.d/usr.bin.<APP_NAME>` | AppArmor confinement profile |
-| `/usr/local/bin/<APP_NAME>-npm-security-audit.sh` | Application-specific audit script |
+| `/etc/apparmor.d/usr.bin.<APP_NAME>` | Unattached AppArmor confinement profile |
+| `/usr/local/bin/<APP_NAME>-audit.sh` | Application-specific audit script |
 | `/etc/systemd/system/<APP_NAME>-audit.timer` | Weekly audit timer |
 | `/var/log/<APP_NAME>/` | Application and audit logs |
 
@@ -228,7 +226,7 @@ Run regularly (the hardening script automates this weekly):
 
 ```bash
 # Check for vulnerabilities
-npm audit --production
+npm audit --omit=dev
 
 # Auto-fix where possible
 npm audit fix
@@ -260,7 +258,7 @@ snyk monitor
 Always commit `package-lock.json` and use `npm ci` (not `npm install`) in production to ensure deterministic builds:
 
 ```bash
-npm ci --production
+npm ci --omit=dev
 ```
 
 ### Secret Management

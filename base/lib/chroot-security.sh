@@ -38,7 +38,9 @@ render_password_stack() {
 
 configure_password_policy() (
     set -euo pipefail
+    umask 022
     local root="${1:-}" pam work path
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     pam="$root/etc/pam.d/system-auth"
     # Arch already supplies the complete faillock control flow. Preserve it.
     for phase in preauth authfail authsucc; do
@@ -81,6 +83,7 @@ EOF
 render_audit_rules() (
     set -euo pipefail
     local template="$1" root="${2:-}" line path resolved field i skip
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     local -a words
     local -A seen=()
     # These watches form the required baseline; other paths depend on packages
@@ -157,7 +160,9 @@ audit_rules_without_lock() {
 
 load_audit_rules() (
     set -euo pipefail
+    umask 077
     local root="${1:-}" work status
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     status=$(auditctl -s)
     if grep -Eq '^enabled[[:space:]]+2$' <<< "$status"; then
         echo "Audit rules are already immutable; reboot to load policy changes." >&2
@@ -182,7 +187,9 @@ load_audit_rules() (
 
 configure_audit_rules() (
     set -euo pipefail
+    umask 022
     local root="${1:-}"
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     install -d -m 0755 "$root/etc/audit/rules.d" "$root/usr/local/sbin" \
         "$root/etc/systemd/system/audit-rules.service.d"
     cat > "$root/usr/local/sbin/awesome-load-audit-rules" <<'EOF'
@@ -204,6 +211,7 @@ run_vulnerability_check() (
     set -euo pipefail
     umask 077
     local root="${1:-}" report work rc
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     report="$root/var/log/arch-audit.log"
     work=$(mktemp "$root/var/log/.arch-audit.XXXXXX")
     trap 'rm -f -- "$work"' EXIT
@@ -232,7 +240,9 @@ run_vulnerability_check() (
 
 configure_vulnerability_check() (
     set -euo pipefail
+    umask 022
     local root="${1:-}"
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     install -d -m 0755 "$root/usr/local/bin" "$root/etc/systemd/system"
     cat > "$root/usr/local/bin/arch-audit-check" <<'EOF'
 #!/usr/bin/env bash
@@ -281,6 +291,7 @@ initialize_journal_sealing() (
     set -euo pipefail
     umask 077
     local root="${1:-}" machine_id state keydir verification diagnostic rc
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     # PID 1 establishes the installed machine's ID before this boot service runs.
     # Never generate keys in the installer chroot using the live ISO's identity.
     machine_id=$(cat "$root/etc/machine-id")
@@ -341,7 +352,9 @@ initialize_journal_sealing() (
 
 configure_journal_sealing() (
     set -euo pipefail
+    umask 022
     local root="${1:-}"
+    while [[ "$root" == */ ]]; do root="${root%/}"; done
     install -d -m 0755 "$root/etc/systemd/journald.conf.d" "$root/usr/local/sbin" \
         "$root/etc/systemd/system/systemd-journal-flush.service.d"
     # Repair the invalid value written by earlier versions, including on reruns.

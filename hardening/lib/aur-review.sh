@@ -70,7 +70,7 @@ _aal_aur_show_review() {
 }
 
 _aal_aur_install_dependencies() {
-    local builddir=$1 package=$2 dependency dependency_name
+    local builddir=$1 package=$2 dependency dependency_name provider="" repo_list=""
     local build_arch missing_output
     local -a dependencies=() missing=() repo_packages=() aur_packages=()
 
@@ -100,13 +100,17 @@ _aal_aur_install_dependencies() {
         }
         if pacman -Si "$dependency_name" &>/dev/null; then
             repo_packages+=("$dependency_name")
+        elif provider=$(pacman -Sp --print-format '%n' "$dependency" 2>/dev/null) &&
+             [[ -n "$provider" && "$provider" != *$'\n'* && "$provider" =~ ^[a-zA-Z0-9@._+-]+$ ]]; then
+            repo_packages+=("$provider")
         else
             aur_packages+=("$dependency_name")
         fi
     done
 
     if (( ${#repo_packages[@]} > 0 )); then
-        _aal_aur_info "Installing reviewed recipe dependencies from signed Arch repositories: ${repo_packages[*]}"
+        printf -v repo_list '%s ' "${repo_packages[@]}"
+        _aal_aur_info "Installing reviewed recipe dependencies from signed Arch repositories: ${repo_list% }"
         pacman -S --needed --noconfirm "${repo_packages[@]}"
     fi
 
@@ -128,6 +132,7 @@ _aal_aur_install_dependencies() {
 # differs from the requested binary package name.
 aal_aur_install_reviewed() (
     set -euo pipefail
+    umask 022
     IFS=$'\n\t'
 
     local package=${1:-} pkgbase=${2:-${1:-}}
@@ -231,16 +236,35 @@ aal_aur_install_reviewed() (
 
     _aal_aur_show_review "$builddir" "$package" "$pkgbase" "$commit"
     printf 'Type exactly: INSTALL %s %s\n> ' "$package" "$commit" >&"$review_fd"
-    IFS= read -r -u "$review_fd" confirmation || {
-        _aal_aur_error "Could not read -r review confirmation."
+    if ! IFS= read -r -u "$review_fd" confirmation; then
+        exec {review_fd}<&-
+        _aal_aur_error "Could not read review confirmation."
         return 1
-    }
+    fi
+    exec {review_fd}<&-
     if [[ "$confirmation" != "INSTALL $package $commit" ]]; then
         _aal_aur_error "Review not confirmed; $package was not built or installed."
         return 1
     fi
 
     _aal_aur_install_dependencies "$builddir" "$package"
+
+    if grep -Eq '^[[:space:]]*validpgpkeys[[:space:]]*=' "$builddir/.SRCINFO" &&
+       command -v gpg &>/dev/null; then
+        if [[ -d /root/.gnupg ]]; then
+            gpg --batch --quiet --homedir /root/.gnupg --export \
+                > "$tmpdir/pubkeys.root.gpg" 2>/dev/null || rm -f -- "$tmpdir/pubkeys.root.gpg"
+        fi
+        if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+            local invoking_home=""
+            invoking_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)
+            if [[ -n "$invoking_home" && -d "$invoking_home/.gnupg" ]]; then
+                runuser -u "$SUDO_USER" -- env HOME="$invoking_home" GNUPGHOME="$invoking_home/.gnupg" \
+                    gpg --batch --quiet --export \
+                    > "$tmpdir/pubkeys.user.gpg" 2>/dev/null || rm -f -- "$tmpdir/pubkeys.user.gpg"
+            fi
+        fi
+    fi
 
     build_user="_aalbuild_${BASHPID}"
     if getent group compilers >/dev/null; then
@@ -250,16 +274,34 @@ aal_aur_install_reviewed() (
     build_user_created=true
     chown root:"$build_user" "$tmpdir"
     chmod 0710 "$tmpdir"
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -b -k "$tmpdir" "$builddir" 2>/dev/null || true
+    fi
     install -d -o "$build_user" -g "$build_user" -m 0700 "$builddir/.home" "$builddir/.tmp"
     chown -R "$build_user":"$build_user" "$builddir"
+
+    if [[ -s "$tmpdir/pubkeys.root.gpg" || -s "$tmpdir/pubkeys.user.gpg" ]]; then
+        install -d -o "$build_user" -g "$build_user" -m 0700 "$builddir/.home/.gnupg"
+        local pubkey_bundle
+        for pubkey_bundle in "$tmpdir/pubkeys.root.gpg" "$tmpdir/pubkeys.user.gpg"; do
+            [[ -s "$pubkey_bundle" ]] || continue
+            chmod 0644 "$pubkey_bundle"
+            runuser -u "$build_user" -- env HOME="$builddir/.home" GNUPGHOME="$builddir/.home/.gnupg" \
+                gpg --batch --quiet --import "$pubkey_bundle" >/dev/null 2>&1 || true
+            rm -f -- "$pubkey_bundle"
+        done
+    fi
+    rm -f -- "$tmpdir/pubkeys.root.gpg" "$tmpdir/pubkeys.user.gpg"
 
     _aal_aur_info "Building reviewed commit $commit as disposable user $build_user."
     (
         cd "$builddir"
+        export PKGDEST="$builddir"
         runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" \
-            makepkg --cleanbuild --noconfirm
+            makepkg --cleanbuild --noconfirm PKGDEST="$builddir"
         mapfile -t package_files < <(
-            runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" makepkg --packagelist
+            runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" \
+                makepkg --packagelist PKGDEST="$builddir"
         )
         (( ${#package_files[@]} > 0 )) || {
             _aal_aur_error "makepkg produced no package paths."
@@ -275,6 +317,9 @@ aal_aur_install_reviewed() (
     build_user_created=false
 
     while IFS= read -r -d '' package_file; do
+        if [[ "$package" != *-debug && ! -e "$package_file" && ! -L "$package_file" && "${package_file##*/}" == *-debug-* ]]; then
+            continue
+        fi
         resolved_file=$(realpath -e -- "$package_file") || {
             _aal_aur_error "Could not resolve package artifact: $package_file"
             return 1

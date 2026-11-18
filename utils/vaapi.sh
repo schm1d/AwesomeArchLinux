@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+umask 022
+
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
 readonly C_GREEN='\033[1;32m'
@@ -30,10 +32,15 @@ usage() { echo "Usage: sudo $0 [--status] [--force-driver NAME] [-h]"; exit 0; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --status)        DO_STATUS=true; shift ;;
-        --force-driver)  FORCE_DRIVER="${2:-}"; [[ -n "$FORCE_DRIVER" ]] || err "--force-driver needs a name"; shift 2 ;;
-        -h|--help)       usage ;;
-        *)               err "Unknown option: $1" ;;
+        --status)  DO_STATUS=true; shift ;;
+        --force-driver)
+            [[ $# -ge 2 && -n "${2:-}" ]] || err "--force-driver needs a name"
+            [[ "$2" =~ ^[a-zA-Z0-9_-]+$ ]] || err "Invalid driver name: $2"
+            FORCE_DRIVER="$2"
+            shift 2
+            ;;
+        -h|--help) usage ;;
+        *)         err "Unknown option: $1" ;;
     esac
 done
 
@@ -46,11 +53,15 @@ vga_nvidia=false
 detect() {
     local lines
     lines=$(lspci 2>/dev/null | grep -Ei 'VGA|3D|Display' || true)
-    echo "$lines" | grep -qi intel && vga_intel=true
-    echo "$lines" | grep -qiE 'amd|radeon' && vga_amd=true
-    echo "$lines" | grep -qi nvidia && vga_nvidia=true
+    if grep -qi intel <<<"$lines"; then vga_intel=true; fi
+    if grep -qiE 'amd|radeon' <<<"$lines"; then vga_amd=true; fi
+    if grep -qi nvidia <<<"$lines"; then vga_nvidia=true; fi
     info "PCI display adapters:"
-    echo "$lines" | sed 's/^/  /'
+    if [[ -n "$lines" ]]; then
+        sed 's/^/  /' <<<"$lines"
+    else
+        echo "  (none detected)"
+    fi
 }
 
 count_vendors() {
@@ -63,8 +74,8 @@ count_vendors() {
 
 intel_driver_name() {
     local model
-    model=$(lspci | grep -iE 'VGA|3D|Display' | grep -i intel || true)
-    if echo "$model" | grep -qiE 'Haswell|Ivy Bridge|Sandy Bridge|Ironlake|Bay Trail'; then
+    model=$(lspci 2>/dev/null | grep -iE 'VGA|3D|Display' | grep -i intel || true)
+    if grep -qiE 'Haswell|Ivy Bridge|Sandy Bridge|Ironlake|Bay Trail' <<<"$model"; then
         printf 'i965'
     else
         printf 'iHD'
@@ -73,11 +84,14 @@ intel_driver_name() {
 
 write_env() {
     local name="$1"
-    mkdir -p /etc/environment.d
-    cat > "$ENV_FILE" <<EOF
-# Written by utils/vaapi.sh
-LIBVA_DRIVER_NAME=${name}
-EOF
+    install -d -m 0755 /etc/environment.d
+    {
+        echo "# Written by utils/vaapi.sh"
+        echo "LIBVA_DRIVER_NAME=${name}"
+        if [[ "$name" == "nvidia" ]]; then
+            echo "NVD_BACKEND=direct"
+        fi
+    } > "$ENV_FILE"
     chmod 644 "$ENV_FILE"
     msg "Wrote $ENV_FILE (LIBVA_DRIVER_NAME=${name})"
     info "Log out or reboot for the environment drop-in to reach user sessions."
@@ -85,14 +99,21 @@ EOF
 
 show_status() {
     echo
+    local pinned=""
     if [[ -f "$ENV_FILE" ]]; then
         info "$ENV_FILE:"; sed 's/^/  /' "$ENV_FILE"
+        pinned=$(awk -F= '/^LIBVA_DRIVER_NAME=/ { print $2; exit }' "$ENV_FILE" || true)
     else
         info "No $ENV_FILE"
     fi
     echo
     if command -v vainfo >/dev/null; then
-        info "vainfo:"; vainfo 2>&1 | sed 's/^/  /' || true
+        info "vainfo:"
+        if [[ -n "$pinned" ]]; then
+            LIBVA_DRIVER_NAME="$pinned" vainfo --display drm 2>&1 | sed 's/^/  /' || true
+        else
+            vainfo --display drm 2>&1 | sed 's/^/  /' || true
+        fi
     else
         warn "vainfo not installed"
     fi
@@ -116,17 +137,18 @@ if [[ "$vga_intel" == true ]]; then
     msg "Intel GPU: installing iHD + i965 user-mode drivers"
 fi
 if [[ "$vga_amd" == true ]]; then
-    packages+=(libva-mesa-driver mesa-vdpau vulkan-radeon)
+    # Modern Arch mesa ships Radeon VA-API (radeonsi) directly; mesa-vdpau was removed.
+    packages+=(mesa vulkan-radeon)
     driver="radeonsi"
-    msg "AMD GPU: installing mesa VA-API/VDPAU"
+    msg "AMD GPU: installing mesa VA-API + vulkan-radeon"
 fi
 if [[ "$vga_nvidia" == true ]]; then
-    packages+=(libva-nvidia-driver libvdpau)
+    packages+=(libva-nvidia-driver)
     if [[ "$(count_vendors)" -eq 1 ]]; then
         driver="nvidia"
     fi
     msg "NVIDIA GPU: installing libva-nvidia-driver"
-    warn "Firefox VA-API on proprietary NVIDIA is still flaky."
+    warn "Firefox VA-API on proprietary NVIDIA may require media.ffmpeg.vaapi.enabled."
 fi
 
 pacman -Syu --noconfirm --needed "${packages[@]}"

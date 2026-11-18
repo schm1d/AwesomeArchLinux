@@ -30,11 +30,12 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
@@ -57,7 +58,8 @@ HTTPS_PORT=443
 DRY_RUN=false
 SKIP_CERTBOT=false
 NGINX_CONF="/etc/nginx/nginx.conf"
-SECURITY_CONF="/etc/nginx/conf.d/security-headers.conf"
+SECURITY_CONF="/etc/nginx/snippets/security-headers.conf"
+LEGACY_SECURITY_CONF="/etc/nginx/conf.d/security-headers.conf"
 SSL_CONF="/etc/nginx/conf.d/ssl-hardening.conf"
 LOGFILE="/var/log/nginx-hardening-$(date +%Y%m%d-%H%M%S).log"
 
@@ -105,12 +107,18 @@ done
 [[ ${#DOMAINS[@]} -gt 0 ]] || err "At least one domain is required (-d example.com)"
 [[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && (( HTTPS_PORT >= 1 && HTTPS_PORT <= 65535 )) || \
     err "HTTPS port must be between 1 and 65535"
+(( HTTPS_PORT != 80 )) || \
+    err "HTTPS port cannot be 80 (conflicts with the port-80 HTTP redirect and ACME challenge server)"
 
 declare -A SEEN_DOMAINS=()
 declare -a NORMALIZED_DOMAINS=()
 for domain in "${DOMAINS[@]}"; do
     domain="${domain,,}"
-    aal_valid_hostname "$domain" || err "Invalid domain name: $domain"
+    if [[ "$SKIP_CERTBOT" == false ]]; then
+        aal_valid_fqdn "$domain" || err "Invalid domain name (FQDN required): $domain"
+    else
+        aal_valid_hostname "$domain" || err "Invalid domain name: $domain"
+    fi
     if [[ -z "${SEEN_DOMAINS[$domain]:-}" ]]; then
         NORMALIZED_DOMAINS+=("$domain")
         SEEN_DOMAINS["$domain"]=1
@@ -134,7 +142,16 @@ PRIMARY_DOMAIN="${DOMAINS[0]}"
 EMAIL="${EMAIL:-webmaster@$PRIMARY_DOMAIN}"
 aal_valid_email "$EMAIL" || err "Invalid certificate notification email: $EMAIL"
 
+if (( HTTPS_PORT == 443 )); then
+    HTTPS_REDIRECT_AUTHORITY='$host'
+    HTTPS_URL_PORT=""
+else
+    HTTPS_REDIRECT_AUTHORITY="\$host:${HTTPS_PORT}"
+    HTTPS_URL_PORT=":${HTTPS_PORT}"
+fi
+
 # Redirect output to logfile as well
+install -o root -g root -m 0600 /dev/null "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "Primary domain: $PRIMARY_DOMAIN"
@@ -153,7 +170,7 @@ msg "Installing nginx-mainline and certbot..."
 pacman -Syu --noconfirm --needed nginx-mainline certbot certbot-nginx openssl
 
 # Verify nginx version supports TLS 1.3
-NGINX_VER=$(nginx -v 2>&1 | grep -oP '[\d.]+')
+NGINX_VER=$(nginx -v 2>&1 | grep -oP '[\d.]+' | head -n 1 || true)
 info "nginx version: $NGINX_VER"
 
 # =============================================================================
@@ -172,10 +189,12 @@ fi
 chown -R http:http "$WEBROOT"
 chmod -R o+rX "$WEBROOT"
 
-mkdir -p /var/log/nginx
-mkdir -p /var/cache/nginx/client_temp
-mkdir -p /etc/nginx/conf.d
-mkdir -p /etc/nginx/sites-enabled
+install -d -o http -g http -m 0750 /var/log/nginx
+install -d -o root -g root -m 0755 /var/cache/nginx
+for cache_subdir in client_temp proxy_temp fastcgi_temp uwsgi_temp scgi_temp; do
+    install -d -o http -g root -m 0700 "/var/cache/nginx/$cache_subdir"
+done
+install -d -o root -g root -m 0755 /etc/nginx /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/snippets
 
 # =============================================================================
 # 3. WRITE PRE-CERTIFICATE NGINX CONFIG (for ACME challenge)
@@ -263,10 +282,40 @@ server {
 
     # Redirect everything else to HTTPS
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://${HTTPS_REDIRECT_AUTHORITY}\$request_uri;
     }
 }
 EOF
+
+# Remove any legacy http-level security-headers.conf so plain HTTP never emits HSTS
+rm -f -- "$LEGACY_SECURITY_CONF"
+
+# If ssl-hardening.conf remains from a prior run whose referenced cert/key files
+# no longer exist on disk, remove it before testing/starting the ACME server so
+# Step 3 does not deadlock before Step 4 Certbot runs.
+if [[ -f "$SSL_CONF" ]]; then
+    SSL_REFS_MISSING=false
+    while IFS= read -r ssl_ref_path; do
+        [[ -n "$ssl_ref_path" ]] || continue
+        if [[ ! -f "$ssl_ref_path" ]]; then
+            SSL_REFS_MISSING=true
+            break
+        fi
+    done < <(awk '
+        /^[[:space:]]*ssl_(trusted_)?certificate(_key)?[[:space:]]+/ {
+            line = $0
+            sub(/^[[:space:]]*ssl_(trusted_)?certificate(_key)?[[:space:]]+/, "", line)
+            sub(/[[:space:]]*;.*$/, "", line)
+            gsub(/^["'\'']|["'\'']$/, "", line)
+            print line
+        }
+    ' "$SSL_CONF")
+    if [[ "$SSL_REFS_MISSING" == true ]]; then
+        warn "Removing stale $SSL_CONF (referenced certificate/key missing on disk)"
+        rm -f -- "$SSL_CONF"
+    fi
+    unset SSL_REFS_MISSING ssl_ref_path
+fi
 
 # Test and start nginx
 nginx -t || err "nginx config test failed"
@@ -309,6 +358,7 @@ EOF
     cat > /usr/local/bin/awesome-nginx-iptables <<'NGINX_IPTABLES'
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 CONFIG=${AAL_NGINX_FIREWALL_CONFIG:-/etc/default/awesome-nginx-firewall}
 IPTABLES_BIN=${AAL_IPTABLES_BIN:-iptables}
@@ -401,6 +451,7 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 0644 /etc/systemd/system/awesome-nginx-firewall.service
     systemctl daemon-reload
     /usr/local/bin/awesome-nginx-iptables start
     systemctl enable awesome-nginx-firewall.service
@@ -413,13 +464,18 @@ fi
 # 4. OBTAIN CERTIFICATES
 # =============================================================================
 
+CERT_DIR="/etc/letsencrypt/live/$PRIMARY_DOMAIN"
+
 if [[ "$SKIP_CERTBOT" == false ]]; then
     msg "Obtaining Let's Encrypt certificates..."
 
     CERTBOT_ARGS=(
         certonly
+        --non-interactive
         --webroot
         -w "$WEBROOT"
+        --cert-name "$PRIMARY_DOMAIN"
+        --expand
         --email "$EMAIL"
         --agree-tos
         --no-eff-email
@@ -432,8 +488,14 @@ if [[ "$SKIP_CERTBOT" == false ]]; then
     done
 
     if [[ "$DRY_RUN" == true ]]; then
-        CERTBOT_ARGS+=(--staging)
+        CERTBOT_ARGS+=(--staging --keep-until-expiring)
         warn "Using Let's Encrypt STAGING server (certificates will NOT be trusted)"
+    elif [[ -f "$CERT_DIR/cert.pem" ]] && \
+         openssl x509 -in "$CERT_DIR/cert.pem" -noout -issuer 2>/dev/null | grep -qiE 'Staging|Fake LE'; then
+        CERTBOT_ARGS+=(--force-renewal)
+        info "Existing staging certificate detected in $CERT_DIR; forcing production renewal"
+    else
+        CERTBOT_ARGS+=(--keep-until-expiring)
     fi
 
     certbot "${CERTBOT_ARGS[@]}"
@@ -442,7 +504,6 @@ else
 fi
 
 # Verify certificate exists
-CERT_DIR="/etc/letsencrypt/live/$PRIMARY_DOMAIN"
 if [[ ! -d "$CERT_DIR" ]]; then
     err "Certificate directory not found: $CERT_DIR. Run without --skip-certbot first."
 fi
@@ -593,7 +654,7 @@ server {
     }
 
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://${HTTPS_REDIRECT_AUTHORITY}\$request_uri;
     }
 }
 
@@ -610,6 +671,9 @@ server {
     # --- SSL (from ssl-hardening.conf) ---
     # Certificates and TLS settings are loaded via conf.d/ssl-hardening.conf
 
+    # --- Security headers (HTTPS only — avoids emitting HSTS over plain HTTP) ---
+    include /etc/nginx/snippets/security-headers.conf;
+
     # --- Locations ---
     location / {
         try_files \$uri \$uri/ =404;
@@ -622,7 +686,7 @@ server {
     }
 
     # Block access to sensitive files
-    location ~* \.(engine|inc|info|install|make|module|profile|test|po|sh|sql|theme|tpl(\.php)?|xtmpl)\$|^(Entries.*|Repository|Root|Tag|Template|composer\.(json|lock))\$|^\# {
+    location ~* \.(engine|inc|info|install|make|module|profile|test|po|sh|sql|theme|tpl(\.php)?|xtmpl)\$|(?:^|/)(Entries.*|Repository|Root|Tag|Template|composer\.(json|lock))\$|(?:^|/)\# {
         deny all;
         return 404;
     }
@@ -674,6 +738,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+chmod 0644 /etc/systemd/system/certbot-renew.service /etc/systemd/system/certbot-renew.timer
 systemctl daemon-reload
 systemctl enable certbot-renew.timer
 systemctl start certbot-renew.timer
@@ -684,7 +749,7 @@ systemctl start certbot-renew.timer
 
 msg "Hardening nginx systemd service..."
 
-mkdir -p /etc/systemd/system/nginx.service.d/
+install -d -o root -g root -m 0755 /etc/systemd/system/nginx.service.d
 cat > /etc/systemd/system/nginx.service.d/hardening.conf <<'EOF'
 [Service]
 # Filesystem protection
@@ -701,9 +766,9 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 
-# Capabilities — nginx needs to bind to privileged ports
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Capabilities — master binds privileged ports, manages temp/log files, signals http workers, and drops to http
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_SETUID CAP_SETGID CAP_KILL
 
 # System call filtering
 SystemCallFilter=@system-service @network-io
@@ -731,6 +796,7 @@ LimitNPROC=4096
 Restart=on-failure
 RestartSec=5s
 EOF
+chmod 0644 /etc/systemd/system/nginx.service.d/hardening.conf
 
 systemctl daemon-reload
 
@@ -740,14 +806,12 @@ systemctl daemon-reload
 
 msg "Applying additional hardening..."
 
-# Restrict config file permissions
-chmod 640 /etc/nginx/nginx.conf
-chown root:http /etc/nginx/nginx.conf
-chmod 640 "$SSL_CONF"
-chmod 640 "$SECURITY_CONF"
+# Restrict config file permissions while keeping snippets readable by http
+chown root:http "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" /etc/nginx/sites-enabled/default.conf
+chmod 0640 "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" /etc/nginx/sites-enabled/default.conf
 
 # Ensure log directory permissions
-chmod 750 /var/log/nginx
+chmod 0750 /var/log/nginx
 chown http:http /var/log/nginx
 
 # Remove default nginx welcome page if it exists
@@ -769,17 +833,22 @@ if [[ ! -f "$WEBROOT/index.html" ]]; then
 </html>
 HTML
     chown http:http "$WEBROOT/index.html"
+    chmod 0644 "$WEBROOT/index.html"
 fi
 
 # =============================================================================
-# 11. VALIDATE AND RELOAD
+# 11. VALIDATE AND RESTART
 # =============================================================================
 
 msg "Testing nginx configuration..."
 if nginx -t; then
     msg "Configuration test passed"
-    systemctl reload nginx
-    msg "nginx reloaded successfully"
+    systemctl restart nginx
+    if systemctl is-active --quiet nginx; then
+        msg "nginx restarted and running cleanly under hardened systemd unit"
+    else
+        err "nginx failed to stay active after restart! Check: journalctl -u nginx -e"
+    fi
 else
     err "nginx configuration test failed! Check $LOGFILE"
 fi
@@ -811,12 +880,12 @@ echo "  - OCSP stapling disabled (Let's Encrypt ended OCSP in 2025)"
 echo
 echo -e "${C_BLUE}Security Headers:${C_NC}"
 echo "  - Strict-Transport-Security (HSTS, 2yr, preload)"
-echo "  - Content-Security-Policy (strict baseline)"
+echo "  - Content-Security-Policy (practical baseline)"
 echo "  - Permissions-Policy (all APIs denied by default)"
 echo "  - Referrer-Policy (strict-origin-when-cross-origin)"
 echo "  - X-Content-Type-Options (nosniff)"
 echo "  - X-Frame-Options (SAMEORIGIN)"
-echo "  - Cross-Origin-Embedder-Policy (require-corp)"
+echo "  - Cross-Origin-Embedder-Policy (unsafe-none)"
 echo "  - Cross-Origin-Opener-Policy (same-origin)"
 echo "  - Cross-Origin-Resource-Policy (same-origin)"
 echo "  - X-Permitted-Cross-Domain-Policies (none)"
@@ -828,7 +897,7 @@ echo "  2. If your app loads third-party resources (CDN, APIs),"
 echo "     adjust CSP, COEP, and CORP headers accordingly."
 echo "  3. Test your site at:"
 echo "     https://www.ssllabs.com/ssltest/analyze.html?d=$PRIMARY_DOMAIN"
-echo "     https://securityheaders.com/?q=https://$PRIMARY_DOMAIN"
+echo "     https://securityheaders.com/?q=https://${PRIMARY_DOMAIN}${HTTPS_URL_PORT}"
 echo "  4. Submit for HSTS preload (after confirming everything works):"
 echo "     https://hstspreload.org/?domain=$PRIMARY_DOMAIN"
 echo "  5. Certificate auto-renewal is active via systemd timer."

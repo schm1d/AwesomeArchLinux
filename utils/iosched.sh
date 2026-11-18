@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+umask 022
+
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
 readonly C_GREEN='\033[1;32m'
@@ -23,6 +25,7 @@ warn() { printf "%b[!]%b %s\n" "$C_YELLOW" "$C_NC" "$1"; }
 err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 
 RULE="/etc/udev/rules.d/60-awesome-ioschedulers.rules"
+BFQ_MOD="/etc/modules-load.d/60-awesome-bfq.conf"
 DO_STATUS=false
 DO_REMOVE=false
 
@@ -51,23 +54,41 @@ show_status() {
         printf "  %-16s rotational=%s  %s\n" "$(basename "$(dirname "$(dirname "$dev")")")" "$rot" "$sched"
     done
     echo
-    [[ -f "$RULE" ]] && info "Rule installed at $RULE" || info "No $RULE"
+    if [[ -f "$RULE" ]]; then
+        info "Rule installed at $RULE"
+    else
+        info "No $RULE"
+    fi
 }
 
 if [[ "$DO_STATUS" == true ]]; then show_status; exit 0; fi
-if [[ "$DO_REMOVE" == true ]]; then rm -f "$RULE"; msg "Removed $RULE"; show_status; exit 0; fi
+if [[ "$DO_REMOVE" == true ]]; then
+    rm -f "$RULE" "$BFQ_MOD"
+    udevadm control --reload 2>/dev/null || true
+    msg "Removed $RULE"
+    show_status
+    exit 0
+fi
 
-mkdir -p /etc/udev/rules.d
+# Ensure bfq module is available when rotational disks or MMC devices are present
+if grep -qx '1' /sys/block/*/queue/rotational 2>/dev/null || compgen -G '/sys/block/mmcblk*' >/dev/null; then
+    install -d -m 0755 /etc/modules-load.d
+    printf '%s\n' 'bfq' > "$BFQ_MOD"
+    chmod 0644 "$BFQ_MOD"
+    modprobe -q bfq 2>/dev/null || true
+fi
+
+install -d -m 0755 /etc/udev/rules.d
 cat > "$RULE" <<'EOF'
-# AwesomeArchLinux I/O scheduler policy (whole devices only).
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]|vd[a-z]|xvd[a-z]|hd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]|vd[a-z]|xvd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", ATTR{queue/scheduler}="bfq"
+# AwesomeArchLinux I/O scheduler policy (whole disk devices only).
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", TEST=="queue/scheduler", KERNEL=="sd*|vd*|xvd*|hd*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", TEST=="queue/scheduler", KERNEL=="sd*|vd*|xvd*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", TEST=="queue/scheduler", KERNEL=="nvme*n*", ATTR{queue/scheduler}="none"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", TEST=="queue/scheduler", KERNEL=="mmcblk*", ATTR{queue/scheduler}="bfq"
 EOF
 chmod 644 "$RULE"
 msg "Wrote $RULE"
 udevadm control --reload
-udevadm trigger --subsystem-match=block --action=change
+udevadm trigger --subsystem-match=block --property-match=DEVTYPE=disk --action=change
 msg "Reloaded udev and triggered block devices"
 show_status

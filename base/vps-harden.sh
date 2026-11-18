@@ -22,6 +22,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 IFS=$'\n\t'
 
 # --- Colors ---
@@ -43,10 +44,17 @@ err()  { printf "%b[!]%b %s\n" "$C_ERR"   "$C_NC" "$1" >&2; exit 1; }
 
 # --- Logging ---
 LOGFILE="/var/log/vps-harden-$(date +%Y%m%d-%H%M%S).log"
-exec > >(tee -a "$LOGFILE") 2>&1
+
+setup_logging() {
+    install -d -m 0755 /var/log
+    install -m 0600 /dev/null "$LOGFILE"
+    exec > >(tee -a "$LOGFILE") 2>&1
+}
 
 log_action() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOGFILE"
+    if [[ -w "$LOGFILE" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOGFILE"
+    fi
 }
 
 # --- Defaults ---
@@ -56,6 +64,8 @@ VAR_LOOP_SIZE=10            # /var loop image size in GB
 USERNAME=""                 # interactive or -u flag
 NEW_HOSTNAME=""             # interactive or -H flag
 SSH_PORT=22
+SSH_PUBKEY=""
+ALLOW_NO_SSH_KEY=false
 SKIP_VAR=false
 SKIP_SW=false
 DRY_RUN=false
@@ -65,6 +75,7 @@ ROLLBACK_SCRIPT="/root/undo-vps-harden.sh"
 VAR_MIGRATION_GUIDE="/root/MIGRATE_VAR_OFFLINE.txt"
 FSTAB_BACKUP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAW_BASE_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main"
 
 # State tracking
 VAR_STRATEGY="skip"        # partition | volume | loop | skip
@@ -89,6 +100,32 @@ ask_yes_no() {
     done
 }
 
+validate_username() {
+    local user="$1"
+    [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#user} -le 32 ]] && [[ "$user" != "root" ]]
+}
+
+validate_hostname() {
+    local host="$1"
+    [[ "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] && [[ ${#host} -le 64 ]]
+}
+
+validate_ssh_port() {
+    local port="$1"
+    [[ "$port" =~ ^[1-9][0-9]*$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+validate_ssh_pubkey() {
+    local key="$1"
+    if [[ -z "$key" ]]; then
+        return 0
+    fi
+    if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>\"\'\\] ]] || [[ "$key" == *$'\n'* ]] || [[ "$key" == *$'\r'* ]]; then
+        return 1
+    fi
+    [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]
+}
+
 # --- Usage ---
 usage() {
     cat <<EOF
@@ -101,9 +138,14 @@ Options:
   -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
               or 25 when the root disk is at least 1 TB)
   -v SIZE     /var loop image size in GB, if using loop device (default: $VAR_LOOP_SIZE)
-  -u USER     Username for vps-chroot.sh (prompted if not given)
+  -u USER     Non-root username for vps-chroot.sh (prompted if not given)
   -H HOST     Hostname to set (prompted if not given)
   -p PORT     SSH port for vps-chroot.sh (default: $SSH_PORT)
+  --ssh-key KEY
+              SSH public key to install for USER
+  -k, --allow-no-ssh-key
+              Allow disabling SSH password auth without an authorized_keys entry
+              (ONLY if you have verified out-of-band VPS console access)
   --skip-var  Skip storage preparation for offline /var migration
   --skip-sw   Skip software hardening (only do filesystem mounts)
   --sysctl-profile PROFILE
@@ -111,13 +153,13 @@ Options:
   --disable-ipv6
               Install the explicit IPv6-disable sysctl overlay
   --dry-run   Show planned changes without executing
-  -h          Show this help
+  -h, --help  Show this help
 
 Examples:
   sudo $0                                # Full hardening (interactive prompts)
   sudo $0 --dry-run                      # Preview changes
   sudo $0 --skip-var --skip-sw           # Only tmpfs/shm/proc/var-tmp
-  sudo $0 -u admin -H myvps -p 2222     # Non-interactive with all values
+  sudo $0 -u admin -H myvps -p 2222      # Non-interactive host/user/port flags
 EOF
     exit 0
 }
@@ -132,33 +174,50 @@ parse_args() {
             -t)
                 [[ $# -ge 2 ]] || err "-t requires a size in GB"
                 TMP_SIZE="$2"
-                if ! [[ "$TMP_SIZE" =~ ^[0-9]+$ ]] || [[ "$TMP_SIZE" -lt "$DEFAULT_TMP_SIZE_GB" ]]; then
+                if ! [[ "$TMP_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 10#$TMP_SIZE < DEFAULT_TMP_SIZE_GB )); then
                     err "Invalid tmpfs size: $TMP_SIZE (minimum ${DEFAULT_TMP_SIZE_GB} GB)"
                 fi
                 TMP_SIZE_EXPLICIT=true
                 shift 2
                 ;;
             -v)
+                [[ $# -ge 2 ]] || err "-v requires a size in GB"
                 VAR_LOOP_SIZE="$2"
-                if ! [[ "$VAR_LOOP_SIZE" =~ ^[0-9]+$ ]] || [[ "$VAR_LOOP_SIZE" -lt 5 ]]; then
+                if ! [[ "$VAR_LOOP_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 10#$VAR_LOOP_SIZE < 5 )); then
                     err "Invalid /var size: $VAR_LOOP_SIZE (minimum 5 GB)"
                 fi
                 shift 2
                 ;;
             -u)
+                [[ $# -ge 2 ]] || err "-u requires a username"
                 USERNAME="$2"
+                validate_username "$USERNAME" ||
+                    err "Invalid username '$USERNAME'. Must be non-root, begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
                 shift 2
                 ;;
             -H)
+                [[ $# -ge 2 ]] || err "-H requires a hostname"
                 NEW_HOSTNAME="$2"
+                validate_hostname "$NEW_HOSTNAME" ||
+                    err "Invalid hostname '$NEW_HOSTNAME'. Must begin with alphanumeric, contain only [a-zA-Z0-9.-], max 64 chars."
                 shift 2
                 ;;
             -p)
+                [[ $# -ge 2 ]] || err "-p requires an SSH port"
                 SSH_PORT="$2"
-                if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [[ "$SSH_PORT" -lt 1 ]] || [[ "$SSH_PORT" -gt 65535 ]]; then
-                    err "Invalid SSH port: $SSH_PORT"
-                fi
+                validate_ssh_port "$SSH_PORT" || err "Invalid SSH port: $SSH_PORT (must be 1-65535)"
                 shift 2
+                ;;
+            --ssh-key)
+                [[ $# -ge 2 ]] || err "--ssh-key requires an SSH public key value"
+                SSH_PUBKEY="${2%$'\r'}"
+                [[ -n "$SSH_PUBKEY" ]] && validate_ssh_pubkey "$SSH_PUBKEY" ||
+                    err "Invalid SSH public key supplied to --ssh-key"
+                shift 2
+                ;;
+            -k|--allow-no-ssh-key)
+                ALLOW_NO_SSH_KEY=true
+                shift
                 ;;
             --skip-var) SKIP_VAR=true; shift ;;
             --skip-sw)  SKIP_SW=true; shift ;;
@@ -190,6 +249,8 @@ preflight_checks() {
     if [[ $(id -u) -ne 0 ]]; then
         err "This script must be run as root"
     fi
+
+    setup_logging
 
     # Must be Arch Linux
     if [[ ! -f /etc/arch-release ]]; then
@@ -225,20 +286,32 @@ preflight_checks() {
 detect_disk_layout() {
     info "Detecting disk layout..."
 
-    # Find root device and parent disk
+    # Find root device and resolve parent disk via kernel block hierarchy (PKNAME)
     ROOT_DEVICE=$(findmnt -n -o SOURCE /)
     info "Root device: $ROOT_DEVICE"
 
-    # Resolve to parent disk (strip partition number)
-    if [[ "$ROOT_DEVICE" =~ ^/dev/([a-z]+)[0-9]+$ ]]; then
-        PARENT_DISK="/dev/${BASH_REMATCH[1]}"
-    elif [[ "$ROOT_DEVICE" =~ ^/dev/(nvme[0-9]+n[0-9]+)p[0-9]+$ ]]; then
-        PARENT_DISK="/dev/${BASH_REMATCH[1]}"
-    elif [[ "$ROOT_DEVICE" =~ ^/dev/(vd[a-z]+)[0-9]+$ ]]; then
-        PARENT_DISK="/dev/${BASH_REMATCH[1]}"
-    else
-        PARENT_DISK="$ROOT_DEVICE"
-        warn "Could not determine parent disk from $ROOT_DEVICE"
+    local resolved_root cur parent
+    resolved_root=$(readlink -f -- "$ROOT_DEVICE" 2>/dev/null || printf '%s' "$ROOT_DEVICE")
+    cur="$resolved_root"
+    PARENT_DISK=""
+    while parent=$(lsblk -ndo PKNAME "$cur" 2>/dev/null | head -n1 | tr -d '[:space:]') &&
+          [[ -n "$parent" && -b "/dev/$parent" ]]; do
+        cur="/dev/$parent"
+        if [[ "$(lsblk -ndo TYPE "$cur" 2>/dev/null)" == "disk" ]]; then
+            PARENT_DISK="$cur"
+            break
+        fi
+    done
+
+    if [[ -z "$PARENT_DISK" ]]; then
+        if [[ "$resolved_root" =~ ^(/dev/(nvme[0-9]+n[0-9]+|mmcblk[0-9]+|loop[0-9]+))p[0-9]+$ ]]; then
+            PARENT_DISK="${BASH_REMATCH[1]}"
+        elif [[ "$resolved_root" =~ ^(/dev/[a-zA-Z]+)[0-9]+$ ]]; then
+            PARENT_DISK="${BASH_REMATCH[1]}"
+        else
+            PARENT_DISK="$resolved_root"
+            warn "Could not determine parent disk from $ROOT_DEVICE"
+        fi
     fi
     info "Parent disk: $PARENT_DISK"
 
@@ -511,9 +584,9 @@ harden_tmp() {
                 mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
                 return 0
             }
-            cp -a /tmp/. "$tmp_backup/" 2>/dev/null || true
+            rsync -aHAX --exclude='lost+found' /tmp/ "$tmp_backup/" 2>/dev/null || true
             mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
-            cp -a "$tmp_backup/." /tmp/ 2>/dev/null || true
+            rsync -aHAX --exclude='lost+found' "$tmp_backup/" /tmp/ 2>/dev/null || true
             rm -rf "$tmp_backup"
         }
     else
@@ -623,9 +696,9 @@ harden_var_tmp() {
 
     # Clear /var/tmp and bind mount
     if ! findmnt -n /var/tmp &>/dev/null; then
-        # Move any existing files to /tmp
-        if [[ -d /var/tmp ]] && [[ "$(ls -A /var/tmp 2>/dev/null)" ]]; then
-            cp -a /var/tmp/. /tmp/ 2>/dev/null || true
+        # Move any existing files to /tmp (excluding ext4 lost+found)
+        if [[ -d /var/tmp ]] && [[ -n "$(find /var/tmp -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit 2>/dev/null)" ]]; then
+            rsync -aHAX --exclude='lost+found' /var/tmp/ /tmp/ 2>/dev/null || true
         fi
         mount --bind /tmp /var/tmp
     fi
@@ -675,12 +748,19 @@ choose_var_strategy() {
     fi
 
     # Option 2: Check for free unpartitioned space on root disk
-    local free_space_sectors
-    free_space_sectors=$(sfdisk -F "$PARENT_DISK" 2>/dev/null | grep -oP '\d+ bytes' | head -1 | awk '{print $1}')
+    local free_space_bytes
+    free_space_bytes=$(LC_ALL=C sfdisk -F "$PARENT_DISK" 2>/dev/null | awk '
+        match($0, /[0-9]+ bytes/) {
+            s = substr($0, RSTART, RLENGTH)
+            sub(/ bytes$/, "", s)
+            print s
+            exit
+        }
+    ' || true)
     local min_bytes=$((VAR_LOOP_SIZE * 1073741824))  # GB to bytes
 
-    if [[ -n "${free_space_sectors:-}" ]] && [[ "$free_space_sectors" -gt "$min_bytes" ]]; then
-        local free_gb=$((free_space_sectors / 1073741824))
+    if [[ "${free_space_bytes:-}" =~ ^[0-9]+$ ]] && (( free_space_bytes > min_bytes )); then
+        local free_gb=$((free_space_bytes / 1073741824))
         echo
         info "Found ${free_gb}G free space on $PARENT_DISK"
         if ask_yes_no "Create a new partition for /var?"; then
@@ -933,55 +1013,100 @@ prompt_user_config() {
     echo -e "${C_INFO}User configuration for software hardening:${C_NC}"
     echo
 
-    # Prompt for username if not provided via -u
+    # Prompt for username if not provided via -u, and always validate
     if [[ -z "$USERNAME" ]]; then
         local default_user
-        default_user=$(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
+        default_user=$(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1 || true)
 
         while true; do
-            if [[ -n "$default_user" ]]; then
+            if [[ -n "$default_user" ]] && validate_username "$default_user"; then
                 read -r -p "Username [${default_user}]: " USERNAME
                 USERNAME="${USERNAME:-$default_user}"
             else
                 read -r -p "Username: " USERNAME
             fi
-            if [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#USERNAME} -le 32 ]]; then
+            USERNAME="${USERNAME%$'\r'}"
+            if validate_username "$USERNAME"; then
                 break
             else
-                warn "Invalid username. Must begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
+                warn "Invalid username. Must be non-root, begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
             fi
         done
+    else
+        validate_username "$USERNAME" ||
+            err "Invalid username '$USERNAME'. Must be non-root, begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
     fi
 
-    # Prompt for hostname if not provided via -H
+    # Prompt for hostname if not provided via -H, and always validate
     if [[ -z "$NEW_HOSTNAME" ]]; then
         local current_host
-        current_host=$(cat /etc/hostname 2>/dev/null || echo "archlinux")
+        current_host=$(cat /etc/hostname 2>/dev/null | tr -d '\r\n' || echo "archlinux")
+        [[ -n "$current_host" ]] || current_host="archlinux"
 
         while true; do
             read -r -p "Hostname [${current_host}]: " NEW_HOSTNAME
             NEW_HOSTNAME="${NEW_HOSTNAME:-$current_host}"
-            if [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] && [[ ${#NEW_HOSTNAME} -le 64 ]]; then
+            NEW_HOSTNAME="${NEW_HOSTNAME%$'\r'}"
+            if validate_hostname "$NEW_HOSTNAME"; then
                 break
             else
                 warn "Invalid hostname. Must begin with alphanumeric, contain only [a-zA-Z0-9.-], max 64 chars."
             fi
         done
+    else
+        validate_hostname "$NEW_HOSTNAME" ||
+            err "Invalid hostname '$NEW_HOSTNAME'. Must begin with alphanumeric, contain only [a-zA-Z0-9.-], max 64 chars."
     fi
 
-    # Prompt for SSH public key
-    echo -e "\n${C_WARN}Password authentication will be disabled after hardening.${C_NC}"
-    echo -e "${C_WARN}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${C_NC}"
-    read -r SSH_PUBKEY
-    if [[ -z "$SSH_PUBKEY" ]]; then
-        warn "No SSH public key provided — add one manually before disconnecting."
+    validate_ssh_port "$SSH_PORT" || err "Invalid SSH port: $SSH_PORT (must be 1-65535)"
+
+    local existing_auth_keys="/home/$USERNAME/.ssh/authorized_keys"
+    local has_existing_keys=false
+    if [[ -s "$existing_auth_keys" ]]; then
+        has_existing_keys=true
+    fi
+
+    # Validate or prompt for SSH public key (critical: password auth will be disabled)
+    if [[ -n "$SSH_PUBKEY" ]]; then
+        validate_ssh_pubkey "$SSH_PUBKEY" || err "Invalid SSH public key."
+    else
+        echo -e "\n${C_WARN}Password authentication and root SSH login will be disabled after hardening.${C_NC}"
+        if [[ "$has_existing_keys" == true ]]; then
+            info "Existing non-empty $existing_auth_keys detected (press Enter to keep existing keys, or paste an additional key)."
+        fi
+        while true; do
+            echo -e "${C_WARN}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${C_NC}"
+            read -r SSH_PUBKEY
+            SSH_PUBKEY="${SSH_PUBKEY%$'\r'}"
+            if [[ -z "$SSH_PUBKEY" ]]; then
+                if [[ "$has_existing_keys" == true || "$ALLOW_NO_SSH_KEY" == true ]]; then
+                    break
+                fi
+                warn "No SSH public key provided and $existing_auth_keys is missing or empty!"
+                if ask_yes_no "Confirm out-of-band VPS console access and proceed WITHOUT an SSH key?"; then
+                    ALLOW_NO_SSH_KEY=true
+                    break
+                fi
+                continue
+            fi
+            if validate_ssh_pubkey "$SSH_PUBKEY"; then
+                break
+            fi
+            warn "Invalid SSH public key. Must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-, sk-ssh-, or sk-ecdsa- and contain no shell metacharacters."
+        done
     fi
 
     echo
     info "Username:  $USERNAME"
     info "Hostname:  $NEW_HOSTNAME"
     info "SSH port:  $SSH_PORT"
-    info "SSH key:   ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}"
+    if [[ -n "$SSH_PUBKEY" ]]; then
+        info "SSH key:   (provided)"
+    elif [[ "$has_existing_keys" == true ]]; then
+        info "SSH key:   (preserving existing $existing_auth_keys)"
+    else
+        info "SSH key:   (none — console-only access confirmed)"
+    fi
     echo
 }
 
@@ -993,17 +1118,21 @@ create_install_env() {
         return 0
     fi
 
-    cat > /root/.install-env <<EOF
-export INSTALL_DISK="$PARENT_DISK"
-export INSTALL_USER="$USERNAME"
-export INSTALL_HOST="$NEW_HOSTNAME"
-export INSTALL_DATE="$(date)"
-export INSTALL_TYPE="vps-harden"
-export INSTALL_SSH_PORT="$SSH_PORT"
-export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
-export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
-export INSTALL_DISABLE_IPV6="$SYSCTL_DISABLE_IPV6"
-EOF
+    local install_date
+    install_date="$(date)"
+    {
+        printf 'export %s=%q\n' \
+            INSTALL_DISK "$PARENT_DISK" \
+            INSTALL_USER "$USERNAME" \
+            INSTALL_HOST "$NEW_HOSTNAME" \
+            INSTALL_DATE "$install_date" \
+            INSTALL_TYPE "vps-harden" \
+            INSTALL_SSH_PORT "$SSH_PORT" \
+            INSTALL_SSH_PUBKEY "$SSH_PUBKEY" \
+            INSTALL_ALLOW_NO_SSH_KEY "$ALLOW_NO_SSH_KEY" \
+            INSTALL_SYSCTL_PROFILE "$SYSCTL_PROFILE" \
+            INSTALL_DISABLE_IPV6 "$SYSCTL_DISABLE_IPV6"
+    } > /root/.install-env
     chmod 600 /root/.install-env
     msg "Created /root/.install-env (INSTALL_TYPE=vps-harden)"
 }
@@ -1023,46 +1152,87 @@ stage_ssh_components() {
                 -o "$ssh_target" || err "Could not fetch required SSH component: $ssh_component"
             chmod 0644 "$ssh_target"
         fi
+        [[ -s "$ssh_target" ]] || err "Empty SSH component: $ssh_component"
         bash -n "$ssh_target" || err "Invalid SSH component: $ssh_component"
     done
     chmod 0755 "${target_root%/}/ssh.sh"
+}
+
+stage_repo_component() {
+    local local_rel="$1" remote_rel="$2" dest="$3" mode="$4" verify_bash="${5:-false}"
+    local src="$SCRIPT_DIR/$local_rel" tmp_dest
+
+    install -d -m 0755 "$(dirname "$dest")"
+    tmp_dest=$(mktemp "${dest}.XXXXXX")
+    if [[ -r "$src" ]]; then
+        cat "$src" > "$tmp_dest"
+    else
+        if ! curl -fsSL "${RAW_BASE_URL}/${remote_rel}" -o "$tmp_dest"; then
+            rm -f "$tmp_dest"
+            err "Could not fetch required component: $remote_rel"
+        fi
+    fi
+
+    if [[ ! -s "$tmp_dest" ]]; then
+        rm -f "$tmp_dest"
+        err "Staged component is empty: $remote_rel"
+    fi
+
+    if [[ "$verify_bash" == true ]] && ! bash -n "$tmp_dest"; then
+        rm -f "$tmp_dest"
+        err "Syntax validation failed for component: $remote_rel"
+    fi
+
+    chmod "$mode" "$tmp_dest"
+    mv -f -- "$tmp_dest" "$dest"
 }
 
 run_software_hardening() {
     info "Running software hardening via vps-chroot.sh..."
 
     if [[ "$DRY_RUN" == true ]]; then
-        info "[DRY-RUN] Would download and run vps-chroot.sh"
+        info "[DRY-RUN] Would stage components and run vps-chroot.sh"
         return 0
     fi
 
-    local chroot_script=""
+    local chroot_script
+    chroot_script=$(mktemp /root/vps-chroot.XXXXXX.sh)
+    chmod 0700 "$chroot_script"
 
-    # Try local copy first
-    if [[ -f "$SCRIPT_DIR/vps-chroot.sh" ]]; then
-        chroot_script="$SCRIPT_DIR/vps-chroot.sh"
-        info "Using local vps-chroot.sh from $SCRIPT_DIR"
+    # Try local copy first, otherwise fetch into private /root mktemp file
+    if [[ -r "$SCRIPT_DIR/vps-chroot.sh" ]]; then
+        info "Staging local vps-chroot.sh from $SCRIPT_DIR"
+        cat "$SCRIPT_DIR/vps-chroot.sh" > "$chroot_script"
     else
-        # Download from repository
-        # Note: curl -f (--fail) ensures a non-zero exit on HTTP errors (4xx/5xx)
         info "Downloading vps-chroot.sh from repository..."
-        chroot_script="/tmp/vps-chroot.sh"
-        curl -fsSL \
-            "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-chroot.sh" \
-            -o "$chroot_script" || err "Failed to download vps-chroot.sh"
-
-        # Basic integrity checks on the downloaded script
+        if ! curl -fsSL "${RAW_BASE_URL}/base/vps-chroot.sh" -o "$chroot_script"; then
+            rm -f "$chroot_script"
+            err "Failed to download vps-chroot.sh"
+        fi
         warn "vps-chroot.sh was downloaded from a remote source — review before trusting"
-        if ! head -1 "$chroot_script" | grep -qE '^#!.*bash'; then
-            err "Downloaded vps-chroot.sh does not start with a valid bash shebang"
-        fi
-        if ! grep -q '_INSTALL_USER' "$chroot_script"; then
-            err "Downloaded vps-chroot.sh is missing expected markers (_INSTALL_USER) — file may be corrupt"
-        fi
-        info "Integrity checks passed (shebang and expected markers present)"
     fi
 
-    chmod +x "$chroot_script"
+    if [[ ! -s "$chroot_script" ]] || ! head -1 "$chroot_script" | grep -qE '^#!.*bash'; then
+        rm -f "$chroot_script"
+        err "Staged vps-chroot.sh is empty or missing a valid bash shebang"
+    fi
+    if ! grep -q 'INSTALL_USER' "$chroot_script" || ! bash -n "$chroot_script"; then
+        rm -f "$chroot_script"
+        err "Staged vps-chroot.sh failed marker or syntax validation"
+    fi
+    chmod 0700 "$chroot_script"
+
+    # Stage shared chroot security library, audit rules, and post-install AUR/AIDE bundle
+    stage_repo_component "lib/chroot-security.sh" "base/lib/chroot-security.sh" \
+        "/usr/local/lib/awesomearchlinux/chroot-security.sh" 0644 true
+    stage_repo_component "../utils/auditd-attack.rules" "utils/auditd-attack.rules" \
+        "/usr/local/share/awesomearchlinux/auditd-attack.rules" 0644 false
+    stage_repo_component "install-aur-packages.sh" "base/install-aur-packages.sh" \
+        "/root/install-aur-packages.sh" 0700 true
+    stage_repo_component "../hardening/lib/aur-review.sh" "hardening/lib/aur-review.sh" \
+        "/root/aur-review.sh" 0600 true
+    stage_repo_component "../utils/aide-config.sh" "utils/aide-config.sh" \
+        "/root/aide-config.sh" 0700 true
 
     # Stage the complete sysctl bundle. vps-chroot.sh applies it immediately on
     # this live system, unlike the install-from-ISO paths which use --no-apply.
@@ -1076,19 +1246,14 @@ run_software_hardening() {
         90-awesome-strict.conf
         90-awesome-ipv6-disabled.conf
     )
-    local sysctl_file
+    local sysctl_file is_script
     install -d -m 0755 "$sysctl_stage"
     for sysctl_file in "${sysctl_files[@]}"; do
-        if [[ -f "$SCRIPT_DIR/../hardening/sysctl/$sysctl_file" ]]; then
-            install -m 0644 \
-                "$SCRIPT_DIR/../hardening/sysctl/$sysctl_file" \
-                "$sysctl_stage/$sysctl_file"
-        else
-            curl -fsSL \
-                "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/sysctl/$sysctl_file" \
-                -o "$sysctl_stage/$sysctl_file" || err "Could not fetch sysctl bundle file: $sysctl_file"
-            chmod 0644 "$sysctl_stage/$sysctl_file"
-        fi
+        is_script=false
+        [[ "$sysctl_file" == *.sh ]] && is_script=true
+        stage_repo_component "../hardening/sysctl/$sysctl_file" \
+            "hardening/sysctl/$sysctl_file" \
+            "$sysctl_stage/$sysctl_file" 0644 "$is_script"
     done
     chmod 0755 "$sysctl_stage/sysctl.sh"
 
@@ -1100,19 +1265,25 @@ run_software_hardening() {
     export _INSTALL_HOST="$NEW_HOSTNAME"
     export _INSTALL_SSH_PORT="$SSH_PORT"
     export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
+    export _INSTALL_ALLOW_NO_SSH_KEY="$ALLOW_NO_SSH_KEY"
     export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
     export _INSTALL_DISABLE_IPV6="$SYSCTL_DISABLE_IPV6"
     export _INSTALL_TYPE="vps-harden"
 
     info "Executing vps-chroot.sh (this will take several minutes)..."
-    bash "$chroot_script"
+    local chroot_rc=0
+    bash "$chroot_script" || chroot_rc=$?
 
-    # Cleanup
-    [[ "$chroot_script" == /tmp/* ]] && shred -zu "$chroot_script" 2>/dev/null || true
+    # Always clean up staged one-shot scripts
+    shred -zu "$chroot_script" 2>/dev/null || rm -f "$chroot_script"
     shred -zu /sysctl.sh 2>/dev/null || true
     shred -zu /ssh.sh 2>/dev/null || true
     shred -zu /nftables.sh 2>/dev/null || true
     rm -rf -- /sysctl-profile
+
+    if (( chroot_rc != 0 )); then
+        err "Software hardening via vps-chroot.sh exited with status $chroot_rc"
+    fi
 
     msg "Software hardening complete"
     log_action "Software hardening via vps-chroot.sh completed"

@@ -22,7 +22,7 @@ sudo ./docker.sh --compose /path/to/docker-compose.yml
 # Create and firewall an isolated network
 sudo ./docker.sh --network
 
-# Generate profiles only (no flags)
+# Verify runtime security defaults and print summary (no flags)
 sudo ./docker.sh
 ```
 
@@ -113,7 +113,7 @@ The `--compose` flag audits a `docker-compose.yml` for the following security is
 | Missing `cap_drop: [ALL]` | Drop all capabilities |
 | Using `privileged: true` | Never use privileged mode |
 | Using `network_mode: host` | Use bridge or overlay networks |
-| Binding to `0.0.0.0` | Bind to `127.0.0.1` instead |
+| Binding to `0.0.0.0`, `[::]`, or unspecified IP | Bind to `127.0.0.1:PORT:PORT` instead |
 | Missing `mem_limit` / `cpus` | Set resource limits |
 | Missing `healthcheck` | Define health checks |
 | Using `:latest` tag | Pin to specific versions |

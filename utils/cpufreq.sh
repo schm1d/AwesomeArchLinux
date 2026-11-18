@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+umask 022
+
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
 readonly C_GREEN='\033[1;32m'
@@ -36,7 +38,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --governor)     GOVERNOR="${2:-}"; [[ -n "$GOVERNOR" ]] || err "--governor needs a name"; shift 2 ;;
+        --governor)
+            [[ $# -ge 2 && -n "${2:-}" ]] || err "--governor needs a name"
+            [[ "$2" =~ ^[a-z0-9_-]+$ ]] || err "Invalid governor name: $2"
+            GOVERNOR="$2"
+            shift 2
+            ;;
         --performance)  GOVERNOR="performance"; shift ;;
         --status)       DO_STATUS=true; shift ;;
         -h|--help)      usage ;;
@@ -49,7 +56,7 @@ done
 competing_daemon() {
     local unit
     for unit in power-profiles-daemon.service tlp.service auto-cpufreq.service tuned.service; do
-        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        if systemctl is-active --quiet "$unit" 2>/dev/null || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
             printf '%s' "$unit"
             return 0
         fi
@@ -70,7 +77,7 @@ show_status() {
     echo
     local rival
     if rival=$(competing_daemon); then
-        warn "Competing scaling service is active: $rival"
+        warn "Competing scaling service is active or enabled: $rival"
     else
         info "No competing scaling daemon is active"
     fi
@@ -87,7 +94,7 @@ if [[ ! -d /sys/devices/system/cpu/cpu0/cpufreq ]]; then
 fi
 
 if rival=$(competing_daemon); then
-    err "Refusing to configure cpupower while $rival is active."
+    err "Refusing to configure cpupower while $rival is active or enabled."
 fi
 
 pacman -Syu --noconfirm --needed linux-cpupower
@@ -105,12 +112,16 @@ if [[ -n "$available" ]] && ! echo " $available " | grep -q " $GOVERNOR "; then
     warn "Falling back to '$GOVERNOR'"
 fi
 
+install -d -m 0755 /etc/default
 cat > /etc/default/cpupower <<EOF
 # Written by utils/cpufreq.sh
 governor='${GOVERNOR}'
 EOF
+chmod 0644 /etc/default/cpupower
 
 systemctl enable --now cpupower.service 2>/dev/null || warn "cpupower.service could not be enabled; applying governor live"
-command -v cpupower >/dev/null && cpupower frequency-set -g "$GOVERNOR" || warn "cpupower frequency-set failed"
+if command -v cpupower >/dev/null; then
+    cpupower frequency-set -g "$GOVERNOR" || warn "cpupower frequency-set failed"
+fi
 msg "Governor set to $GOVERNOR"
 show_status

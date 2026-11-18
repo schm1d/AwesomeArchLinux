@@ -85,7 +85,7 @@ bl_write_array_assignment() {
     local config_file="$1"
     local array_name="$2"
     local -n write_ref="$array_name"
-    local rendered quoted item
+    local rendered quoted item tmp_file
 
     rendered="${array_name}=("
     for item in "${write_ref[@]}"; do
@@ -95,10 +95,33 @@ bl_write_array_assignment() {
     rendered="${rendered% }"
     rendered+=")"
 
-    if grep -qE "^[[:space:]]*${array_name}=" "$config_file"; then
-        sed -i -E "s|^[[:space:]]*${array_name}=.*$|${rendered}|" "$config_file"
+    tmp_file=$(mktemp "${config_file}.XXXXXX")
+    if TARGET_KEY="$array_name" RENDERED="$rendered" awk '
+        BEGIN {
+            key = ENVIRON["TARGET_KEY"]
+            repl = ENVIRON["RENDERED"]
+            updated = 0
+        }
+        $0 ~ "^[[:space:]]*" key "=" {
+            if (!updated) {
+                print repl
+                updated = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print ""
+                print repl
+            }
+        }
+    ' "$config_file" > "$tmp_file"; then
+        cat "$tmp_file" > "$config_file"
+        rm -f "$tmp_file"
     else
-        printf '\n%s\n' "$rendered" >> "$config_file"
+        rm -f "$tmp_file"
+        return 1
     fi
 }
 
@@ -137,7 +160,7 @@ bl_set_hooks() {
     done
 
     # mkinitcpio.conf is a trusted shell configuration owned by root.
-    # shellcheck source=/etc/mkinitcpio.conf
+    # shellcheck disable=SC1090,SC1091
     source "$config_file"
 
     for hook in "${extra_hooks[@]}"; do
@@ -274,12 +297,40 @@ bl_set_shell_value() {
     local config_file="$1"
     local key="$2"
     local value="$3"
-    local rendered="${key}=\"${value}\""
+    local escaped_value rendered tmp_file
 
-    if grep -qE "^#?${key}=" "$config_file"; then
-        sed -i -E "s|^#?${key}=.*$|${rendered}|" "$config_file"
+    escaped_value="${value//\\/\\\\}"
+    escaped_value="${escaped_value//\"/\\\"}"
+    escaped_value="${escaped_value//\$/\\\$}"
+    escaped_value="${escaped_value//\`/\\\`}"
+    rendered="${key}=\"${escaped_value}\""
+
+    tmp_file=$(mktemp "${config_file}.XXXXXX")
+    if TARGET_KEY="$key" RENDERED="$rendered" awk '
+        BEGIN {
+            key = ENVIRON["TARGET_KEY"]
+            repl = ENVIRON["RENDERED"]
+            updated = 0
+        }
+        $0 ~ "^#?[[:space:]]*" key "=" {
+            if (!updated) {
+                print repl
+                updated = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print repl
+            }
+        }
+    ' "$config_file" > "$tmp_file"; then
+        cat "$tmp_file" > "$config_file"
+        rm -f "$tmp_file"
     else
-        printf '%s\n' "$rendered" >> "$config_file"
+        rm -f "$tmp_file"
+        return 1
     fi
 }
 
@@ -314,22 +365,37 @@ configure_grub() {
     grub-install --target=x86_64-efi --efi-directory=/efi --removable --recheck \
         || echo -e "${BYellow}Warning: fallback loader install failed; the UEFI NVRAM entry is the only boot path.${NC}"
 
+    # Allow normal boot of installed Linux entries without prompting for the
+    # GRUB menu password a second time after GRUB's LUKS unlock, while still
+    # requiring the superuser password to edit kernel parameters or open a shell.
+    if [[ -f /etc/grub.d/10_linux ]] && ! grep -q -- '--unrestricted' /etc/grub.d/10_linux; then
+        sed -i 's/CLASS="--class gnu-linux --class gnu --class os"/CLASS="--class gnu-linux --class gnu --class os --unrestricted"/' /etc/grub.d/10_linux
+    fi
+
     # Preserve the existing interactive password flow: the operator must
     # successfully create a GRUB PBKDF2 password before installation proceeds.
     set +e
     while true; do
-        local grub_tmpfile grub_pass
+        local grub_tmpfile grub_pass custom_tmp
         echo -e "${BBlue}Setting GRUB password...${NC}"
-        grub_tmpfile=$(mktemp /tmp/grubpass.XXXXXX)
+        grub_tmpfile=$(mktemp /root/.grubpass.XXXXXX)
         chmod 600 "$grub_tmpfile"
         grub-mkpasswd-pbkdf2 | tee "$grub_tmpfile"
-        grub_pass=$(awk '/grub.pbkdf2/ { print $NF; exit }' "$grub_tmpfile")
+        grub_pass=$(awk '/grub\.pbkdf2/ { print $NF; exit }' "$grub_tmpfile")
         rm -f "$grub_tmpfile"
         if [[ -n "$grub_pass" ]]; then
-            cat <<EOF >> /etc/grub.d/40_custom
+            custom_tmp=$(mktemp /etc/grub.d/.40_custom.XXXXXX)
+            awk '
+                /^set superusers="admin"$/ { next }
+                /^password_pbkdf2 admin / { next }
+                { print }
+            ' /etc/grub.d/40_custom > "$custom_tmp"
+            cat >> "$custom_tmp" <<EOF
 set superusers="admin"
 password_pbkdf2 admin $grub_pass
 EOF
+            install -o root -g root -m 0700 "$custom_tmp" /etc/grub.d/40_custom
+            rm -f "$custom_tmp"
             break
         fi
         echo -e "${BBlue}GRUB password generation failed. Please try again.${NC}"
@@ -493,8 +559,8 @@ case "${1:-}" in
             echo "Run 'awesome-secureboot enroll-keys', enable Secure Boot in firmware, reboot, then retry." >&2
             exit 1
         fi
-        if sbctl status 2>/dev/null | grep -qE 'Setup Mode:[[:space:]]*.*[Ee]nabled'; then
-            echo "Refusing to bind: firmware is still in Setup Mode." >&2
+        if ! sbctl status 2>/dev/null | grep -qE 'Setup Mode:[[:space:]]*.*[Dd]isabled'; then
+            echo "Refusing to bind: firmware Setup Mode is not confirmed disabled." >&2
             echo "Secure Boot is not enforcing custom keys yet. Leave Setup Mode, reboot, then retry." >&2
             exit 1
         fi
@@ -530,7 +596,10 @@ EOF
 bl_find_boot_entry() {
     local esp_guid="$1"
     efibootmgr -v | awk -v guid="${esp_guid^^}" '
-        /Linux Boot Manager/ && index(toupper($0), guid) && !found {
+        /Linux Boot Manager/ &&
+        index(toupper($0), guid) &&
+        index(toupper($0), "\\EFI\\SYSTEMD\\SYSTEMD-BOOTX64.EFI") &&
+        !found {
             value=$1; sub(/^Boot/, "", value); sub(/\*$/, "", value)
             print value; found=1
         }'
@@ -538,19 +607,41 @@ bl_find_boot_entry() {
 
 bl_prioritize_systemd_boot() {
     local boot_number boot_order new_order entry esp_guid
+    local esp_source esp_disk="" esp_partn="" pkname=""
     local -a entries=()
 
-    esp_guid=$(blkid -s PARTUUID -o value "${DISK}${PART_SUFFIX}2")
+    esp_source=$(findmnt -n -o SOURCE /efi 2>/dev/null || true)
+    if [[ -n "$esp_source" && -b "$esp_source" ]]; then
+        pkname=$(lsblk -no PKNAME "$esp_source" 2>/dev/null | head -n1 | tr -d '[:space:]')
+        esp_partn=$(lsblk -no PARTN "$esp_source" 2>/dev/null | head -n1 | tr -d '[:space:]')
+        if [[ -n "$pkname" && -b "/dev/$pkname" && "$esp_partn" =~ ^[1-9][0-9]*$ ]]; then
+            esp_disk="/dev/$pkname"
+        fi
+    else
+        esp_source=""
+    fi
+
+    if [[ -z "$esp_source" ]]; then
+        esp_source="${DISK}${PART_SUFFIX}2"
+    fi
+    if [[ -z "$esp_disk" ]]; then
+        esp_disk="$DISK"
+    fi
+    if [[ -z "$esp_partn" ]]; then
+        esp_partn="2"
+    fi
+
+    esp_guid=$(blkid -s PARTUUID -o value "$esp_source")
     if [[ -z "$esp_guid" ]]; then
-        echo "Unable to determine the ESP PARTUUID; refusing to reorder boot entries" >&2
+        echo "Unable to determine the ESP PARTUUID for $esp_source; refusing to reorder boot entries" >&2
         return 1
     fi
 
     boot_number=$(bl_find_boot_entry "$esp_guid")
     if [[ -z "$boot_number" ]]; then
         efibootmgr --create \
-            --disk "$DISK" \
-            --part 2 \
+            --disk "$esp_disk" \
+            --part "$esp_partn" \
             --label "Linux Boot Manager" \
             --loader '\EFI\systemd\systemd-bootx64.efi'
         boot_number=$(bl_find_boot_entry "$esp_guid")

@@ -57,7 +57,8 @@ Enabled for static text assets (`text/css`, `application/javascript`, `applicati
 
 | Header | Value | Purpose |
 |--------|-------|---------|
-| `Content-Security-Policy` | React-tuned (see below) | Prevent XSS, code injection |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Enforce HTTPS for 2 years (emitted when SSL is enabled; preserved across nested locations) |
+| `Content-Security-Policy` | React-tuned (see below) | Prevent XSS, code injection (`upgrade-insecure-requests` included only when SSL is enabled) |
 | `X-Content-Type-Options` | `nosniff` | Prevent MIME-type sniffing |
 | `X-Frame-Options` | `DENY` | Prevent clickjacking |
 | `X-XSS-Protection` | `0` | Disabled (deprecated; rely on CSP instead) |
@@ -109,11 +110,11 @@ upgrade-insecure-requests;
 
 #### Vite (default)
 
-The default CSP works out of the box. Vite produces clean JavaScript bundles with content-hashed filenames and no inline scripts.
+The default CSP works out of the box. Vite produces clean JavaScript bundles with content-hashed filenames and no inline scripts (`upgrade-insecure-requests;` is automatically included when HTTPS certificates are present and omitted in HTTP-only mode).
 
 ```nginx
-# Default CSP — no changes needed for a standard Vite build
-add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+# Default CSP (with SSL enabled) — no changes needed for a standard Vite build
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
 ```
 
 #### Create React App (CRA)

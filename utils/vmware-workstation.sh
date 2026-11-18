@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
-# install-vmware-workstation.sh
-# Arch Linux helper for AUR package vmware-workstation.
-#
-# Fixes seen on this host:
-#   - /tmp mounted noexec → bundle: Permission denied on vmware-installer
-#   - wrappers mode 711 (rwx--x--x) → scripts need +r or bash says Permission denied
-#   - shipped .so mode 711 → AppLoader: cannot open shared object file: Permission denied
-#   - missing / unreadable .desktop + icons → no GNOME launcher
+# =============================================================================
+# Script:      vmware-workstation.sh
+# Description: Arch Linux installer & permission helper for AUR vmware-workstation.
+#              Handles /tmp noexec, home default POSIX ACLs, SUID binaries,
+#              desktop launchers, kernel modules, and installs a pacman hook
+#              so permissions survive upgrades.
+# =============================================================================
 set -euo pipefail
+
+umask 022
 
 PKG="${PKG:-vmware-workstation}"
 AUR_HELPER="${AUR_HELPER:-}"
 RESTORE_TMP_NOEXEC=0
 
-# Desktop file for the logged-in user, even if this script is run with sudo
-REAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+readonly HOOK_HELPER="/usr/local/lib/awesomearchlinux/vmware-fix-permissions.sh"
+readonly PACMAN_HOOK="/etc/pacman.d/hooks/99-awesome-vmware-permissions.hook"
+
+resolve_target_user() {
+  local candidate="${SUDO_USER:-}"
+  if [[ -z "$candidate" || "$candidate" == "root" ]]; then
+    if [[ ${EUID} -ne 0 ]]; then
+      candidate="$(id -un)"
+    else
+      candidate="$(awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)/ { print $1; exit }' /etc/passwd)"
+    fi
+  fi
+  printf '%s' "${candidate:-root}"
+}
+
+REAL_USER="$(resolve_target_user)"
 if [[ ${REAL_USER} == root ]]; then
   REAL_HOME="${HOME:-/root}"
 else
@@ -39,7 +54,11 @@ sudo_run() {
 
 as_user() {
   if [[ ${EUID} -eq 0 && ${REAL_USER} != root ]]; then
-    sudo -u "${REAL_USER}" "$@"
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "${REAL_USER}" -- "$@"
+    else
+      sudo -u "${REAL_USER}" "$@"
+    fi
   else
     "$@"
   fi
@@ -66,7 +85,7 @@ tmp_has_noexec() {
 
 remount_tmp_exec() {
   if tmp_has_noexec; then
-    log "/tmp is mounted noexec — remounting exec for the VMware bundle"
+    log "/tmp is mounted noexec — remounting exec temporarily for the VMware bundle"
     sudo_run mount -o remount,exec /tmp
     RESTORE_TMP_NOEXEC=1
   else
@@ -82,76 +101,108 @@ restore_tmp() {
 }
 
 install_deps() {
-  local pkgs=(base-devel dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils linux-headers pipewire-alsa)
+  local pkgs=(base-devel dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils pipewire-alsa)
+  if pacman -Qq linux >/dev/null 2>&1; then
+    pkgs+=(linux-headers)
+  fi
   if pacman -Qq linux-lts >/dev/null 2>&1; then
     pkgs+=(linux-lts-headers)
+  fi
+  if pacman -Qq linux-zen >/dev/null 2>&1; then
+    pkgs+=(linux-zen-headers)
   fi
   log "ensuring build/runtime packages"
   sudo_run pacman -S --needed --noconfirm "${pkgs[@]}"
 }
 
 install_package() {
+  [[ ${REAL_USER} != root ]] || die "cannot run AUR helper without a non-root user account"
   detect_aur_helper
-  log "installing ${PKG} with ${AUR_HELPER}"
-  if [[ ${EUID} -eq 0 ]]; then
-    die "do not run the AUR install as root; run this script as ${REAL_USER}"
+  log "installing ${PKG} with ${AUR_HELPER} as ${REAL_USER}"
+
+  as_user mkdir -p -m 0700 "${REAL_HOME}/.cache" "${REAL_HOME}/.cache/${AUR_HELPER}" "${REAL_HOME}/.cache/vmware-tmp"
+  if command -v setfacl >/dev/null 2>&1; then
+    sudo_run setfacl -b -k "${REAL_HOME}/.cache/${AUR_HELPER}" "${REAL_HOME}/.cache/vmware-tmp" 2>/dev/null || true
   fi
-  "${AUR_HELPER}" vmware-keymaps --noconfirm --overwrite '/usr/lib/vmware/xkeymap/*'
-  "${AUR_HELPER}" -S --needed --noconfirm "${PKG}"
+
+  as_user env TMPDIR="${REAL_HOME}/.cache/vmware-tmp" "${AUR_HELPER}" -S --needed --noconfirm --overwrite '/usr/lib/vmware/xkeymap/*' vmware-keymaps
+  as_user env TMPDIR="${REAL_HOME}/.cache/vmware-tmp" "${AUR_HELPER}" -S --needed --noconfirm "${PKG}"
+  rm -rf -- "${REAL_HOME}/.cache/vmware-tmp" 2>/dev/null || true
 }
 
-# Mode 711 (rwx--x--x) is the recurring bug on this install:
-#   wrappers are scripts → need +r or bash: Permission denied
-#   .so files are ELF     → need +r or AppLoader: cannot open shared object
-# Recurse the whole VMware tree; do not stop at /usr/bin.
+install_pacman_hook() {
+  local rgroup="$1"
+  local helper_content hook_content
+
+  helper_content="$(cat <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+umask 022
+rgroup=${rgroup@Q}
+[[ -d /usr/lib/vmware && ! -L /usr/lib/vmware ]] || exit 0
+if command -v setfacl >/dev/null 2>&1; then
+  setfacl -bR /usr/lib/vmware 2>/dev/null || true
+fi
+chown -hR root:"\${rgroup}" /usr/lib/vmware
+chmod -R g+rX,o-rwx /usr/lib/vmware
+for b in \\
+  /usr/lib/vmware/bin/vmware-vmx \\
+  /usr/lib/vmware/bin/vmware-vmx-debug \\
+  /usr/lib/vmware/bin/vmware-vmx-stats \\
+  /usr/lib/vmware/bin/vmware-authd; do
+  if [[ -f "\${b}" && ! -L "\${b}" ]]; then
+    chown root:"\${rgroup}" "\${b}"
+    chmod 4750 "\${b}"
+  fi
+done
+for p in \\
+  /usr/bin/vmware /usr/bin/vmplayer /usr/bin/vmware-tray /usr/bin/vmware-netcfg \\
+  /usr/bin/vmware-modconfig /usr/bin/vmware-mount /usr/bin/vmrun \\
+  /usr/sbin/vmware-tray /usr/sbin/vmware-networks /usr/sbin/vmware-usbarbitrator; do
+  if [[ -f "\${p}" && ! -L "\${p}" ]]; then
+    command -v setfacl >/dev/null 2>&1 && setfacl -b "\${p}" 2>/dev/null || true
+    chown root:"\${rgroup}" "\${p}"
+    chmod 0750 "\${p}"
+  fi
+done
+EOF
+)"
+
+  hook_content="$(cat <<EOF
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/vmware/*
+
+[Action]
+Description = Hardening VMware Workstation permissions and SUID binaries...
+When = PostTransaction
+Exec = ${HOOK_HELPER}
+EOF
+)"
+
+  sudo_run install -d -m 0755 -o root -g root "$(dirname "${HOOK_HELPER}")" "$(dirname "${PACMAN_HOOK}")"
+  printf '%s\n' "${helper_content}" | sudo_run install -m 0755 -o root -g root /dev/stdin "${HOOK_HELPER}"
+  printf '%s\n' "${hook_content}"   | sudo_run install -m 0644 -o root -g root /dev/stdin "${PACMAN_HOOK}"
+}
+
 fix_permissions() {
+  [[ ${REAL_USER} != root ]] || die "cannot determine non-root target user for VMware group ownership"
   log "fixing modes under /usr/lib/vmware (restricting to ${REAL_USER} and restoring SUID bits)"
 
-  [[ -d /usr/lib/vmware ]] || die "/usr/lib/vmware missing — package not installed?"
+  [[ -d /usr/lib/vmware && ! -L /usr/lib/vmware ]] || die "/usr/lib/vmware missing — package not installed?"
 
   local rgroup
   rgroup="$(id -gn "${REAL_USER}")"
 
-  # Change group ownership to the user's primary group so they can access it
-  sudo_run chown -R root:"${rgroup}" /usr/lib/vmware
+  install_pacman_hook "${rgroup}"
+  sudo_run "${HOOK_HELPER}"
 
-  # Allow root and the user's group to read/execute, but block all other users
-  sudo_run chmod -R g+rX,o-rwx /usr/lib/vmware
-
-  # Restore SUID bits for core binaries (CRITICAL for power-on)
-  # 4750 means: SUID set (4), root rwx (7), group rx (5), others none (0)
-  local suid_bins=(
-    /usr/lib/vmware/bin/vmware-vmx
-    /usr/lib/vmware/bin/vmware-vmx-debug
-    /usr/lib/vmware/bin/vmware-vmx-stats
-  )
-  local b
-  for b in "${suid_bins[@]}"; do
-    [[ -e ${b} ]] && sudo_run chmod 4750 "${b}"
-  done
-
-  local wrappers=(
-    /usr/bin/vmware
-    /usr/bin/vmplayer
-    /usr/bin/vmware-tray
-    /usr/bin/vmware-netcfg
-    /usr/bin/vmware-modconfig
-    /usr/bin/vmware-mount
-    /usr/bin/vmrun
-    /usr/sbin/vmware-tray
-    /usr/sbin/vmware-networks
-    /usr/sbin/vmware-usbarbitrator
-  )
-  local p
-  for p in "${wrappers[@]}"; do
-    if [[ -e ${p} ]]; then
-      sudo_run chown root:"${rgroup}" "${p}"
-      sudo_run chmod 750 "${p}"
-    fi
-  done
-
-  sudo_run find /usr/share/applications -maxdepth 1 -iname '*vmware*' -type f -exec chown root:"${rgroup}" {} + -exec chmod 640 {} + 2>/dev/null || true
-  sudo_run find /usr/share/icons /usr/share/pixmaps -iname '*vmware*' -type f -exec chown root:"${rgroup}" {} + -exec chmod 640 {} + 2>/dev/null || true
+  sudo_run find /usr/share/applications -maxdepth 1 -iname '*vmware*' -type f \
+    -exec chown -h root:"${rgroup}" {} + -exec chmod 0644 {} + 2>/dev/null || true
+  sudo_run find /usr/share/icons /usr/share/pixmaps -iname '*vmware*' -type f \
+    -exec chown -h root:"${rgroup}" {} + -exec chmod 0644 {} + 2>/dev/null || true
 
   if [[ -e /usr/lib/vmware/lib/libvmware.so/libvmware.so ]]; then
     log "libvmware.so mode: $(stat -c '%a %n' /usr/lib/vmware/lib/libvmware.so/libvmware.so)"
@@ -160,8 +211,7 @@ fix_permissions() {
     log "wrapper mode: $(stat -c '%a %n' /usr/bin/vmware)"
   fi
 }
- 
- 
+
 pick_icon() {
   local f
   local candidates=(
@@ -175,13 +225,13 @@ pick_icon() {
   for f in "${candidates[@]}"; do
     [[ -r ${f} ]] && { printf '%s' "${f}"; return; }
   done
-  f="$(find /usr/share/icons /usr/share/pixmaps /usr/lib/vmware -iname '*workstation*.png' -o -iname '*vmware-workstation.png' -o -iname 'vmware.png' 2>/dev/null | head -n1 || true)"
+  f="$(find /usr/share/icons /usr/share/pixmaps /usr/lib/vmware \( -iname '*workstation*.png' -o -iname '*vmware-workstation.png' -o -iname 'vmware.png' \) -print -quit 2>/dev/null || true)"
   printf '%s' "${f}"
 }
 
 install_desktop() {
-  local sys_desktop user_dir user_desktop icon
-  sys_desktop="$(ls /usr/share/applications/*vmware*.desktop 2>/dev/null | head -n1 || true)"
+  [[ ${REAL_USER} != root ]] || return 0
+  local user_dir user_desktop icon
   user_dir="${REAL_HOME}/.local/share/applications"
   user_desktop="${user_dir}/vmware-workstation.desktop"
   icon="$(pick_icon)"
@@ -189,11 +239,6 @@ install_desktop() {
 
   log "installing desktop launcher for ${REAL_USER} (${user_desktop})"
   as_user mkdir -p "${user_dir}"
-
-  if [[ -n ${sys_desktop} && -r ${sys_desktop} ]]; then
-    log "found packaged desktop file: ${sys_desktop}"
-    sudo_run chmod 644 "${sys_desktop}"
-  fi
 
   as_user tee "${user_desktop}" >/dev/null <<EOF
 [Desktop Entry]
@@ -228,6 +273,19 @@ EOF
   log "GNOME: Super → type VMware → Pin to Dash (desktop icons are off by default)"
 }
 
+load_modules() {
+  log "loading vmw_vmci, vmmon, and vmnet"
+  if ! sudo_run modprobe -a vmw_vmci vmmon vmnet; then
+    warn "modprobe failed — Secure Boot may be blocking unsigned DKMS modules"
+    if command -v sbctl >/dev/null 2>&1 && sbctl status 2>/dev/null | grep -qE 'Secure Boot:[[:space:]]*.*[Ee]nabled'; then
+      warn "Secure Boot is ENABLED: sign DKMS modules or configure MOK/kernel module signing"
+    fi
+    warn "check: journalctl -k -b | grep -iE 'vmmon|vmnet|Lockdown|secure'"
+    return 1
+  fi
+  lsmod | grep -E 'vmmon|vmw_vmci|vmnet' || warn "modules not visible in lsmod yet"
+}
+
 enable_services() {
   log "generating /etc/vmware/networking if needed"
   sudo_run systemctl start vmware-networks-configuration.service || true
@@ -235,16 +293,6 @@ enable_services() {
   log "enabling network + USB services"
   sudo_run systemctl enable --now vmware-networks.service
   sudo_run systemctl enable --now vmware-usbarbitrator.service
-}
-
-load_modules() {
-  log "loading vmw_vmci and vmmon"
-  if ! sudo_run modprobe -a vmw_vmci vmmon; then
-    warn "modprobe failed — Secure Boot may be blocking unsigned modules"
-    warn "check: journalctl -k -b | grep -iE 'vmmon|Lockdown|secure'"
-    return 1
-  fi
-  lsmod | grep -E 'vmmon|vmw_vmci|vmnet' || warn "modules not visible in lsmod yet"
 }
 
 print_status() {
@@ -269,21 +317,21 @@ print_status() {
 post_install_fix() {
   fix_permissions
   install_desktop
-  enable_services
   load_modules || true
+  enable_services
   print_status
 }
 
 usage() {
   cat <<'EOF'
-Usage: install-vmware-workstation.sh [command]
+Usage: ./vmware-workstation.sh [command]
 
-  install   (default) deps + AUR package + perms + desktop + services + modules
-  fix       perms + desktop + services + modules (package already installed)
-  perms     chmod 755 wrappers AND shipped libs under /usr/lib/vmware
+  install   (default) deps + AUR package + perms + desktop + modules + services
+  fix       perms + desktop + modules + services (package already installed)
+  perms     repair modes, SUID binaries, and pacman hook for /usr/lib/vmware
   desktop   write ~/.local/share/applications/vmware-workstation.desktop
-  services  enable vmware-networks + vmware-usbarbitrator, load modules
-  modules   only modprobe vmw_vmci vmmon
+  services  load modules and enable vmware-networks + vmware-usbarbitrator
+  modules   only modprobe vmw_vmci vmmon vmnet
   help
 
 Env:
@@ -324,8 +372,8 @@ main() {
       install_desktop
       ;;
     services)
-      enable_services
       load_modules || true
+      enable_services
       print_status
       ;;
     modules)

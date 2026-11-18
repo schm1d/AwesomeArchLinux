@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+umask 022
+
 # Description: AIDE (Advanced Intrusion Detection Environment) file integrity
 #              monitoring automation script for Arch Linux. Installs AIDE,
 #              generates a comprehensive configuration, creates systemd timers
 #              for daily integrity checks, and provides init/check/update modes.
-# References: https://aide.github.io/doc/
-# Author: Bruno Schmid @brulliant
-# LinkedIn: https://www.linkedin.com/in/schmidbruno/
+# References:  https://aide.github.io/doc/
+# Author:      Bruno Schmid @brulliant
+# LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 
-# =============================================================================
-# Color variables
-# =============================================================================
 C_BLUE='\033[1;34m'
 C_RED='\033[1;31m'
 C_GREEN='\033[1;32m'
 C_YELLOW='\033[1;33m'
 C_NC='\033[0m'
 
-# =============================================================================
-# Helper functions
-# =============================================================================
 info()    { echo -e "${C_BLUE}[INFO]${C_NC}    $*"; }
 success() { echo -e "${C_GREEN}[OK]${C_NC}      $*"; }
 warn()    { echo -e "${C_YELLOW}[WARN]${C_NC}    $*"; }
@@ -42,51 +38,34 @@ Options:
   --check     Run an AIDE integrity check against the current database
   --update    Regenerate the AIDE database after legitimate system changes
   -h, --help  Show this help message
-
-Examples:
-  sudo ./aide-config.sh --init     # First-time setup
-  sudo ./aide-config.sh --check    # Daily / on-demand integrity check
-  sudo ./aide-config.sh --update   # After pacman -Syu or config changes
 EOF
     exit 0
 }
 
-# =============================================================================
-# Root check
-# =============================================================================
 if [[ "${EUID}" -ne 0 ]]; then
     die "This script must be run as root. Use: sudo $0"
 fi
 
-# =============================================================================
-# Parse arguments
-# =============================================================================
 MODE=""
-
 if [[ $# -eq 0 ]]; then
     usage
 fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --init)   MODE="init";   shift ;;
-        --check)  MODE="check";  shift ;;
-        --update) MODE="update"; shift ;;
+        --init)    MODE="init";   shift ;;
+        --check)   MODE="check";  shift ;;
+        --update)  MODE="update"; shift ;;
         -h|--help) usage ;;
         *)
-            error "Unknown option: $1"
-            usage
+            die "Unknown option: $1"
             ;;
     esac
 done
 
-if [[ -z "${MODE}" ]]; then
-    usage
-fi
+[[ -n "${MODE}" ]] || usage
 
-# =============================================================================
-# Constants
-# =============================================================================
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AIDE_CONF="/etc/aide.conf"
 AIDE_DB_DIR="/var/lib/aide"
 AIDE_DB="${AIDE_DB_DIR}/aide.db"
@@ -95,9 +74,6 @@ AIDE_LOG_DIR="/var/log/aide"
 AIDE_SERVICE="/etc/systemd/system/aide-check.service"
 AIDE_TIMER="/etc/systemd/system/aide-check.timer"
 
-# =============================================================================
-# Install AIDE
-# =============================================================================
 install_aide() {
     info "Checking for AIDE installation..."
 
@@ -106,130 +82,115 @@ install_aide() {
         return 0
     fi
 
-    info "AIDE not found. Attempting to install from the AUR..."
-
-    if command -v paru &>/dev/null; then
-        info "Using paru to install aide..."
-        paru -S --noconfirm --needed aide
-    elif command -v yay &>/dev/null; then
-        info "Using yay to install aide..."
-        yay -S --noconfirm --needed aide
+    if pacman -Si aide &>/dev/null; then
+        info "Installing aide from official repositories..."
+        pacman -S --needed --noconfirm aide
     else
-        die "No AUR helper found (yay or paru). Install one first:\n" \
-            "  git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si"
+        local aur_lib=""
+        for candidate in "$SCRIPT_DIR/aur-review.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" "/root/aur-review.sh"; do
+            if [[ -r "$candidate" ]]; then
+                aur_lib="$candidate"
+                break
+            fi
+        done
+        if [[ -n "$aur_lib" ]]; then
+            info "Installing aide via reviewed unprivileged AUR builder..."
+            # shellcheck disable=SC1090
+            source "$aur_lib"
+            aal_aur_install_reviewed aide
+        elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+            local helper="" h user_home
+            user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+            for h in yay paru; do
+                if command -v "$h" &>/dev/null; then
+                    helper="$h"
+                    break
+                fi
+            done
+            [[ -n "$helper" ]] || die "AIDE is not installed and neither aur-review.sh nor yay/paru was found."
+            info "Installing aide via $helper as $SUDO_USER..."
+            runuser -u "$SUDO_USER" -- mkdir -p -m 0700 "$user_home/.cache/$helper" "$user_home/.cache/aide-tmp"
+            if command -v setfacl &>/dev/null; then
+                setfacl -b -k "$user_home/.cache/$helper" "$user_home/.cache/aide-tmp" 2>/dev/null || true
+            fi
+            runuser -u "$SUDO_USER" -- env TMPDIR="$user_home/.cache/aide-tmp" "$helper" -S --noconfirm --needed aide
+            rm -rf -- "$user_home/.cache/aide-tmp" 2>/dev/null || true
+        else
+            die "AIDE is not installed. Run /root/install-aur-packages.sh or install aide first."
+        fi
     fi
 
-    if ! command -v aide &>/dev/null; then
-        die "AIDE installation failed. Please install it manually from the AUR."
-    fi
-
+    command -v aide &>/dev/null || die "AIDE installation failed."
     success "AIDE installed successfully."
 }
 
-# =============================================================================
-# Write /etc/aide.conf
-# =============================================================================
 write_aide_conf() {
     info "Writing AIDE configuration to ${AIDE_CONF}..."
 
-    # Back up existing config if present
     if [[ -f "${AIDE_CONF}" ]]; then
         local backup
         backup="${AIDE_CONF}.bak.$(date +%Y%m%d%H%M%S)"
-        cp "${AIDE_CONF}" "${backup}"
+        cp -p "${AIDE_CONF}" "${backup}"
+        chmod 600 "${backup}"
         warn "Existing config backed up to ${backup}"
     fi
 
-    cat > "${AIDE_CONF}" <<'AIDECONF'
+    {
+        cat <<'AIDECONF'
 # =============================================================================
 # /etc/aide.conf — AIDE configuration for Arch Linux
 # Generated by aide-config.sh
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# Database paths
-# ---------------------------------------------------------------------------
 database_in=file:/var/lib/aide/aide.db
 database_out=file:/var/lib/aide/aide.db.new
-
-# ---------------------------------------------------------------------------
-# Gzip compression for the database (saves disk, negligible CPU)
-# ---------------------------------------------------------------------------
 gzip_dbout=yes
 
-# ---------------------------------------------------------------------------
 # Custom rule groups
-# ---------------------------------------------------------------------------
-# NORMAL  — full check: permissions, inode, links, user, group, size,
-#           mtime, ctime, sha256
 NORMAL = p+i+n+u+g+s+m+c+sha256
-
-# DIR     — directory attributes only (no content hashing)
 DIR = p+i+n+u+g
-
-# PERMS   — permissions and ownership only
 PERMS = p+u+g
+# Rotated logs change inode on daily rotation; check ownership and permissions
+LOG = p+u+g
+# FAT/ESP filesystems do not maintain stable POSIX inodes across remounts
+DATAONLY = p+u+g+s+sha256
 
-# LOG     — log files: track metadata, ignore content changes
-LOG = p+u+g+i
-
-# DATAONLY — data integrity: ownership + hash, skip timestamps
-DATAONLY = p+u+g+sha256
-
-# ---------------------------------------------------------------------------
-# Exclusions (must come before the monitored paths)
-# ---------------------------------------------------------------------------
-# Virtual / ephemeral filesystems
+# Exclusions (must come before monitored paths)
 !/proc
 !/sys
 !/dev
 !/run
 !/tmp
-
-# Package manager caches and transient state
 !/var/lib/pacman
 !/var/cache
 !/var/tmp
-
-# Systemd journal (binary logs rotate constantly)
 !/var/log/journal
-
-# Volatile / auto-generated files
+!/var/log/aide
 !/var/lib/systemd/random-seed
 !/etc/mtab
 !/etc/adjtime
-
-# AIDE's own database directory
 !/var/lib/aide
-
-# ClamAV virus definitions (updated frequently by freshclam)
 !/var/lib/clamav
-
-# resolv.conf may be managed by systemd-resolved / NetworkManager
 !/etc/resolv.conf
 
-# ---------------------------------------------------------------------------
-# Critical system paths — enforce full integrity (NORMAL)
-# ---------------------------------------------------------------------------
+# Critical system paths
 /boot NORMAL
 /etc NORMAL
 /usr/bin NORMAL
-/usr/sbin NORMAL
 /usr/lib NORMAL
-/sbin NORMAL
-/bin NORMAL
+/usr/local NORMAL
+AIDECONF
 
-# Only include /usr/lib64 if it exists on this architecture
-@@ifdef HAVE_LIB64
-/usr/lib64 NORMAL
-@@endif
+        if [[ -d /efi ]]; then
+            printf '/efi DATAONLY\n'
+        fi
+        if [[ -d /usr/lib64 && ! -L /usr/lib64 ]]; then
+            printf '/usr/lib64 NORMAL\n'
+        fi
 
-# ---------------------------------------------------------------------------
-# Sensitive configuration files — high priority (NORMAL)
-# These are already covered by /etc NORMAL above, but listing them
-# explicitly documents intent and ensures they are never accidentally
-# excluded.
-# ---------------------------------------------------------------------------
+        cat <<'AIDECONF_TAIL'
+
+# Sensitive configuration files
 /etc/passwd NORMAL
 /etc/shadow NORMAL
 /etc/group NORMAL
@@ -241,57 +202,28 @@ DATAONLY = p+u+g+sha256
 /etc/nftables.conf NORMAL
 /etc/systemd/system NORMAL
 
-# ---------------------------------------------------------------------------
-# Log directories — track existence and metadata, not content
-# ---------------------------------------------------------------------------
+# Log directories — track ownership and permissions, not content
 /var/log LOG
-AIDECONF
-
-    # Conditionally add /usr/lib64 line if the directory exists
-    if [[ -d /usr/lib64 ]]; then
-        # Replace the @@ifdef block with an unconditional entry
-        sed -i '/@@ifdef HAVE_LIB64/,/@@endif/{
-            s|@@ifdef HAVE_LIB64|# /usr/lib64 exists on this system|
-            s|@@endif||
-        }' "${AIDE_CONF}"
-    else
-        # Remove the @@ifdef block entirely
-        sed -i '/@@ifdef HAVE_LIB64/,/@@endif/d' "${AIDE_CONF}"
-    fi
+AIDECONF_TAIL
+    } > "${AIDE_CONF}"
 
     chmod 600 "${AIDE_CONF}"
     success "AIDE configuration written to ${AIDE_CONF}"
 }
 
-# =============================================================================
-# Create log directory
-# =============================================================================
 create_log_dir() {
-    if [[ ! -d "${AIDE_LOG_DIR}" ]]; then
-        info "Creating log directory ${AIDE_LOG_DIR}..."
-        mkdir -p "${AIDE_LOG_DIR}"
-    fi
-    chmod 700 "${AIDE_LOG_DIR}"
+    install -d -m 0700 -o root -g root "${AIDE_LOG_DIR}"
     success "Log directory ready: ${AIDE_LOG_DIR}"
 }
 
-# =============================================================================
-# Create database directory
-# =============================================================================
 create_db_dir() {
-    if [[ ! -d "${AIDE_DB_DIR}" ]]; then
-        info "Creating database directory ${AIDE_DB_DIR}..."
-        mkdir -p "${AIDE_DB_DIR}"
-    fi
-    chmod 700 "${AIDE_DB_DIR}"
+    install -d -m 0700 -o root -g root "${AIDE_DB_DIR}"
     success "Database directory ready: ${AIDE_DB_DIR}"
 }
 
-# =============================================================================
-# Create systemd service and timer for daily checks
-# =============================================================================
 create_systemd_units() {
     info "Creating systemd service: ${AIDE_SERVICE}..."
+    install -d -m 0755 /etc/systemd/system
 
     cat > "${AIDE_SERVICE}" <<EOF
 [Unit]
@@ -308,9 +240,9 @@ StandardError=inherit
 Nice=19
 IOSchedulingClass=idle
 EOF
+    chmod 0644 "${AIDE_SERVICE}"
 
     info "Creating systemd timer: ${AIDE_TIMER}..."
-
     cat > "${AIDE_TIMER}" <<EOF
 [Unit]
 Description=Daily AIDE integrity check
@@ -323,14 +255,12 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    chmod 0644 "${AIDE_TIMER}"
 
     systemctl daemon-reload
     success "Systemd service and timer created."
 }
 
-# =============================================================================
-# MODE: --init
-# =============================================================================
 mode_init() {
     echo ""
     info "=== AIDE Initialization ==="
@@ -353,53 +283,20 @@ mode_init() {
     cp "${AIDE_DB_NEW}" "${AIDE_DB}"
     chmod 600 "${AIDE_DB}" "${AIDE_DB_NEW}"
 
-    # Do not arm the timer until the reference database exists. This prevents a
-    # first-run race from producing a failed check against a missing database.
     systemctl enable --now aide-check.timer
 
     success "AIDE database initialized successfully."
     success "Systemd timer enabled: daily at 04:00 (+/- 1h random delay)"
     info "AIDE changes and errors leave aide-check.service in a failed state for monitoring."
-    echo ""
-
-    # Print summary
-    echo -e "${C_BLUE}============================================================${C_NC}"
-    echo -e "${C_GREEN}  AIDE File Integrity Monitoring — Setup Complete${C_NC}"
-    echo -e "${C_BLUE}============================================================${C_NC}"
-    echo ""
-    echo -e "  Configuration:   ${C_YELLOW}${AIDE_CONF}${C_NC}"
-    echo -e "  Database:        ${C_YELLOW}${AIDE_DB}${C_NC}"
-    echo -e "  Log directory:   ${C_YELLOW}${AIDE_LOG_DIR}${C_NC}"
-    echo -e "  Check schedule:  ${C_YELLOW}Daily at 04:00 AM (+/- 1h random delay)${C_NC}"
-    echo ""
-    echo -e "  ${C_GREEN}Manual commands:${C_NC}"
-    echo -e "    Check now:     ${C_YELLOW}sudo aide --check${C_NC}"
-    echo -e "    Update DB:     ${C_YELLOW}sudo $0 --update${C_NC}"
-    echo -e "    View timer:    ${C_YELLOW}systemctl status aide-check.timer${C_NC}"
-    echo -e "    View last log: ${C_YELLOW}cat ${AIDE_LOG_DIR}/aide-check.log${C_NC}"
-    echo ""
-    echo -e "  ${C_RED}SECURITY NOTE:${C_NC} For maximum protection, copy the database"
-    echo -e "  to read-only media or a remote host so an attacker cannot"
-    echo -e "  tamper with both the files and the reference database."
-    echo -e "    cp ${AIDE_DB} /mnt/usb/aide.db"
-    echo ""
 }
 
-# =============================================================================
-# MODE: --check
-# =============================================================================
 mode_check() {
     echo ""
     info "=== AIDE Integrity Check ==="
     echo ""
 
-    if [[ ! -f "${AIDE_DB}" ]]; then
-        die "No AIDE database found at ${AIDE_DB}. Run --init first."
-    fi
-
-    if [[ ! -f "${AIDE_CONF}" ]]; then
-        die "No AIDE configuration found at ${AIDE_CONF}. Run --init first."
-    fi
+    [[ -f "${AIDE_DB}" ]]   || die "No AIDE database found at ${AIDE_DB}. Run --init first."
+    [[ -f "${AIDE_CONF}" ]] || die "No AIDE configuration found at ${AIDE_CONF}. Run --init first."
 
     info "Running AIDE check (this may take several minutes)..."
     echo ""
@@ -408,21 +305,10 @@ mode_check() {
     aide --check || rc=$?
 
     echo ""
-
     if [[ ${rc} -eq 0 ]]; then
         success "No changes detected. System integrity is intact."
     elif [[ ${rc} -le 7 ]]; then
         warn "Changes detected (exit code ${rc})."
-        echo ""
-        echo -e "  Exit code meanings:"
-        echo -e "    1 = Added entries found"
-        echo -e "    2 = Removed entries found"
-        echo -e "    3 = Added + Removed"
-        echo -e "    4 = Changed entries found"
-        echo -e "    5 = Added + Changed"
-        echo -e "    6 = Removed + Changed"
-        echo -e "    7 = Added + Removed + Changed"
-        echo ""
         echo -e "  If these changes are expected (e.g., after pacman -Syu),"
         echo -e "  update the database:  ${C_YELLOW}sudo $0 --update${C_NC}"
     else
@@ -432,69 +318,51 @@ mode_check() {
     exit "${rc}"
 }
 
-# =============================================================================
-# MODE: --update
-# =============================================================================
 mode_update() {
     echo ""
     info "=== AIDE Database Update ==="
     echo ""
 
-    if [[ ! -f "${AIDE_DB}" ]]; then
-        die "No AIDE database found at ${AIDE_DB}. Run --init first."
-    fi
-
-    if [[ ! -f "${AIDE_CONF}" ]]; then
-        die "No AIDE configuration found at ${AIDE_CONF}. Run --init first."
-    fi
+    [[ -f "${AIDE_DB}" ]]   || die "No AIDE database found at ${AIDE_DB}. Run --init first."
+    [[ -f "${AIDE_CONF}" ]] || die "No AIDE configuration found at ${AIDE_CONF}. Run --init first."
 
     info "Regenerating AIDE database (this may take several minutes)..."
-    aide --update
+    # aide --update returns 1-7 when legitimate changes exist since the last baseline!
+    local rc=0
+    aide --update || rc=$?
+    if (( rc >= 14 )); then
+        die "AIDE update encountered a fatal error (exit code ${rc})."
+    fi
 
     if [[ ! -f "${AIDE_DB_NEW}" ]]; then
         die "AIDE update failed — ${AIDE_DB_NEW} not found."
     fi
 
     echo ""
-    warn "A new database has been generated at ${AIDE_DB_NEW}."
-    echo ""
-    echo -e "  This will replace the current reference database."
-    echo -e "  Only proceed if the changes since the last baseline are legitimate."
+    warn "A new database has been generated at ${AIDE_DB_NEW} (aide status: ${rc})."
+    echo "  Only proceed if the changes since the last baseline are legitimate."
     echo ""
 
-    read -rp "  Replace the old database with the new one? [y/N] " confirm
+    local confirm=""
+    read -rp "  Replace the old database with the new one? [y/N] " confirm || confirm="n"
     case "${confirm}" in
         [yY]|[yY][eE][sS])
-            # Backup the old database
             local backup
             backup="${AIDE_DB}.bak.$(date +%Y%m%d%H%M%S)"
             cp "${AIDE_DB}" "${backup}"
             chmod 600 "${backup}"
             info "Old database backed up to ${backup}"
 
-            # Promote the new database
-            mv "${AIDE_DB_NEW}" "${AIDE_DB}"
+            mv -f "${AIDE_DB_NEW}" "${AIDE_DB}"
             chmod 600 "${AIDE_DB}"
-
             success "AIDE database updated successfully."
-            echo ""
-            echo -e "  ${C_RED}SECURITY NOTE:${C_NC} Remember to update your off-site backup as well."
-            echo -e "    cp ${AIDE_DB} /mnt/usb/aide.db"
-            echo ""
             ;;
         *)
             info "Aborted. The new database remains at ${AIDE_DB_NEW}."
-            info "You can manually promote it later:"
-            echo -e "    cp ${AIDE_DB} ${AIDE_DB}.bak"
-            echo -e "    mv ${AIDE_DB_NEW} ${AIDE_DB}"
-            echo ""
             ;;
     esac
 }
 
-# =============================================================================
-# Dispatch
-# =============================================================================
 case "${MODE}" in
     init)   mode_init   ;;
     check)  mode_check  ;;

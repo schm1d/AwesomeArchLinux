@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Description: Fully encrypted LVM2 on LUKS with UEFI and TPM2 - Security Hardened
 # Author: Bruno Schmid @brulliant
@@ -23,6 +23,7 @@ cleanup() {
     shred -zu ./boot.key 2>/dev/null || true
     shred -zu ./recovery.key 2>/dev/null || true
     shred -zu ./luks-header-backup.img 2>/dev/null || true
+    shred -zu ./tpm_luks.conf 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -47,6 +48,8 @@ USE_TPM_LUKS=false
 # shellcheck disable=SC2034  # Used by TPM enrollment commands
 TPM_PCR_BANK="sha256"
 TPM_PCRS="7"
+INSTALL_GPU_UNLOCK=false
+GPU_UNLOCK_TARGETS="all"
 readonly LARGE_DISK_THRESHOLD_BYTES=1000000000000
 readonly DEFAULT_TMP_SIZE_GB=10
 readonly LARGE_DISK_TMP_SIZE_GB=25
@@ -70,12 +73,31 @@ if [ ! -d "/sys/firmware/efi/efivars" ]; then
   exit 1
 fi
 
+SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
+SYSCTL_BUNDLE_FILES=(
+    sysctl.sh
+    60-awesome-security-core.conf
+    70-awesome-workstation-network.conf
+    80-awesome-performance.conf
+    80-awesome-bbr.modules
+    90-awesome-strict.conf
+    90-awesome-ipv6-disabled.conf
+)
+
 for installer_component in "$SCRIPT_DIR/chroot.sh" "$SCRIPT_DIR/bootloader.sh" \
+    "$SCRIPT_DIR/../hardening/ssh/ssh.sh" "$SCRIPT_DIR/../hardening/lib/nftables.sh" \
     "$SCRIPT_DIR/install-aur-packages.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" \
     "$SCRIPT_DIR/../utils/aide-config.sh" "$SCRIPT_DIR/lib/chroot-security.sh" \
-    "$SCRIPT_DIR/../utils/auditd-attack.rules" "$SCRIPT_DIR/../utils/board-health.py"; do
+    "$SCRIPT_DIR/../utils/auditd-attack.rules" "$SCRIPT_DIR/../utils/board-health.sh" \
+    "$SCRIPT_DIR/../utils/gpu-unlock.sh"; do
     if [[ ! -r "$installer_component" ]]; then
         echo -e "${BRed}Missing required installer component: $installer_component${NC}" >&2
+        exit 1
+    fi
+done
+for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
+    if [[ ! -r "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
+        echo -e "${BRed}Missing required sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
         exit 1
     fi
 done
@@ -127,31 +149,33 @@ recommended_tmp_size_gb() {
     fi
 }
 
-# Prompt user for a valid block device
+# Prompt user for a valid whole disk block device
 ask_for_disk() {
     local disk
     while true; do
         read -r -p "Select the target disk (e.g., sda, nvme0n1): " disk
-        if [[ -b "/dev/$disk" ]]; then
+        disk="${disk#/dev/}"
+        if [[ -n "$disk" && "$disk" != */* && -b "/dev/$disk" &&
+              "$(lsblk -dn -o TYPE "/dev/$disk" 2>/dev/null)" == "disk" ]]; then
             echo "$disk"
             return 0
         else
-            echo -e "${BRed}Error: Disk /dev/$disk does not exist or is not a block device.\n${NC}" >&2
+            echo -e "${BRed}Error: /dev/$disk does not exist or is not a whole disk device.\n${NC}" >&2
         fi
     done
 }
 
-# Prompt user for numeric input
+# Prompt user for positive integer input
 ask_for_numeric() {
     local prompt_msg="$1"
     local input_val
     while true; do
         read -r -p "$prompt_msg " input_val
-        if [[ "$input_val" =~ ^[0-9]+$ ]]; then
+        if [[ "$input_val" =~ ^[1-9][0-9]*$ ]]; then
             echo "$input_val"
             return 0
         else
-            echo -e "${BRed}Invalid input: '$input_val'. Please enter a positive number.\n${NC}" >&2
+            echo -e "${BRed}Invalid input: '$input_val'. Please enter a positive integer.\n${NC}" >&2
         fi
     done
 }
@@ -213,6 +237,59 @@ ask_for_ipv6_policy() {
         case "$choice" in
             1) echo "false"; return 0 ;;
             2) echo "true"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+ask_for_gpu_unlock() {
+    local choice gpu_summary=""
+    gpu_summary=$(
+        # shellcheck disable=SC1090,SC1091
+        source "$SCRIPT_DIR/../utils/gpu-unlock.sh"
+        scan_nvidia_gpus 2>/dev/null || true
+    )
+    if [[ -n "$gpu_summary" ]]; then
+        echo -e "${BBlue}Detected NVIDIA GPU(s):${NC}" >&2
+        local bdf dev_id tier family _driver model
+        while IFS='|' read -r bdf dev_id tier family _driver model; do
+            [[ -n "$bdf" ]] || continue
+            echo "  - $bdf [10de:$dev_id] $model -> gpu-unlock: $tier ($family)" >&2
+        done <<< "$gpu_summary"
+    fi
+    while true; do
+        echo -e "${BBlue}Optional NVIDIA tensor-core unlock (Zagitta/gpu-unlock — GeForce RTX 20/30/40):${NC}" >&2
+        echo "1) disabled (default)" >&2
+        echo "2) enabled  - build & install gpu-unlock DKMS + firmware for full-rate FP16/BF16/TF32" >&2
+        read -r -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "false"; return 0 ;;
+            2) echo "true"; return 0 ;;
+            *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
+        esac
+    done
+}
+
+ask_for_gpu_unlock_targets() {
+    local choice targets_input
+    local bdf_re='^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7](,[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])*$'
+    while true; do
+        echo -e "${BBlue}Select gpu_unlock.targets kernel parameter:${NC}" >&2
+        echo "1) all - unlock every supported unbound RTX 20/30/40 GPU (default)" >&2
+        echo "2) specific PCI address(es) - comma-separated BDFs (e.g. 0000:01:00.0)" >&2
+        read -r -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "$choice" in
+            1) echo "all"; return 0 ;;
+            2)
+                read -r -p "Enter PCI address(es) (DDDD:BB:DD.F[,DDDD:BB:DD.F...]): " targets_input
+                if [[ "$targets_input" =~ $bdf_re ]]; then
+                    echo "$targets_input"
+                    return 0
+                fi
+                echo -e "${BRed}Invalid PCI address list. Use full lspci -D format (e.g. 0000:01:00.0).\n${NC}" >&2
+                ;;
             *) echo -e "${BRed}Invalid choice. Please enter 1 or 2.\n${NC}" >&2 ;;
         esac
     done
@@ -280,14 +357,14 @@ ask_for_locale() {
         local i=1
         for loc in "${locales[@]}"; do
             printf "  %2d) %s\n" "$i" "$loc" >&2
-            ((i++))
+            (( ++i ))
         done
         echo "   0) Other -- type a locale name" >&2
         read -r -p "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
             read -r -p "Enter locale (e.g. nl_NL.UTF-8): " loc
-            if grep -q "^#\?${loc} " /etc/locale.gen 2>/dev/null; then
+            if [[ "$loc" =~ ^[A-Za-z0-9_.@-]+$ ]] && grep -Eq "^#?${loc//./\\.}[[:space:]]" /etc/locale.gen 2>/dev/null; then
                 echo "$loc"
                 return 0
             else
@@ -327,7 +404,7 @@ ask_for_keymap() {
         local i=1
         for km in "${keymaps[@]}"; do
             printf "  %2d) %s\n" "$i" "$km" >&2
-            ((i++))
+            (( ++i ))
         done
         echo "   0) Other -- type a keymap name" >&2
         read -r -p "Choice [1]: " choice
@@ -498,7 +575,7 @@ setup_tpm_in_chroot() {
         
         # Create PCR check tool
         cat > /mnt/usr/local/bin/check-tpm-pcrs <<TPMCHECK
-#!/bin/bash
+#!/usr/bin/env bash
 echo "Current PCR values:"
 tpm2_pcrread sha256:0+1+4+7+9
 echo
@@ -580,7 +657,7 @@ fi
 # -----------------------
 
 echo -e "${BBlue}Available disks:\n${NC}"
-lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk"
+lsblk -d -o NAME,SIZE,TYPE,MODEL | awk 'NR==1 || $3=="disk"'
 echo
 
 TARGET_DISK=$(ask_for_disk)
@@ -626,45 +703,50 @@ TIMEZONE=$(ask_for_timezone)
 LOCALE=$(ask_for_locale)
 KEYMAP=$(ask_for_keymap)
 
-# Ask for SSH public key (critical: password auth will be disabled)
-echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
-echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${NC}"
-read -r SSH_PUBKEY
-if [[ -z "$SSH_PUBKEY" ]]; then
-    echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
-    echo -e "${BRed}You will need console access to add one after installation.${NC}"
-fi
-
 # Validate SSH public key to prevent shell injection when embedded in sourced files
 validate_ssh_pubkey() {
     local key="$1"
     if [[ -z "$key" ]]; then
         return 0
     fi
-    # Reject keys containing shell metacharacters that could enable injection
-    if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>] ]] || [[ "$key" == *$'\n'* ]]; then
+    # Reject keys containing quotes, backslashes, newlines, or shell metacharacters
+    if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>\"\'\\] ]] || [[ "$key" == *$'\n'* ]] || [[ "$key" == *$'\r'* ]]; then
         echo -e "${BRed}Error: SSH public key contains invalid characters.${NC}" >&2
         return 1
     fi
     # Verify key starts with a known SSH key type prefix
-    if ! [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2|sk-) ]]; then
-        echo -e "${BRed}Error: SSH public key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2, or sk-.${NC}" >&2
+    if ! [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]; then
+        echo -e "${BRed}Error: SSH public key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-, sk-ssh-, or sk-ecdsa-.${NC}" >&2
         return 1
     fi
     return 0
 }
 
-if [[ -n "$SSH_PUBKEY" ]]; then
-    if ! validate_ssh_pubkey "$SSH_PUBKEY"; then
-        echo -e "${BRed}Invalid SSH public key. Aborting.${NC}"
-        exit 1
+# Ask for SSH public key (critical: password auth will be disabled)
+echo -e "\n${BYellow}Password authentication will be disabled after installation.${NC}"
+while true; do
+    echo -e "${BYellow}Paste your SSH public key (from ~/.ssh/id_ed25519.pub, or press Enter for local console setup later):${NC}"
+    read -r SSH_PUBKEY
+    SSH_PUBKEY="${SSH_PUBKEY%$'\r'}"
+    if [[ -z "$SSH_PUBKEY" ]]; then
+        echo -e "${BRed}WARNING: No SSH public key provided!${NC}"
+        echo -e "${BRed}You will need physical console access to add one after installation.${NC}"
+        break
     fi
-fi
+    if validate_ssh_pubkey "$SSH_PUBKEY"; then
+        break
+    fi
+done
 
 echo -e "\n${BBlue}Kernel sysctl profile:${NC}"
 SYSCTL_PROFILE=$(ask_for_sysctl_profile)
 SYSCTL_PROFILE_LABEL=$(describe_sysctl_profile "$SYSCTL_PROFILE")
 DISABLE_IPV6=$(ask_for_ipv6_policy)
+echo
+INSTALL_GPU_UNLOCK=$(ask_for_gpu_unlock)
+if [[ "$INSTALL_GPU_UNLOCK" == "true" ]]; then
+    GPU_UNLOCK_TARGETS=$(ask_for_gpu_unlock_targets)
+fi
 
 echo -e "\nUsername: $USERNAME"
 echo -e "Hostname: $HOSTNAME"
@@ -674,10 +756,11 @@ echo -e "Keymap: $KEYMAP"
 echo -e "Sysctl Profile: $SYSCTL_PROFILE_LABEL"
 echo -e "IPv6: $([[ "$DISABLE_IPV6" == true ]] && echo disabled || echo 'enabled and hardened')"
 echo -e "Boot Profile: $INSTALL_BOOTLOADER"
+echo -e "GPU Unlock: $([[ "$INSTALL_GPU_UNLOCK" == true ]] && echo "enabled (gpu_unlock.targets=$GPU_UNLOCK_TARGETS)" || echo disabled)"
 echo -e "/tmp: ${SIZE_OF_TMP} GiB encrypted LVM volume"
 echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
 
-log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Disable IPv6: $DISABLE_IPV6, Boot Profile: $INSTALL_BOOTLOADER"
+log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Disable IPv6: $DISABLE_IPV6, Boot Profile: $INSTALL_BOOTLOADER, GPU Unlock: $INSTALL_GPU_UNLOCK ($GPU_UNLOCK_TARGETS)"
 
 SWAP_SIZE="${SIZE_OF_SWAP}G"
 ROOT_SIZE="${SIZE_OF_ROOT}G"
@@ -750,7 +833,7 @@ log_action "Creating LUKS container"
 
 LUKS_PBKDF_ARGS=()
 if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
-    # GRUB can read -r LUKS2 but cannot derive Argon2id keys.
+    # GRUB can read LUKS2 but cannot derive Argon2id keys.
     LUKS_PBKDF_ARGS=(--pbkdf pbkdf2)
 else
     LUKS_PBKDF_ARGS=(--pbkdf argon2id)
@@ -785,7 +868,7 @@ echo "You'll need to enter your LUKS passphrase twice (once for each key)"
 cryptsetup -v luksAddKey "$PARTITION3" ./boot.key --key-slot 1
 cryptsetup -v luksAddKey "$PARTITION3" ./recovery.key --key-slot 2
 
-echo -e "${BGreen}IMPORTANT: Save recovery.key externally NOW!${NC}"
+echo -e "${BGreen}IMPORTANT: Copy $(pwd)/recovery.key to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
 read -r -p "Press Enter after saving recovery.key..."
 
 # TPM2 enrollment (if selected)
@@ -796,19 +879,22 @@ if [ "$USE_TPM_LUKS" = true ]; then
     UUID=$(cryptsetup luksUUID "$PARTITION3")
     
     # Create config for later enrollment
-    cat > ./tpm_luks.conf <<EOF
+    (
+        umask 077
+        cat > ./tpm_luks.conf <<EOF
 CRYPTDEVICE=UUID=$UUID:$CRYPT_NAME
 TPM2_PCRS=$TPM_PCRS
 TPM2_DEVICE=$TPM_DEVICE
 EOF
+    )
     
     echo -e "${BYellow}Note: TPM2 enrollment will be completed after system installation${NC}"
 fi
 
 # Backup LUKS header
 echo -e "${BBlue}Backing up LUKS header...${NC}"
-cryptsetup luksHeaderBackup "$PARTITION3" --header-backup-file ./luks-header-backup.img
-echo -e "${BGreen}IMPORTANT: Also save luks-header-backup.img externally!${NC}"
+(umask 077; cryptsetup luksHeaderBackup "$PARTITION3" --header-backup-file ./luks-header-backup.img)
+echo -e "${BGreen}IMPORTANT: Copy $(pwd)/luks-header-backup.img to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
 read -r -p "Press Enter after saving header backup..."
 
 # Open LUKS container
@@ -994,88 +1080,82 @@ if [ "$USE_TPM_LUKS" = true ] && [ -f ./tpm_luks.conf ]; then
     chmod 600 /mnt/etc/tpm_luks.conf
 fi
 
-# Create installation info
-cat > /mnt/root/.install-env <<EOF
-export INSTALL_DISK="$DISK"
-export INSTALL_USER="$USERNAME"
-export INSTALL_HOST="$HOSTNAME"
-export INSTALL_CRYPT="$CRYPT_NAME"
-export INSTALL_LVM="$LVM_NAME"
-export INSTALL_VAR_SIZE="${VAR_SIZE:-}"
-export INSTALL_TMP_SIZE="$TMP_SIZE"
-export INSTALL_TPM="$USE_TPM_LUKS"
-export _INSTALL_TPM_PCRS="$TPM_PCRS"
-export INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
-export INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
-export INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
-export INSTALL_TIMEZONE="$TIMEZONE"
-export INSTALL_LOCALE="$LOCALE"
-export INSTALL_KEYMAP="$KEYMAP"
-export _INSTALL_BOOTLOADER="$INSTALL_BOOTLOADER"
-export INSTALL_DATE="$(date)"
-EOF
+# Create installation info safely with printf %q
+INSTALL_DATE_VAL="$(date)"
+{
+    printf 'export %s=%q\n' \
+        INSTALL_DISK "$DISK" \
+        INSTALL_USER "$USERNAME" \
+        INSTALL_HOST "$HOSTNAME" \
+        INSTALL_CRYPT "$CRYPT_NAME" \
+        INSTALL_LVM "$LVM_NAME" \
+        INSTALL_VAR_SIZE "${VAR_SIZE:-}" \
+        INSTALL_TMP_SIZE "$TMP_SIZE" \
+        INSTALL_TPM "$USE_TPM_LUKS" \
+        INSTALL_TPM_PCRS "$TPM_PCRS" \
+        _INSTALL_TPM_PCRS "$TPM_PCRS" \
+        INSTALL_SSH_PUBKEY "$SSH_PUBKEY" \
+        INSTALL_SYSCTL_PROFILE "$SYSCTL_PROFILE" \
+        INSTALL_DISABLE_IPV6 "$DISABLE_IPV6" \
+        INSTALL_TIMEZONE "$TIMEZONE" \
+        INSTALL_LOCALE "$LOCALE" \
+        INSTALL_KEYMAP "$KEYMAP" \
+        INSTALL_BOOTLOADER "$INSTALL_BOOTLOADER" \
+        _INSTALL_BOOTLOADER "$INSTALL_BOOTLOADER" \
+        INSTALL_GPU_UNLOCK "$INSTALL_GPU_UNLOCK" \
+        _INSTALL_GPU_UNLOCK "$INSTALL_GPU_UNLOCK" \
+        INSTALL_GPU_UNLOCK_TARGETS "$GPU_UNLOCK_TARGETS" \
+        _INSTALL_GPU_UNLOCK_TARGETS "$GPU_UNLOCK_TARGETS" \
+        INSTALL_DATE "$INSTALL_DATE_VAL"
+} > /mnt/root/.install-env
 chmod 600 /mnt/root/.install-env
 
-cat > /mnt/set-install-vars.sh <<EOF
-export _INSTALL_DISK="$DISK"
-export _INSTALL_USER="$USERNAME"
-export _INSTALL_HOST="$HOSTNAME"
-export _INSTALL_CRYPT="$CRYPT_NAME"
-export _INSTALL_LVM="$LVM_NAME"
-export _INSTALL_TMP_SIZE="$TMP_SIZE"
-export INSTALL_TPM="$USE_TPM_LUKS"
-export _INSTALL_TPM_PCRS="$TPM_PCRS"
-export _INSTALL_SSH_PUBKEY="$SSH_PUBKEY"
-export _INSTALL_SYSCTL_PROFILE="$SYSCTL_PROFILE"
-export _INSTALL_DISABLE_IPV6="$DISABLE_IPV6"
-export _INSTALL_TIMEZONE="$TIMEZONE"
-export _INSTALL_LOCALE="$LOCALE"
-export _INSTALL_KEYMAP="$KEYMAP"
-export _INSTALL_BOOTLOADER="$INSTALL_BOOTLOADER"
-EOF
+{
+    printf 'export %s=%q\n' \
+        _INSTALL_DISK "$DISK" \
+        _INSTALL_USER "$USERNAME" \
+        _INSTALL_HOST "$HOSTNAME" \
+        _INSTALL_CRYPT "$CRYPT_NAME" \
+        _INSTALL_LVM "$LVM_NAME" \
+        _INSTALL_TMP_SIZE "$TMP_SIZE" \
+        INSTALL_TPM "$USE_TPM_LUKS" \
+        _INSTALL_TPM "$USE_TPM_LUKS" \
+        _INSTALL_TPM_PCRS "$TPM_PCRS" \
+        _INSTALL_SSH_PUBKEY "$SSH_PUBKEY" \
+        _INSTALL_SYSCTL_PROFILE "$SYSCTL_PROFILE" \
+        _INSTALL_DISABLE_IPV6 "$DISABLE_IPV6" \
+        _INSTALL_TIMEZONE "$TIMEZONE" \
+        _INSTALL_LOCALE "$LOCALE" \
+        _INSTALL_KEYMAP "$KEYMAP" \
+        _INSTALL_BOOTLOADER "$INSTALL_BOOTLOADER" \
+        INSTALL_GPU_UNLOCK "$INSTALL_GPU_UNLOCK" \
+        _INSTALL_GPU_UNLOCK "$INSTALL_GPU_UNLOCK" \
+        INSTALL_GPU_UNLOCK_TARGETS "$GPU_UNLOCK_TARGETS" \
+        _INSTALL_GPU_UNLOCK_TARGETS "$GPU_UNLOCK_TARGETS"
+} > /mnt/set-install-vars.sh
+chmod 700 /mnt/set-install-vars.sh
 
-chmod +x /mnt/set-install-vars.sh
-cp "$SCRIPT_DIR/chroot.sh" /mnt/
-chmod +x /mnt/chroot.sh
-cp "$SCRIPT_DIR/bootloader.sh" /mnt/
-chmod +x /mnt/bootloader.sh
+install -m 0755 "$SCRIPT_DIR/chroot.sh" /mnt/chroot.sh
+install -m 0755 "$SCRIPT_DIR/bootloader.sh" /mnt/bootloader.sh
 
 # Stage the complete sysctl bundle. The chroot helper selects and installs the
 # requested layers without applying them to the live ISO kernel.
-SYSCTL_SOURCE_DIR="$SCRIPT_DIR/../hardening/sysctl"
 SYSCTL_STAGING_DIR="/mnt/sysctl-profile"
-SYSCTL_BUNDLE_FILES=(
-    sysctl.sh
-    60-awesome-security-core.conf
-    70-awesome-workstation-network.conf
-    80-awesome-performance.conf
-    80-awesome-bbr.modules
-    90-awesome-strict.conf
-    90-awesome-ipv6-disabled.conf
-)
 install -d -m 0755 "$SYSCTL_STAGING_DIR"
 for sysctl_file in "${SYSCTL_BUNDLE_FILES[@]}"; do
-    if [[ ! -f "$SYSCTL_SOURCE_DIR/$sysctl_file" ]]; then
-        echo -e "${BRed}Missing sysctl bundle file: $SYSCTL_SOURCE_DIR/$sysctl_file${NC}" >&2
-        exit 1
-    fi
     install -m 0644 "$SYSCTL_SOURCE_DIR/$sysctl_file" "$SYSCTL_STAGING_DIR/$sysctl_file"
 done
 chmod 0755 "$SYSCTL_STAGING_DIR/sysctl.sh"
 
-if [ -f "$SCRIPT_DIR/../hardening/ssh/ssh.sh" ]; then
-    cp "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/
-    chmod +x /mnt/ssh.sh
-fi
-
-if [ -f "$SCRIPT_DIR/../hardening/lib/nftables.sh" ]; then
-    cp "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
-    chmod 0644 /mnt/nftables.sh
-fi
+install -m 0755 "$SCRIPT_DIR/../hardening/ssh/ssh.sh" /mnt/ssh.sh
+install -m 0644 "$SCRIPT_DIR/../hardening/lib/nftables.sh" /mnt/nftables.sh
 
 install -Dm0644 "$SCRIPT_DIR/lib/chroot-security.sh" /mnt/usr/local/lib/awesomearchlinux/chroot-security.sh
 install -Dm0644 "$SCRIPT_DIR/../utils/auditd-attack.rules" /mnt/usr/local/share/awesomearchlinux/auditd-attack.rules
-install -Dm0644 "$SCRIPT_DIR/../utils/board-health.py" /mnt/usr/local/lib/awesomearchlinux/board-health.py
+install -Dm0755 "$SCRIPT_DIR/../utils/board-health.sh" /mnt/usr/local/lib/awesomearchlinux/board-health.sh
+install -Dm0755 "$SCRIPT_DIR/../utils/gpu-unlock.sh" /mnt/usr/local/lib/awesomearchlinux/gpu-unlock.sh
+install -d -m 0755 /mnt/usr/local/sbin
+ln -sfn /usr/local/lib/awesomearchlinux/gpu-unlock.sh /mnt/usr/local/sbin/awesome-gpu-unlock
 
 # Stage reviewed AUR installation and AIDE configuration for root after reboot.
 install -m 0700 "$SCRIPT_DIR/install-aur-packages.sh" /mnt/root/install-aur-packages.sh
@@ -1127,6 +1207,7 @@ TPM2 Enabled: $USE_TPM_LUKS
 Sysctl Profile: $SYSCTL_PROFILE_LABEL
 IPv6 Disabled: $DISABLE_IPV6
 Boot Profile: $INSTALL_BOOTLOADER
+GPU Unlock (Zagitta/gpu-unlock): $([[ "$INSTALL_GPU_UNLOCK" == true ]] && echo "enabled (gpu_unlock.targets=$GPU_UNLOCK_TARGETS; check with 'awesome-gpu-unlock --status')" || echo "disabled (optional; install later with 'sudo awesome-gpu-unlock --install')")
 
 CRITICAL POST-INSTALLATION STEPS:
 =================================
@@ -1231,6 +1312,7 @@ shred -vzu /mnt/sysctl.sh 2>/dev/null || true
 shred -vzu /mnt/sysctl-profile.conf 2>/dev/null || true
 rm -rf -- /mnt/sysctl-profile
 shred -vzu /mnt/ssh.sh 2>/dev/null || true
+shred -vzu /mnt/nftables.sh 2>/dev/null || true
 
 # Clear pacman cache
 arch-chroot /mnt bash -c "pacman -Scc --noconfirm"
@@ -1259,6 +1341,7 @@ if [ "$USE_TPM_LUKS" = true ]; then
 fi
 echo "5. Review: /root/POST_INSTALL_README.txt"
 echo
-echo -e "${BGreen}Remember to securely store recovery.key and luks-header-backup.img!${NC}"
+echo -e "${BGreen}Verify your external off-machine backups of recovery.key and luks-header-backup.img!${NC}"
+echo -e "${BYellow}(Live-ISO copies have been shredded; an encrypted copy of luks-header-backup.img is also at /root/luks-header-backup.img on the installed system, which should be moved off-machine.)${NC}"
 
 log_action "Installation completed successfully"

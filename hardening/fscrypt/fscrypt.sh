@@ -32,6 +32,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors (kept together — some may be unused depending on code path) ---
 # shellcheck disable=SC2034
@@ -97,11 +98,16 @@ else
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --setup)         ACTION="setup"; shift ;;
-            --encrypt-user)  ACTION="encrypt-user"; TARGET_USER="${2:-}"; shift 2 ;;
+            --encrypt-user)
+                [[ $# -ge 2 && -n "${2:-}" && "${2:-}" != -* ]] || err "--encrypt-user requires a USERNAME argument."
+                ACTION="encrypt-user"
+                TARGET_USER="$2"
+                shift 2
+                ;;
             --status)        ACTION="status"; shift ;;
             --uninstall)     ACTION="uninstall"; shift ;;
             -h|--help)       show_help ;;
-            *)               warn "Unknown option: $1"; show_help ;;
+            *)               err "Unknown option: $1" ;;
         esac
     done
 fi
@@ -183,6 +189,22 @@ append_pam_line() {
         return 0
     fi
     backup_file "$file"
+    if [[ "$line" == session* ]] && grep -Eq '^[[:space:]]*-?session[[:space:]]+optional[[:space:]]+pam_systemd\.so([[:space:]]|$)' "$file"; then
+        local tmp
+        tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX")
+        AAL_MARK="$MARK" AAL_LINE="$line" awk '
+            !inserted && /^[[:space:]]*-?session[[:space:]]+optional[[:space:]]+pam_systemd\.so([[:space:]]|$)/ {
+                print ENVIRON["AAL_MARK"]
+                print ENVIRON["AAL_LINE"]
+                inserted = 1
+            }
+            { print }
+        ' "$file" > "$tmp"
+        chmod 0644 "$tmp"
+        mv -f -- "$tmp" "$file"
+        ok "Inserted before pam_systemd.so in $file: $line"
+        return 0
+    fi
     {
         echo ""
         echo "$MARK"
@@ -193,20 +215,18 @@ append_pam_line() {
 
 remove_pam_lines() {
     # Remove lines matching any of our exact PAM strings plus preceding MARK
-    # comments. Uses a tmp file to keep things simple and portable.
+    # comments. Stage in the same directory with mode 0644 before atomic mv.
     local file="$1"
     [[ -f "$file" ]] || return 0
     backup_file "$file"
     local tmp
-    tmp="$(mktemp)"
+    tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX")
     # Drop any line that is exactly one of our managed lines or our marker.
-    awk -v m="$MARK" \
-        -v a="$PAM_AUTH_LINE" \
-        -v s="$PAM_SESSION_LINE" \
-        -v p="$PAM_PASSWORD_LINE" \
-        '$0 != m && $0 != a && $0 != s && $0 != p { print }' "$file" > "$tmp"
-    mv "$tmp" "$file"
-    chmod 644 "$file"
+    AAL_MARK="$MARK" AAL_AUTH="$PAM_AUTH_LINE" AAL_SESS="$PAM_SESSION_LINE" AAL_PASS="$PAM_PASSWORD_LINE" awk '
+        $0 != ENVIRON["AAL_MARK"] && $0 != ENVIRON["AAL_AUTH"] && $0 != ENVIRON["AAL_SESS"] && $0 != ENVIRON["AAL_PASS"] { print }
+    ' "$file" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f -- "$tmp" "$file"
     ok "Cleaned pam_fscrypt lines from $file"
 }
 
@@ -220,23 +240,30 @@ require_cmd() {
 
 do_status() {
     info "fscrypt status"
-    local dev
-    dev="$(get_root_device)"
-    echo "Root device           : ${dev:-unknown}"
-
-    if is_ext4; then
-        echo "Root filesystem type  : ext4"
-    else
-        echo "Root filesystem type  : $(stat -f -c %T / 2>/dev/null || echo unknown) (NOT ext4)"
-    fi
-
-    if [[ -n "$dev" && -b "$dev" ]]; then
-        if has_encrypt_feature "$dev"; then
-            echo "ext4 'encrypt' feat.  : enabled"
+    local target label dev fstype
+    for target in / /home; do
+        [[ -e "$target" ]] || continue
+        if [[ "$target" == "/" ]]; then
+            label="Root (/)"
         else
-            echo "ext4 'encrypt' feat.  : DISABLED (needs: tune2fs -O encrypt $dev from rescue)"
+            label="Home (/home)"
         fi
-    fi
+        dev="$(findmnt -n -o SOURCE -T "$target" 2>/dev/null || true)"
+        fstype="$(findmnt -n -o FSTYPE -T "$target" 2>/dev/null || echo unknown)"
+        echo "$label device       : ${dev:-unknown}"
+        if [[ "$fstype" == "ext4" ]]; then
+            echo "$label fstype       : ext4"
+        else
+            echo "$label fstype       : ${fstype} (NOT ext4)"
+        fi
+        if [[ -n "$dev" && -b "$dev" ]]; then
+            if has_encrypt_feature "$dev"; then
+                echo "$label 'encrypt'    : enabled"
+            else
+                echo "$label 'encrypt'    : DISABLED (needs: tune2fs -O encrypt $dev from rescue)"
+            fi
+        fi
+    done
 
     if command -v fscrypt >/dev/null 2>&1; then
         echo "fscrypt package       : installed ($(fscrypt --version 2>&1 | head -n1))"
@@ -260,6 +287,7 @@ do_status() {
     local wired=1
     pam_line_present "$PAM_SYSTEM_LOGIN" "$PAM_AUTH_LINE"     || wired=0
     pam_line_present "$PAM_SYSTEM_LOGIN" "$PAM_SESSION_LINE"  || wired=0
+    pam_line_present "$PAM_SYSTEM_LOGIN" "$PAM_PASSWORD_LINE" || wired=0
     pam_line_present "$PAM_PASSWD"       "$PAM_PASSWORD_LINE" || wired=0
     if [[ "$wired" -eq 1 ]]; then
         echo "PAM wiring            : complete"
@@ -286,7 +314,7 @@ do_setup() {
     require_cmd pacman
     if ! command -v fscrypt >/dev/null 2>&1; then
         info "Installing fscrypt via pacman..."
-        pacman -S --needed --noconfirm fscrypt
+        pacman -Syu --needed --noconfirm fscrypt
     else
         info "fscrypt already installed"
     fi
@@ -325,6 +353,7 @@ Check: pacman -Ql fscrypt | grep pam_fscrypt"
 
     append_pam_line "$PAM_SYSTEM_LOGIN" "$PAM_AUTH_LINE"
     append_pam_line "$PAM_SYSTEM_LOGIN" "$PAM_SESSION_LINE"
+    append_pam_line "$PAM_SYSTEM_LOGIN" "$PAM_PASSWORD_LINE"
     append_pam_line "$PAM_PASSWD"       "$PAM_PASSWORD_LINE"
 
     ok "PAM wiring complete"
@@ -332,7 +361,7 @@ Check: pacman -Ql fscrypt | grep pam_fscrypt"
     # 7. Post-setup summary
     cat <<EOF
 
-${MARK%# *}
+${MARK#\# }
 ================================================================================
  fscrypt system-wide setup complete.
 ================================================================================
@@ -364,9 +393,28 @@ EOF
 do_encrypt_user() {
     local u="$TARGET_USER"
     [[ -n "$u" ]] || err "--encrypt-user requires a USERNAME argument."
+    [[ "$u" != "root" ]] || err "Refusing to encrypt root's home directory."
 
-    # Verify user exists
-    id -u "$u" >/dev/null 2>&1 || err "User '$u' does not exist."
+    # Verify user exists and is a regular non-system account (UID >= 1000)
+    local uid
+    uid=$(id -u "$u" 2>/dev/null) || err "User '$u' does not exist."
+    [[ "$uid" =~ ^[0-9]+$ ]] || err "Could not determine numeric UID for '$u'."
+    if (( uid < 1000 )); then
+        err "Refusing to encrypt system account '$u' (UID $uid < 1000)."
+    fi
+
+    # Prevent self-kill mid-migration: loginctl terminate-user "$u" kills every
+    # process in "$u"'s login session (including a sudo ./fscrypt.sh child!).
+    if [[ "${SUDO_USER:-}" == "$u" ]]; then
+        err "Refusing to encrypt '$u' from a sudo session started by '$u': 'loginctl terminate-user $u' would kill this script mid-migration. Log in directly as root on a local console (or via another admin user) and retry."
+    fi
+    if [[ -n "${XDG_SESSION_ID:-}" ]] && command -v loginctl >/dev/null 2>&1; then
+        local session_user=""
+        session_user=$(loginctl show-session "$XDG_SESSION_ID" -p Name --value 2>/dev/null || true)
+        if [[ "$session_user" == "$u" ]]; then
+            err "Refusing to encrypt '$u' from active logind session '$XDG_SESSION_ID' owned by '$u': 'loginctl terminate-user $u' would kill this script mid-migration. Log in directly as root on a local console (or via another admin user) and retry."
+        fi
+    fi
 
     # Prereqs: setup must already have run
     command -v fscrypt >/dev/null 2>&1 || err "fscrypt is not installed. Run: sudo $0 --setup"
@@ -431,6 +479,10 @@ EOF
     local staged
     staged=$(mktemp -d -- "${home}.encrypt.XXXXXX")
     chown "$u:$group" "$staged"
+    chmod "$mode" "$staged"
+    if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then
+        getfacl -p "$home" 2>/dev/null | setfacl --set-file=- "$staged" 2>/dev/null || true
+    fi
     info "Running 'fscrypt encrypt' — the user's LOGIN PASSWORD will be requested."
     if ! fscrypt encrypt "$staged" --user="$u" --source=pam_passphrase; then
         rmdir -- "$staged" 2>/dev/null || warn "Inspect the failed encryption directory: $staged"
@@ -439,8 +491,7 @@ EOF
 
     # An account with no sessions is absent from logind; terminating it would
     # fail even though it is already safe to proceed.
-    local active_users uid
-    uid=$(id -u "$u")
+    local active_users
     active_users=$(loginctl list-users --no-legend --no-pager) || err "Cannot check active sessions; original home remains at $home."
     if awk -v uid="$uid" '$1 == uid { found=1 } END { exit !found }' <<< "$active_users"; then
         info "Terminating active sessions for '$u'..."
@@ -456,23 +507,15 @@ EOF
     ok "fscrypt encrypt succeeded on $home"
 
     # 5. Recovery key handling.
-    #
-    # NOTE: fscrypt does not have a first-class '--emit-recovery-key' flag on
-    # every release. The portable way to add a second protector is:
-    #     fscrypt metadata create protector --source=custom_passphrase \
-    #         --name=<user>-recovery /
-    # followed by linking it with:
-    #     fscrypt metadata add-protector-to-policy ...
-    # The exact flag names have moved between releases, so rather than bake
-    # a fragile command in, we emit a TODO banner and direct the admin to
-    # the README for the manual recipe. The encrypted directory is already
-    # live and the login-password protector is already in place.
+    local home_mount
+    home_mount=$(findmnt -n -o TARGET -T "$home")
     local recovery_file="/root/fscrypt-recovery-${u}.txt"
-    umask 077
-    cat > "$recovery_file" <<EOF
+    (
+        umask 077
+        cat > "$recovery_file" <<EOF
 fscrypt recovery information for user: $u
 Generated: $(date -Iseconds)
-Home     : $home
+Home     : $home (mountpoint: $home_mount)
 Original : $moved   (still present — remove manually once verified)
 
 NO automatic recovery key was generated by this script. fscrypt's CLI for
@@ -480,14 +523,18 @@ creating a secondary recovery protector varies by release. To add one
 manually, run (as root), then record the passphrase here:
 
     fscrypt metadata create protector --source=custom_passphrase \\
-        --name=${u}-recovery /
+        --name=${u}-recovery ${home_mount}
 
     # then attach it to the policy protecting $home — see 'fscrypt metadata --help'
-    # for the exact add-protector-to-policy invocation on your release.
+    # for the exact add-protector-to-policy invocation on your release, e.g.:
+    #   fscrypt metadata add-protector-to-policy \\
+    #       --protector=${home_mount}:PROTECTOR_ID \\
+    #       --policy=${home_mount}:POLICY_ID
 
 Store that passphrase in a password manager. If '$u' forgets their login
 password, unlocking $home will require this recovery protector.
 EOF
+    )
     chmod 600 "$recovery_file"
     ok "Recovery notes written to $recovery_file (mode 600)"
 
@@ -535,7 +582,7 @@ do_uninstall() {
 
     cat <<EOF
 
-${MARK%# *}
+${MARK#\# }
 ================================================================================
  fscrypt PAM wiring has been removed.
 ================================================================================

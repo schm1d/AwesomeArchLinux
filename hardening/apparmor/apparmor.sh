@@ -20,18 +20,19 @@
 # Requirements:
 #   - Arch Linux with pacman
 #   - Root privileges
-#   - GRUB bootloader (for kernel parameter injection)
+#   - UKI (/etc/kernel/cmdline), systemd-boot, or GRUB bootloader
 #
 # What this script does:
-#   1. Installs apparmor and apparmor-utils
+#   1. Installs apparmor
 #   2. Enables the AppArmor systemd service
-#   3. Configures GRUB to load AppArmor at boot
+#   3. Configures UKI, systemd-boot, or GRUB to load AppArmor at boot
 #   4. Writes enforce-mode profiles for 7 services
 #   5. Loads all profiles in enforce mode via aa-enforce
 #   6. Displays a status summary via aa-status
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -47,8 +48,10 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 
 # --- Defaults ---
 DRY_RUN=false
+KERNEL_CMDLINE="/etc/kernel/cmdline"
 GRUB_DEFAULT="/etc/default/grub"
 APPARMOR_DIR="/etc/apparmor.d"
+BOOTLOADER_DESC="unknown"
 LOGFILE="/var/log/apparmor-hardening-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Usage ---
@@ -81,16 +84,19 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 
 if [[ "$DRY_RUN" == true ]]; then
-    # A unique root-owned directory prevents an unprivileged user from
-    # pre-planting symlinks that a root dry-run would follow.
+    # A unique directory prevents an unprivileged user from pre-planting
+    # symlinks that a root dry-run would follow.
     APPARMOR_DIR=$(mktemp -d /tmp/apparmor-preview.XXXXXX)
     chmod 0700 "$APPARMOR_DIR"
     LOGFILE="$APPARMOR_DIR/apparmor-hardening.log"
+    install -m 0600 /dev/null "$LOGFILE"
     warn "DRY-RUN mode: profiles will be written to $APPARMOR_DIR (not loaded)"
+else
+    install -d -o root -g root -m 0755 "$APPARMOR_DIR"
+    # Redirect output to a root-only logfile while keeping umask 022 for profiles
+    install -o root -g root -m 0600 /dev/null "$LOGFILE"
 fi
 
-# Redirect output to logfile as well
-umask 077
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "AppArmor hardening script started"
@@ -105,8 +111,8 @@ msg "Installing AppArmor packages..."
 if [[ "$DRY_RUN" == false ]]; then
     pacman -Syu --noconfirm --needed apparmor
 
-    # apparmor-utils (aa-enforce, aa-complain, aa-status) is part of the
-    # apparmor package on Arch Linux. Verify the runtime tools are available.
+    # Runtime utilities (aa-enforce, aa-complain, aa-status, apparmor_parser)
+    # ship inside the apparmor package on Arch Linux. Verify they are available.
     for tool in aa-enforce aa-complain aa-status apparmor_parser; do
         if ! command -v "$tool" &>/dev/null; then
             err "$tool not found after installing apparmor. Check your installation."
@@ -132,48 +138,159 @@ else
 fi
 
 # =============================================================================
-# 3. CONFIGURE GRUB KERNEL PARAMETERS
+# 3. CONFIGURE BOOTLOADER KERNEL PARAMETERS
 # =============================================================================
 
-msg "Configuring GRUB for AppArmor..."
+msg "Configuring bootloader kernel parameters for AppArmor..."
 
-if [[ ! -f "$GRUB_DEFAULT" ]]; then
-    err "GRUB configuration not found at $GRUB_DEFAULT. Is GRUB installed?"
-fi
+add_apparmor_params() {
+    local line="$1" param
+    for param in apparmor=1 security=apparmor; do
+        if ! grep -qE "(^|[[:space:]])${param}([[:space:]]|$)" <<< "$line"; then
+            line="${line:+$line }$param"
+        fi
+    done
+    awk '{$1=$1; print}' <<< "$line"
+}
 
-# Read the current GRUB_CMDLINE_LINUX_DEFAULT value
-CURRENT_CMDLINE=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_DEFAULT" | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')
+has_uki_preset() {
+    local preset
+    shopt -s nullglob
+    for preset in /etc/mkinitcpio.d/*.preset; do
+        if grep -Eq '^[[:space:]]*default_uki=' "$preset" 2>/dev/null; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
 
-NEEDS_UPDATE=false
+declare -a SDBOOT_ENTRIES=()
+shopt -s nullglob
+for sd_dir in /efi/loader/entries /boot/loader/entries /boot/efi/loader/entries; do
+    [[ -d "$sd_dir" ]] || continue
+    for sd_entry in "$sd_dir"/*.conf; do
+        SDBOOT_ENTRIES+=("$sd_entry")
+    done
+done
+shopt -u nullglob
 
-if [[ "$CURRENT_CMDLINE" != *"apparmor=1"* ]]; then
-    CURRENT_CMDLINE="$CURRENT_CMDLINE apparmor=1"
-    NEEDS_UPDATE=true
-fi
-
-if [[ "$CURRENT_CMDLINE" != *"security=apparmor"* ]]; then
-    CURRENT_CMDLINE="$CURRENT_CMDLINE security=apparmor"
-    NEEDS_UPDATE=true
-fi
-
-# Clean up any double spaces
-CURRENT_CMDLINE=$(echo "$CURRENT_CMDLINE" | sed 's/  */ /g;s/^ //;s/ $//')
-
-if [[ "$NEEDS_UPDATE" == true ]]; then
-    if [[ "$DRY_RUN" == false ]]; then
-        # Back up GRUB config
-        cp "$GRUB_DEFAULT" "${GRUB_DEFAULT}.bak.$(date +%Y%m%d-%H%M%S)"
-        sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$CURRENT_CMDLINE\"|" "$GRUB_DEFAULT"
-        msg "GRUB updated: GRUB_CMDLINE_LINUX_DEFAULT=\"$CURRENT_CMDLINE\""
-
-        # Regenerate GRUB config
-        grub-mkconfig -o /boot/grub/grub.cfg
-        msg "GRUB configuration regenerated"
+if [[ -f "$KERNEL_CMDLINE" ]] && has_uki_preset; then
+    BOOTLOADER_DESC="UKI ($KERNEL_CMDLINE)"
+    if [[ "$DRY_RUN" == true && ! -r "$KERNEL_CMDLINE" ]]; then
+        info "DRY-RUN: $KERNEL_CMDLINE is not readable in unprivileged preview; would ensure apparmor=1 security=apparmor"
     else
-        info "DRY-RUN: Would set GRUB_CMDLINE_LINUX_DEFAULT=\"$CURRENT_CMDLINE\""
+        CURRENT_CMDLINE=$(tr '\n' ' ' < "$KERNEL_CMDLINE" | awk '{$1=$1; print}')
+        UPDATED_CMDLINE=$(add_apparmor_params "$CURRENT_CMDLINE")
+
+        if [[ "$UPDATED_CMDLINE" != "$CURRENT_CMDLINE" ]]; then
+            if [[ "$DRY_RUN" == false ]]; then
+                cp -a "$KERNEL_CMDLINE" "${KERNEL_CMDLINE}.bak.$(date +%Y%m%d-%H%M%S)"
+                printf '%s\n' "$UPDATED_CMDLINE" > "$KERNEL_CMDLINE"
+                chmod 0600 "$KERNEL_CMDLINE"
+                msg "Updated $KERNEL_CMDLINE: $UPDATED_CMDLINE"
+
+                mkinitcpio -P
+                msg "Rebuilt UKI images via mkinitcpio -P"
+
+                if command -v sbctl &>/dev/null && [[ -d /var/lib/sbctl/keys || -f /var/lib/sbctl/GUID || -d /usr/share/secureboot/keys || -f /usr/share/secureboot/GUID || -f /etc/awesome-secureboot.conf ]]; then
+                    sbctl sign-all
+                    msg "Re-signed Secure Boot UKI images via sbctl"
+                fi
+            else
+                info "DRY-RUN: Would set $KERNEL_CMDLINE to: $UPDATED_CMDLINE (and rebuild/sign UKIs)"
+            fi
+        else
+            info "UKI $KERNEL_CMDLINE already contains AppArmor kernel parameters"
+        fi
     fi
+elif (( ${#SDBOOT_ENTRIES[@]} > 0 )); then
+    BOOTLOADER_DESC="systemd-boot (${#SDBOOT_ENTRIES[@]} entry file(s))"
+    for sd_entry in "${SDBOOT_ENTRIES[@]}"; do
+        if [[ "$DRY_RUN" == true && ! -r "$sd_entry" ]]; then
+            info "DRY-RUN: $sd_entry is not readable in unprivileged preview; would ensure apparmor=1 security=apparmor"
+            continue
+        fi
+        CURRENT_OPTS=$(awk '/^options[[:space:]]+/ { sub(/^options[[:space:]]+/, ""); print; exit }' "$sd_entry")
+        UPDATED_OPTS=$(add_apparmor_params "$CURRENT_OPTS")
+
+        if [[ "$UPDATED_OPTS" != "$CURRENT_OPTS" ]]; then
+            if [[ "$DRY_RUN" == false ]]; then
+                cp -a "$sd_entry" "${sd_entry}.bak.$(date +%Y%m%d-%H%M%S)"
+                if grep -Eq '^options[[:space:]]+' "$sd_entry"; then
+                    AAL_OPTS="$UPDATED_OPTS" awk '
+                        /^options[[:space:]]+/ { print "options " ENVIRON["AAL_OPTS"]; next }
+                        { print }
+                    ' "$sd_entry" > "${sd_entry}.new"
+                    mv -f "${sd_entry}.new" "$sd_entry"
+                else
+                    printf 'options %s\n' "$UPDATED_OPTS" >> "$sd_entry"
+                fi
+                msg "Updated systemd-boot entry: $sd_entry"
+            else
+                info "DRY-RUN: Would update options in $sd_entry to: $UPDATED_OPTS"
+            fi
+        else
+            info "systemd-boot entry already contains AppArmor parameters: $sd_entry"
+        fi
+    done
+elif [[ -f "$GRUB_DEFAULT" ]]; then
+    BOOTLOADER_DESC="GRUB ($GRUB_DEFAULT)"
+    if [[ "$DRY_RUN" == true && ! -r "$GRUB_DEFAULT" ]]; then
+        info "DRY-RUN: $GRUB_DEFAULT is not readable in unprivileged preview; would ensure apparmor=1 security=apparmor"
+    else
+        GRUB_LINE=$(grep -E '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_DEFAULT" | head -n 1 || true)
+        CURRENT_CMDLINE="${GRUB_LINE#*=}"
+        if [[ "$CURRENT_CMDLINE" == \"*\" ]]; then
+            CURRENT_CMDLINE="${CURRENT_CMDLINE#\"}"
+            CURRENT_CMDLINE="${CURRENT_CMDLINE%\"}"
+        elif [[ "$CURRENT_CMDLINE" == \'*\' ]]; then
+            CURRENT_CMDLINE="${CURRENT_CMDLINE#\'}"
+            CURRENT_CMDLINE="${CURRENT_CMDLINE%\'}"
+        fi
+        UPDATED_CMDLINE=$(add_apparmor_params "$CURRENT_CMDLINE")
+
+        if [[ "$UPDATED_CMDLINE" != "$CURRENT_CMDLINE" ]]; then
+            if [[ "$DRY_RUN" == false ]]; then
+                cp -a "$GRUB_DEFAULT" "${GRUB_DEFAULT}.bak.$(date +%Y%m%d-%H%M%S)"
+                if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_DEFAULT"; then
+                    TMP_GRUB=$(mktemp /etc/default/.grub.XXXXXX)
+                    AAL_CMDLINE="$UPDATED_CMDLINE" awk '
+                        !updated && /^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/ {
+                            print "GRUB_CMDLINE_LINUX_DEFAULT=\"" ENVIRON["AAL_CMDLINE"] "\""
+                            updated = 1
+                            next
+                        }
+                        { print }
+                    ' "$GRUB_DEFAULT" > "$TMP_GRUB"
+                    chmod --reference="$GRUB_DEFAULT" "$TMP_GRUB" 2>/dev/null || chmod 0644 "$TMP_GRUB"
+                    mv -f -- "$TMP_GRUB" "$GRUB_DEFAULT"
+                else
+                    printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$UPDATED_CMDLINE" >> "$GRUB_DEFAULT"
+                fi
+                msg "GRUB updated: GRUB_CMDLINE_LINUX_DEFAULT=\"$UPDATED_CMDLINE\""
+
+                if [[ -d /efi/grub && ! -d /boot/grub ]]; then
+                    grub-mkconfig -o /efi/grub/grub.cfg
+                    chmod 0600 /efi/grub/grub.cfg
+                else
+                    grub-mkconfig -o /boot/grub/grub.cfg
+                    chmod 0600 /boot/grub/grub.cfg
+                fi
+                msg "GRUB configuration regenerated (mode 0600)"
+            else
+                info "DRY-RUN: Would set GRUB_CMDLINE_LINUX_DEFAULT=\"$UPDATED_CMDLINE\""
+            fi
+        else
+            info "GRUB already contains AppArmor kernel parameters"
+        fi
+    fi
+elif [[ "$DRY_RUN" == true ]]; then
+    BOOTLOADER_DESC="preview only (no local bootloader detected)"
+    info "DRY-RUN: No UKI (/etc/kernel/cmdline), systemd-boot entries, or GRUB (/etc/default/grub) found; skipping bootloader update"
 else
-    info "GRUB already contains AppArmor kernel parameters"
+    err "No supported bootloader configuration found (/etc/kernel/cmdline UKI, systemd-boot entries, or $GRUB_DEFAULT)."
 fi
 
 # =============================================================================
@@ -196,42 +313,49 @@ profile nginx /usr/bin/nginx flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
+  #include <abstractions/ssl_certs>
 
   # Capabilities
   capability net_bind_service,
   capability setuid,
   capability setgid,
+  capability chown,
   capability dac_override,
+  capability dac_read_search,
 
   # Network
   network inet stream,
   network inet dgram,
   network inet6 stream,
   network inet6 dgram,
+  network unix stream,
 
   # Binary
   /usr/bin/nginx                   mr,
 
   # Configuration
-  /etc/nginx/**                    r,
+  /etc/nginx/{,**}                 r,
 
   # Web content
-  /var/www/**                      r,
+  /var/www/{,**}                   r,
+  /srv/http/{,**}                  r,
+  /usr/share/nginx/html/{,**}      r,
 
   # Logs
-  /var/log/nginx/**                rw,
+  /var/log/nginx/{,**}             rw,
   owner /var/log/nginx/**          w,
 
-  # PID file
+  # PID file and FastCGI upstream sockets
   /run/nginx.pid                   rw,
+  /run/php-fpm/*.sock              rw,
 
   # TLS certificates
-  /etc/letsencrypt/**              r,
-  /etc/ssl/**                      r,
+  /etc/letsencrypt/{,**}           r,
+  /etc/ssl/{,**}                   r,
 
   # Temp and cache
-  /var/cache/nginx/**              rw,
-  /var/lib/nginx/**                rw,
+  /var/cache/nginx/{,**}           rw,
+  /var/lib/nginx/{,**}             rw,
 
   # Proc
   /proc/sys/kernel/random/boot_id  r,
@@ -259,39 +383,54 @@ abi <abi/3.0>,
 profile sshd /usr/bin/sshd flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/authentication>
+  #include <abstractions/libpam-systemd>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
+  #include <abstractions/wutmp>
 
   # Capabilities
   capability net_bind_service,
   capability setuid,
   capability setgid,
   capability sys_chroot,
+  capability sys_resource,
   capability chown,
   capability dac_override,
+  capability dac_read_search,
   capability kill,
   capability audit_write,
 
   # Network
   network inet stream,
   network inet6 stream,
+  network netlink raw,
+  network unix stream,
+  network unix dgram,
 
-  # Binary
+  # Binary and OpenSSH 10.x privilege-separated helpers
   /usr/bin/sshd                    mr,
+  /usr/lib/ssh/sshd-session        rix,
+  /usr/lib/ssh/sshd-auth           rix,
+  /usr/lib/ssh/sftp-server         rix,
+  /usr/lib/ssh/ssh-sk-helper       rix,
+  /usr/lib/ssh/ssh-pkcs11-helper   rix,
 
-  # Configuration
-  /etc/ssh/**                      r,
+  # Configuration and authorized keys
+  /etc/ssh/{,**}                   r,
   owner /etc/ssh/ssh_host_*_key    r,
+  @{HOME}/.ssh/{,**}               r,
 
   # Logs
-  /var/log/**                      rw,
+  /var/log/{,**}                   rw,
   owner /var/log/auth.log          w,
   owner /var/log/btmp              rw,
   owner /var/log/wtmp              rw,
   owner /var/log/lastlog           rw,
 
-  # PID file
+  # PID, systemd notify, and PAM faillock state
   /run/sshd.pid                    rw,
+  @{run}/systemd/notify            w,
+  /run/faillock/{,**}              rwk,
 
   # Proc
   /proc/sys/kernel/ngroups_max     r,
@@ -307,11 +446,12 @@ profile sshd /usr/bin/sshd flags=(enforce) {
   # User session
   /etc/shells                      r,
   /etc/login.defs                  r,
-  /etc/security/**                 r,
-  /etc/pam.d/**                    r,
+  /etc/security/{,**}              r,
+  /etc/pam.d/{,**}                 r,
   /etc/environment                 r,
   /etc/default/locale              r,
   /etc/motd                        r,
+  /etc/issue.net                   r,
 
   # Privilege separation directory
   /run/sshd/                       r,
@@ -320,9 +460,15 @@ profile sshd /usr/bin/sshd flags=(enforce) {
   /bin/bash                        Ux,
   /bin/sh                          Ux,
   /bin/zsh                         Ux,
+  /bin/fish                        Ux,
+  /bin/git-shell                   Ux,
+  /bin/nologin                     rix,
   /usr/bin/bash                    Ux,
   /usr/bin/sh                      Ux,
   /usr/bin/zsh                     Ux,
+  /usr/bin/fish                    Ux,
+  /usr/bin/git-shell               Ux,
+  /usr/bin/nologin                 rix,
 
   # Shared libraries
   /usr/lib/**                      mr,
@@ -358,37 +504,45 @@ profile fail2ban-server /usr/bin/fail2ban-server flags=(enforce) {
   network inet dgram,
   network inet6 stream,
   network inet6 dgram,
+  network netlink raw,
+  network unix stream,
+  network unix dgram,
 
   # Binary
   /usr/bin/fail2ban-server         mr,
 
-  # Python interpreter
-  /usr/bin/python3*                ix,
+  # Python interpreter and action shell/text helpers
+  /usr/bin/python3*                mrix,
+  /{usr/,}bin/{bash,sh,dash}       rix,
+  /usr/bin/{sed,grep,gawk,awk}     rix,
 
-  # Configuration
-  /etc/fail2ban/**                 r,
+  # Configuration and systemd journal machine identity
+  /etc/fail2ban/{,**}              r,
+  /etc/machine-id                  r,
 
   # State
-  /var/lib/fail2ban/**             rw,
+  /var/lib/fail2ban/{,**}          rwk,
   owner /var/lib/fail2ban/**       rwk,
 
-  # Logs — read -r to detect intrusions, write own log
-  /var/log/**                      r,
+  # Logs — read to detect intrusions, write own log
+  /var/log/{,**}                   r,
+  /run/log/journal/{,**}           r,
   owner /var/log/fail2ban.log      rw,
 
   # Runtime
-  /run/fail2ban/**                 rw,
+  /run/fail2ban/{,**}              rw,
   owner /run/fail2ban/fail2ban.pid rw,
   owner /run/fail2ban/fail2ban.sock rw,
 
   # Firewall tools — needed for ban/unban actions
-  /usr/bin/nft                     ix,
-  /usr/bin/iptables                ix,
-  /usr/bin/iptables-save           ix,
-  /usr/bin/iptables-restore        ix,
-  /usr/bin/ip6tables               ix,
-  /usr/bin/ip6tables-save          ix,
-  /usr/bin/ip6tables-restore       ix,
+  /usr/bin/nft                     rix,
+  /usr/bin/xtables-{nft,legacy}-multi rix,
+  /usr/bin/iptables                rix,
+  /usr/bin/iptables-save           rix,
+  /usr/bin/iptables-restore        rix,
+  /usr/bin/ip6tables               rix,
+  /usr/bin/ip6tables-save          rix,
+  /usr/bin/ip6tables-restore       rix,
 
   # Shared libraries
   /usr/lib/**                      mr,
@@ -413,31 +567,34 @@ profile freshclam /usr/bin/freshclam flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
+  #include <abstractions/ssl_certs>
 
   # Capabilities
   capability setuid,
   capability setgid,
 
-  # Network — needs to download signature updates
+  # Network — download signature updates and notify clamd over local socket
   network inet stream,
   network inet6 stream,
+  network unix stream,
+  unix (connect, send, receive) type=stream peer=(label=clamd),
 
   # Binary
   /usr/bin/freshclam               mr,
 
   # Signature database
-  /var/lib/clamav/**               rw,
+  /var/lib/clamav/{,**}            rw,
   owner /var/lib/clamav/**         rwk,
 
   # Logs
-  /var/log/clamav/**               rw,
+  /var/log/clamav/{,**}            rw,
   owner /var/log/clamav/**         rw,
 
   # Configuration
-  /etc/clamav/**                   r,
+  /etc/clamav/{,**}                r,
 
   # Runtime
-  /run/clamav/**                   rw,
+  /run/clamav/{,**}                rw,
   owner /run/clamav/freshclam.pid  rw,
 
   # DNS resolution for mirror lookups
@@ -464,7 +621,7 @@ abi <abi/3.0>,
 
 profile clamd /usr/bin/clamd flags=(enforce) {
   #include <abstractions/base>
-  #include <abstractions/nameservice>
+  #include <abstractions/nameservice-strict>
 
   # Capabilities
   capability setuid,
@@ -478,27 +635,31 @@ profile clamd /usr/bin/clamd flags=(enforce) {
   /usr/bin/clamd                   mr,
 
   # Signature database
-  /var/lib/clamav/**               r,
+  /var/lib/clamav/{,**}            r,
   owner /var/lib/clamav/**         r,
 
   # Logs
-  /var/log/clamav/**               rw,
+  /var/log/clamav/{,**}            rw,
   owner /var/log/clamav/**         rw,
 
   # Configuration
-  /etc/clamav/**                   r,
+  /etc/clamav/{,**}                r,
 
   # Runtime
-  /run/clamav/**                   rw,
+  /run/clamav/{,**}                rw,
   owner /run/clamav/clamd.ctl      rw,
   owner /run/clamav/clamd.pid      rw,
 
-  # Scan targets — needs read -r access to files submitted for scanning
+  # Temporary unpack directories and scan targets
+  /tmp/                            r,
   /tmp/**                          r,
-  /home/**                         r,
-  /var/**                          r,
-  /srv/**                          r,
-  /opt/**                          r,
+  owner /tmp/**                    rwk,
+  /var/tmp/                        r,
+  owner /var/tmp/**                rwk,
+  /home/{,**}                      r,
+  /var/{,**}                       r,
+  /srv/{,**}                       r,
+  /opt/{,**}                       r,
 
   # Shared libraries
   /usr/lib/**                      mr,
@@ -533,6 +694,7 @@ profile stubby /usr/bin/stubby flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
+  #include <abstractions/ssl_certs>
 
   # Capabilities
   capability net_bind_service,
@@ -549,20 +711,20 @@ profile stubby /usr/bin/stubby flags=(enforce) {
   /usr/bin/stubby                  mr,
 
   # Configuration
-  /etc/stubby/**                   r,
+  /etc/stubby/{,**}                r,
 
   # Cache
-  /var/cache/stubby/**             rw,
+  /var/cache/stubby/{,**}          rw,
   owner /var/cache/stubby/**       rw,
 
   # Runtime
-  /run/stubby/**                   rw,
+  /run/stubby/{,**}                rw,
   owner /run/stubby/stubby.pid     rw,
 
   # TLS trust store
-  /etc/ssl/certs/**                r,
-  /etc/ca-certificates/**          r,
-  /usr/share/ca-certificates/**    r,
+  /etc/ssl/certs/{,**}             r,
+  /etc/ca-certificates/{,**}       r,
+  /usr/share/ca-certificates/{,**} r,
 
   # Shared libraries
   /usr/lib/**                      mr,
@@ -573,8 +735,11 @@ profile stubby /usr/bin/stubby flags=(enforce) {
 PROFILE
 else
     info "Skipping stubby profile (binary not installed)"
-    # Reverse idempotency: drop any stale profile from an older run that
-    # did have stubby installed.
+    # Reverse idempotency: unload and drop any stale profile from an older run
+    # that did have stubby installed.
+    if [[ "$DRY_RUN" == false && -f "$APPARMOR_DIR/usr.bin.stubby" ]]; then
+        apparmor_parser -R "$APPARMOR_DIR/usr.bin.stubby" 2>/dev/null || true
+    fi
     rm -f "$APPARMOR_DIR/usr.bin.stubby"
 fi
 
@@ -591,35 +756,45 @@ abi <abi/3.0>,
 profile chronyd /usr/bin/chronyd flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+  #include <abstractions/ssl_certs>
+  #include <abstractions/p11-kit>
 
   # Capabilities
   capability sys_time,
   capability setuid,
   capability setgid,
+  capability chown,
+  capability dac_override,
   capability net_bind_service,
 
-  # Network — NTP uses UDP (dgram)
+  # Network — NTP uses UDP (dgram), NTS-KE uses TCP 4460 (stream)
   network inet dgram,
   network inet6 dgram,
+  network inet stream,
+  network inet6 stream,
+  network unix dgram,
 
   # Binary
   /usr/bin/chronyd                 mr,
 
-  # Configuration
+  # Configuration and authentication keys
   /etc/chrony.conf                 r,
+  /etc/chrony.keys                 r,
 
   # State
-  /var/lib/chrony/**               rw,
+  /var/lib/chrony/{,**}            rw,
   owner /var/lib/chrony/drift      rw,
   owner /var/lib/chrony/rtc        rw,
 
   # Logs
-  /var/log/chrony/**               rw,
+  /var/log/chrony/{,**}            rw,
   owner /var/log/chrony/**         rw,
 
-  # Runtime
-  /run/chrony/**                   rw,
-  /var/run/chrony/**               rw,
+  # Runtime and systemd Type=notify socket
+  /run/systemd/notify              w,
+  /run/chrony/{,**}                rw,
+  /var/run/chrony/{,**}            rw,
   owner /run/chrony/chronyd.pid    rw,
   owner /run/chrony/chronyd.sock   rw,
 
@@ -630,9 +805,10 @@ profile chronyd /usr/bin/chronyd flags=(enforce) {
   owner /proc/*/fd/                r,
   /proc/sys/kernel/random/boot_id  r,
 
-  # Device — PPS (Pulse Per Second) hardware clock support
-  /dev/pps*                        r,
-  /dev/rtc*                        r,
+  # Device — RTC, PPS (Pulse Per Second), and PTP hardware clock support
+  /dev/pps*                        rw,
+  /dev/ptp*                        rw,
+  /dev/rtc*                        rw,
 }
 PROFILE
 
@@ -665,12 +841,15 @@ if [[ "$DRY_RUN" == false ]]; then
     for profile in "${PROFILES[@]}"; do
         profile_name=$(basename "$profile")
         if apparmor_parser -r -W "$profile" 2>/dev/null; then
-            aa-enforce "$profile" 2>/dev/null && \
-                msg "Loaded and enforced: $profile_name" || \
-                { warn "Failed to enforce: $profile_name"; ((LOAD_ERRORS++)); }
+            if aa-enforce "$profile" 2>/dev/null; then
+                msg "Loaded and enforced: $profile_name"
+            else
+                warn "Failed to enforce: $profile_name"
+                (( ++LOAD_ERRORS ))
+            fi
         else
-            warn "Failed to parse: $profile_name (service binary may not be installed)"
-            ((LOAD_ERRORS++))
+            warn "Failed to parse: $profile_name (service binary or AppArmor kernel LSM may not be active yet)"
+            (( ++LOAD_ERRORS ))
         fi
     done
 
@@ -688,7 +867,11 @@ fi
 
 echo
 echo -e "${C_GREEN}========================================================================${C_NC}"
-echo -e "${C_GREEN} AppArmor hardening complete!${C_NC}"
+if [[ "$DRY_RUN" == false ]]; then
+    echo -e "${C_GREEN} AppArmor hardening complete!${C_NC}"
+else
+    echo -e "${C_GREEN} AppArmor dry-run preview complete!${C_NC}"
+fi
 echo -e "${C_GREEN}========================================================================${C_NC}"
 echo
 
@@ -709,21 +892,34 @@ if [[ "$STUBBY_INSTALLED" == true ]]; then
 fi
 echo "  - $APPARMOR_DIR/usr.bin.chronyd          (NTP daemon)"
 echo
-echo -e "${C_BLUE}GRUB:${C_NC}              apparmor=1 security=apparmor"
-echo -e "${C_BLUE}Service:${C_NC}           apparmor.service (enabled)"
-echo -e "${C_BLUE}Log:${C_NC}               $LOGFILE"
-echo
+if [[ "$DRY_RUN" == false ]]; then
+    echo -e "${C_BLUE}Bootloader:${C_NC}        $BOOTLOADER_DESC (apparmor=1 security=apparmor)"
+    echo -e "${C_BLUE}Service:${C_NC}           apparmor.service (enabled)"
+    echo -e "${C_BLUE}Log:${C_NC}               $LOGFILE"
+    echo
 
-echo -e "${C_YELLOW}IMPORTANT next steps:${C_NC}"
-echo "  1. REBOOT to activate AppArmor kernel parameters in GRUB."
-echo "     The kernel must load with apparmor=1 security=apparmor."
-echo "  2. After reboot, verify AppArmor is active:"
-echo "     sudo aa-status"
-echo "  3. If a service misbehaves, switch its profile to complain mode:"
-echo "     sudo aa-complain /etc/apparmor.d/usr.bin.<service>"
-echo "  4. Review /var/log/audit/audit.log or journalctl for AppArmor denials."
-echo "  5. Once satisfied, re-enforce the profile:"
-echo "     sudo aa-enforce /etc/apparmor.d/usr.bin.<service>"
-echo
+    echo -e "${C_YELLOW}IMPORTANT next steps:${C_NC}"
+    echo "  1. REBOOT to activate AppArmor kernel parameters."
+    echo "     The kernel must load with apparmor=1 security=apparmor."
+    echo "  2. After reboot, verify AppArmor is active:"
+    echo "     sudo aa-status"
+    echo "  3. If a service misbehaves, switch its profile to complain mode:"
+    echo "     sudo aa-complain /etc/apparmor.d/usr.bin.<service>"
+    echo "  4. Review /var/log/audit/audit.log or journalctl for AppArmor denials."
+    echo "  5. Once satisfied, re-enforce the profile:"
+    echo "     sudo aa-enforce /etc/apparmor.d/usr.bin.<service>"
+    echo
+else
+    echo -e "${C_BLUE}Bootloader:${C_NC}        $BOOTLOADER_DESC (unchanged — dry-run)"
+    echo -e "${C_BLUE}Service:${C_NC}           apparmor.service (unchanged — dry-run)"
+    echo "Preview files remain in: $APPARMOR_DIR"
+    echo -e "${C_BLUE}Log:${C_NC}               $LOGFILE"
+    echo
+    echo -e "${C_YELLOW}DRY-RUN notes:${C_NC}"
+    echo "  - No packages, services, bootloader entries, or live profiles were modified."
+    echo "  - Validate previewed profiles manually with:"
+    echo "      apparmor_parser -Q --skip-cache -I /etc/apparmor.d $APPARMOR_DIR/usr.bin.*"
+    echo
+fi
 
 echo -e "${C_GREEN}Done.${C_NC}"

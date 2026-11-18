@@ -7,10 +7,11 @@
 #                          [--allow-http] [--allow-https] [--no-inbound] [-h]
 
 set -euo pipefail
+umask 022
 IFS=$'\n\t'
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/aur-review.sh"
 
 # ==============================
@@ -19,11 +20,20 @@ source "$SCRIPT_DIR/../lib/aur-review.sh"
 LEVEL=1         # Default FireHOL blocklist level
 CRON_SCHEDULE="0 0 * * *"  # daily at midnight
 LOGFILE="/var/log/firehol_install.log"
+FIREHOL_RUN_TMP="/run/firehol-tmp"
+TMPCONF=""
 ALLOW_SSH=false
 SSH_PORT=""
 ALLOW_HTTP=false
 ALLOW_HTTPS=false
 NO_INBOUND=false
+
+cleanup() {
+  if [[ -n "${TMPCONF:-}" ]]; then
+    rm -f -- "$TMPCONF"
+  fi
+}
+trap cleanup EXIT
 
 # ==============================
 # Color Codes
@@ -107,23 +117,37 @@ if [[ ${EUID} -ne 0 ]]; then
   echo_err "This script must be run as root."; exit 1
 fi
 
-if command -v nft &>/dev/null && \
-    { nft list chain inet filter input &>/dev/null || nft list chain inet filter forward &>/dev/null; }; then
-  echo_err "The installer-owned nftables inet/filter ruleset is active."
-  echo_err "FireHOL manages iptables and cannot safely replace or extend those chains; refusing to stack firewalls."
+if { command -v nft &>/dev/null && \
+    { nft list chain inet filter input &>/dev/null || nft list chain inet filter forward &>/dev/null; }; } || \
+    systemctl is-active --quiet nftables.service 2>/dev/null || \
+    systemctl is-enabled --quiet nftables.service 2>/dev/null; then
+  echo_err "An nftables ruleset or nftables.service is active or enabled."
+  echo_err "FireHOL manages iptables and cannot safely coexist with nftables (which can also wipe FireHOL rules on reboot); disable nftables first."
   exit 1
 fi
 
 # Redirect all output to logfile
+install -o root -g root -m 0600 /dev/null "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 # ==============================
 # Helper Functions
 # ==============================
 
+ensure_firehol_tmp() {
+  install -d -o root -g root -m 0700 "$FIREHOL_RUN_TMP"
+}
+
+run_firehol() {
+  ensure_firehol_tmp
+  TMPDIR="$FIREHOL_RUN_TMP" FIREHOL_TMP_DIR="$FIREHOL_RUN_TMP" firehol "$@"
+}
+
 install_pkgs() {
-  local pkgs=(git base-devel help2man cronie iputils iproute2 iptables ipset gawk traceroute procps-ng)
-  echo_msg "Installing dependencies: ${pkgs[*]}"
+  local pkgs=(git base-devel help2man cronie curl unzip iputils iproute2 iptables ipset gawk traceroute procps-ng)
+  local pkg_list=""
+  printf -v pkg_list '%s ' "${pkgs[@]}"
+  echo_msg "Installing dependencies: ${pkg_list% }"
   # Arch does not support refreshing package databases without completing the
   # corresponding full upgrade.
   pacman -Syu --needed --noconfirm "${pkgs[@]}"
@@ -138,15 +162,16 @@ install_aur_pkg() {
 backup_conf() {
   local src=$1 dst=$2
   if [[ -f "$src" ]]; then
-    echo_msg "Backing up $src to $dst"
-    cp "$src" "$dst"
+    echo_msg "Backing up $src to $dst (mode 0600)"
+    install -o root -g root -m 0600 "$src" "$dst"
   fi
 }
 
 write_firehol_conf() {
-  local dest=$1 level=$2 tmpconf
-  tmpconf=$(mktemp)
-  cat > "$tmpconf" <<EOF
+  local dest=$1 level=$2
+  install -d -o root -g root -m 0755 /etc/firehol
+  TMPCONF=$(umask 077; mktemp /etc/firehol/.firehol.conf.XXXXXX)
+  cat > "$TMPCONF" <<EOF
 version 6
 
 # Blocklist ipsets must be created before 'blacklist' can reference them.
@@ -158,8 +183,8 @@ ipv4 ipset create fullbogons hash:net
 ipv4 ipset addfile fullbogons /etc/firehol/ipsets/fullbogons.netset
 
 # FireHOL requires blacklists before the first interface or router.
-blacklist full ipset:firehol_level${level}
-blacklist full ipset:fullbogons
+ipv4 blacklist full ipset:firehol_level${level}
+ipv4 blacklist full ipset:fullbogons
 
 # Hardened drop-all policy
 interface any world
@@ -169,44 +194,59 @@ interface any world
 EOF
   if $ALLOW_SSH; then
     if [[ "$SSH_PORT" == 22 ]]; then
-      printf '    server ssh accept\n' >> "$tmpconf"
+      printf '    server ssh accept\n' >> "$TMPCONF"
     else
-      printf '    server custom awesome_ssh tcp/%s default accept\n' "$SSH_PORT" >> "$tmpconf"
+      printf '    server custom awesome_ssh tcp/%s default accept\n' "$SSH_PORT" >> "$TMPCONF"
     fi
   fi
   if $ALLOW_HTTP; then
-    printf '    server http accept\n' >> "$tmpconf"
+    printf '    server http accept\n' >> "$TMPCONF"
   fi
   if $ALLOW_HTTPS; then
-    printf '    server https accept\n' >> "$tmpconf"
+    printf '    server https accept\n' >> "$TMPCONF"
   fi
-  if ! firehol "$tmpconf" debug >/dev/null; then
-    rm -f "$tmpconf"
+  if ! run_firehol "$TMPCONF" debug >/dev/null; then
+    rm -f -- "$TMPCONF"
+    TMPCONF=""
     echo_err "Generated FireHOL configuration is invalid; keeping the existing configuration."
     return 1
   fi
-  install -Dm600 "$tmpconf" "$dest"
-  rm -f "$tmpconf"
+  chown root:root "$TMPCONF"
+  chmod 0600 "$TMPCONF"
+  mv -f -- "$TMPCONF" "$dest"
+  TMPCONF=""
 }
 
 # Prime the ipsets so firehol.conf can load them on first run.
 prime_ipsets() {
   echo_msg "Enabling and fetching FireHOL ipsets (level $LEVEL, fullbogons)"
-  /usr/bin/update-ipsets enable "firehol_level${LEVEL}" fullbogons
-  /usr/bin/update-ipsets
+  ensure_firehol_tmp
+  TMPDIR="$FIREHOL_RUN_TMP" FIREHOL_TMP_DIR="$FIREHOL_RUN_TMP" /usr/bin/update-ipsets enable "firehol_level${LEVEL}" fullbogons
+  TMPDIR="$FIREHOL_RUN_TMP" FIREHOL_TMP_DIR="$FIREHOL_RUN_TMP" /usr/bin/update-ipsets
 }
 
 setup_cron() {
-  local cronfile=/etc/cron.d/firehol-ipsets entry
-  entry="$CRON_SCHEDULE root /usr/bin/update-ipsets && /usr/bin/firehol condrestart"
-  echo_msg "Configuring cron job: $entry"
-  install -Dm644 /dev/stdin "$cronfile" <<<"$entry"
+  local cronfile=/etc/cron.d/firehol-ipsets
+  echo_msg "Configuring cron job in $cronfile ($CRON_SCHEDULE)"
+  install -Dm644 /dev/stdin "$cronfile" <<EOF
+SHELL=/usr/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+$CRON_SCHEDULE root install -d -o root -g root -m 0700 $FIREHOL_RUN_TMP && TMPDIR=$FIREHOL_RUN_TMP FIREHOL_TMP_DIR=$FIREHOL_RUN_TMP /usr/bin/update-ipsets && TMPDIR=$FIREHOL_RUN_TMP FIREHOL_TMP_DIR=$FIREHOL_RUN_TMP /usr/bin/firehol condrestart
+EOF
   systemctl enable --now cronie
 }
 
 enable_firehol_service() {
   echo_msg "Validating, enabling, and starting FireHOL service"
-  firehol debug >/dev/null
+  install -d -o root -g root -m 0755 /etc/systemd/system/firehol.service.d
+  install -Dm644 /dev/stdin /etc/systemd/system/firehol.service.d/runtime-tmp.conf <<EOF
+[Service]
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 $FIREHOL_RUN_TMP
+Environment=TMPDIR=$FIREHOL_RUN_TMP
+Environment=FIREHOL_TMP_DIR=$FIREHOL_RUN_TMP
+EOF
+  systemctl daemon-reload
+  run_firehol debug >/dev/null
   systemctl enable firehol
   systemctl restart firehol
 }
@@ -229,7 +269,7 @@ for bin in firehol update-ipsets; do
 done
 
 # Backup and write config
-mkdir -p /etc/firehol
+install -d -m 0755 /etc/firehol
 backup_conf /etc/firehol/firehol.conf "/etc/firehol/firehol.conf.bak.$(date +%F_%H%M%S)"
 prime_ipsets
 write_firehol_conf /etc/firehol/firehol.conf "$LEVEL"

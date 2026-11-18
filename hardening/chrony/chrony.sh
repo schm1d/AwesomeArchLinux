@@ -35,6 +35,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -176,7 +177,7 @@ ntsdumpdir /var/lib/chrony
 
 # --- Drift File ---
 # Record the rate at which the system clock gains/loses time.
-driftfile /var/lib/chrony/chrony.drift
+driftfile /var/lib/chrony/drift
 
 # --- Clock Stepping ---
 # If the clock is off by more than 1 second, step it (instant correction)
@@ -229,6 +230,11 @@ msg "Creating chrony keys file..."
 
 CHRONY_KEYS="/etc/chrony.keys"
 
+# Ensure the chrony sysusers account/group exist before setting ownership
+if ! getent passwd chrony &>/dev/null || ! getent group chrony &>/dev/null; then
+    systemd-sysusers 2>/dev/null || true
+fi
+
 if [[ ! -f "$CHRONY_KEYS" ]]; then
     touch "$CHRONY_KEYS"
     info "Created $CHRONY_KEYS"
@@ -236,7 +242,6 @@ else
     info "$CHRONY_KEYS already exists"
 fi
 
-# Ensure the chrony group exists (created by the chrony package)
 if getent group chrony &>/dev/null; then
     chown root:chrony "$CHRONY_KEYS"
 else
@@ -248,23 +253,27 @@ chmod 640 "$CHRONY_KEYS"
 msg "Keys file permissions set: 640 root:chrony"
 
 # =============================================================================
-# 5. CREATE LOG DIRECTORY
+# 5. CREATE LOG AND STATE DIRECTORIES
 # =============================================================================
 
-msg "Creating chrony log directory..."
+msg "Creating chrony log and state directories..."
 
 CHRONY_LOGDIR="/var/log/chrony"
 
-mkdir -p "$CHRONY_LOGDIR"
-
-if getent group chrony &>/dev/null; then
-    chown root:chrony "$CHRONY_LOGDIR"
+if getent passwd chrony &>/dev/null && getent group chrony &>/dev/null; then
+    install -d -o chrony -g chrony -m 0750 /var/lib/chrony
+    install -d -o chrony -g chrony -m 0750 "$CHRONY_LOGDIR"
+    if [[ -d /run/chrony && ! -L /run/chrony ]]; then
+        chown chrony:chrony /run/chrony
+        chmod 0750 /run/chrony
+    fi
 else
-    chown root:root "$CHRONY_LOGDIR"
+    warn "User/group 'chrony' does not exist. Setting owner to root:root."
+    install -d -o root -g root -m 0750 /var/lib/chrony
+    install -d -o root -g root -m 0750 "$CHRONY_LOGDIR"
 fi
 
-chmod 750 "$CHRONY_LOGDIR"
-msg "Log directory created: $CHRONY_LOGDIR (750)"
+msg "Log directory created: $CHRONY_LOGDIR (0750 chrony:chrony)"
 
 # =============================================================================
 # 6. HARDEN CHRONYD SYSTEMD SERVICE
@@ -273,22 +282,27 @@ msg "Log directory created: $CHRONY_LOGDIR (750)"
 msg "Hardening chronyd systemd service..."
 
 DROPIN_DIR="/etc/systemd/system/chronyd.service.d"
-mkdir -p "$DROPIN_DIR"
+install -d -m 0755 "$DROPIN_DIR"
 
 cat > "$DROPIN_DIR/hardening.conf" <<'EOF'
 [Service]
 # --- Filesystem protection ---
+# Do NOT configure systemd RuntimeDirectory here: chronyd starts as root
+# (User= unset) and creates /run/chrony as chrony:chrony 0750 itself; systemd
+# would create it as root:root 0755 and trip Chrony 4.9 UTI_CheckDirPermissions().
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/chrony /var/log/chrony /run/chrony
+ReadWritePaths=
+ReadWritePaths=/run /var/lib/chrony -/var/log/chrony
 
 # --- Capabilities ---
-# CAP_SYS_TIME       — adjust the system clock
-# CAP_NET_BIND_SERVICE — bind to privileged NTP port (if needed)
-# CAP_SETUID/SETGID  — drop privileges after startup
-CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
+# CAP_SETUID/SETGID         — drop privileges to chrony after startup
+# CAP_CHOWN/DAC_OVERRIDE    — create and chown /run/chrony before privilege drop
+# CAP_SYS_TIME              — adjust the system clock
+# CAP_NET_BIND_SERVICE      — bind privileged NTP/command ports if needed
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_SYS_TIME CAP_NET_BIND_SERVICE
 
 # --- Privilege escalation ---
 NoNewPrivileges=yes
@@ -304,11 +318,13 @@ ProtectHostname=yes
 # @system-service — common service syscalls
 # @clock          — clock_gettime, clock_settime, adjtimex, etc.
 SystemCallArchitectures=native
+SystemCallFilter=
 SystemCallFilter=@system-service @clock
 SystemCallErrorNumber=EPERM
 
 # --- Network ---
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # --- Misc hardening ---
 LockPersonality=yes
@@ -319,6 +335,7 @@ PrivateDevices=no
 MemoryDenyWriteExecute=yes
 EOF
 
+chmod 0644 "$DROPIN_DIR/hardening.conf"
 systemctl daemon-reload
 msg "systemd hardening applied to chronyd.service"
 
@@ -377,7 +394,7 @@ echo
 NTS_COUNT=0
 while IFS= read -r line; do
     if [[ "$line" == *"NTS"* ]]; then
-        ((NTS_COUNT++)) || true
+        (( ++NTS_COUNT ))
     fi
 done < <(chronyc -N authdata 2>/dev/null || true)
 

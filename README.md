@@ -29,15 +29,20 @@ AwesomeArchLinux/
 |   +-- archinstall.sh       # Bare-metal installer (LUKS + LVM + UEFI + TPM2)
 |   +-- chroot.sh            # Bare-metal chroot configuration & hardening
 |   +-- bootloader.sh        # GRUB and systemd-boot/UKI configuration helpers
+|   +-- install-aur-packages.sh # Post-install reviewed AUR security setup (aide, acct)
+|   +-- lib/
+|   |   +-- chroot-security.sh  # Shared PAM, journal sealing, auditd, and arch-audit helpers
 |   +-- vps-install.sh       # VPS/cloud installer (no encryption, swap file)
 |   +-- vps-chroot.sh        # VPS chroot configuration & hardening
 |   +-- vps-harden.sh        # VPS live hardening (running system, no reformat)
 |   +-- recovery-mount.sh    # Recovery menu: unmount/remount encrypted install
-|   +-- secureBoot.sh        # UEFI Secure Boot key generation & enrollment
+|   +-- secureBoot.sh        # Standalone UEFI Secure Boot key generation & signing
 |   +-- README.md            # Base installation documentation
 +-- hardening/
 |   +-- lib/
+|   |   +-- aur-review.sh    # Commit-pinned, terminal-reviewed unprivileged AUR builder
 |   |   +-- nftables.sh      # Shared validated, ownership-scoped nftables persistence
+|   |   +-- validation.sh    # Shared hostname/FQDN and email input validators
 |   +-- apparmor/
 |   |   +-- apparmor.sh      # AppArmor profiles for 7 services (enforce mode)
 |   |   +-- README.md
@@ -77,7 +82,10 @@ AwesomeArchLinux/
 |   |   +-- postgresql.sh    # PostgreSQL server hardening
 |   |   +-- README.md
 |   +-- postfix/
-|   |   +-- postfix.sh       # Send-only Postfix mail relay for system notifications
+|   |   +-- postfix.sh       # Full mail server (Postfix, Dovecot, OpenDKIM, rspamd, ClamAV)
+|   |   +-- README.md
+|   +-- proxy/
+|   |   +-- proxy.sh         # Hardened Squid forward/transparent proxy + optional DNS filter
 |   |   +-- README.md
 |   +-- react/
 |   |   +-- react.sh         # React/SPA production deployment hardening (nginx)
@@ -104,7 +112,7 @@ AwesomeArchLinux/
 |   |   +-- wifi.sh          # Wi-Fi scan MAC randomization + opt-in WPA3
 |   |   +-- README.md
 |   +-- browser/
-|   |   +-- browser.sh       # Firefox/Chromium enterprise policies + Firejail
+|   |   +-- browser.sh       # Firefox/Chromium/Brave enterprise policies + Firejail
 |   |   +-- README.md
 |   +-- memcrypt/
 |   |   +-- memcrypt.sh      # AMD SME / Intel TME probe and opt-in enable
@@ -115,24 +123,32 @@ AwesomeArchLinux/
 |   +-- wordpress/
 |       +-- wordpress.sh     # WordPress security hardening
 |       +-- README.md
++-- tests/
+|   +-- run-tests.sh         # Pure-Bash syntax and regression test runner
+|   +-- test_*.sh            # Isolated unit & regression suites
 +-- utils/
 |   +-- aide-config.sh       # AIDE file integrity monitoring automation
 |   +-- audit-check.sh       # Hardening compliance checker (pass/fail/warn report)
 |   +-- auditd-attack.rules  # Auditd rules mapped to MITRE ATT&CK Framework
 |   +-- backup.sh            # Encrypted borg backups with systemd timer
+|   +-- board-health.sh      # ASUS ROG Zenith II Extreme Alpha thermal monitoring
+|   +-- brave.sh             # Brave browser installer, ACL/SUID fixer & pacman hook
 |   +-- docker.sh            # Docker/Podman hardening (rootless, seccomp, AppArmor)
 |   +-- monitoring.sh        # Prometheus node_exporter + optional Grafana
-|   +-- gnome.sh             # Minimal GNOME desktop (no bloat)
-|   +-- neovim.sh            # NeoVim + Treesitter configuration
+|   +-- gnome.sh             # GNOME desktop setup (Wayland/NVIDIA & NM->resolved fixes)
+|   +-- neovim.sh            # NeoVim + Treesitter configuration & hardening
+|   +-- nvme-stability.sh    # Reversible NVMe power-management workaround for signed UKIs
 |   +-- vim.sh               # Vim plugins & hardening
+|   +-- vmware-workstation.sh # VMware Workstation installer, SUID/ACL fixer & pacman hook
 |   +-- nano.sh              # Nano configuration & hardening
 |   +-- zsh.sh               # Zsh configuration & hardening
-|   +-- yay.sh               # yay AUR helper installation
-|   +-- theme.sh             # Desktop theming
+|   +-- yay.sh               # yay AUR helper installation (noexec /tmp & ACL safe)
+|   +-- theme.sh             # Desktop & GRUB theming
 |   +-- zram.sh              # zram-generator compressed RAM swap
 |   +-- cpufreq.sh           # CPU governor via linux-cpupower
 |   +-- iosched.sh           # udev I/O scheduler by device type
 |   +-- vaapi.sh             # VA-API / VDPAU packages and driver pin
+|   +-- gpu-unlock.sh        # Optional Zagitta/gpu-unlock tensor-core unlock (RTX 20/30/40)
 ```
 
 ---
@@ -143,12 +159,13 @@ AwesomeArchLinux/
 
 - **Automated Arch Linux Installation** &mdash; Automates disk partitioning, formatting, mounting, base system installation, and chroot configuration.
 - **Full Disk Encryption (bare-metal)** &mdash; LVM on LUKS2, `aes-xts-plain64` cipher, 512-bit key, `sha512` hash, 3000ms iteration time. The key derivation function follows the boot profile: the **GRUB** profile uses `pbkdf2` (GRUB cannot read Argon2id) and keeps `/boot` encrypted; the **systemd-boot + UKI** profile uses the stronger `argon2id` default.
-- **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment. The GRUB profile offers configurable PCR binding (0+7, 0+1+7, or 0+1+4+7+9); the UKI profile pins **PCR 7** alone, so firmware updates do not invalidate the policy and strand an unattended reboot.
+- **TPM2 Support (bare-metal)** &mdash; Optional TPM 2.0 auto-detection and LUKS key enrollment with configurable PCR binding (`7` default, `0+7`, `0+1+4+7+9`, or custom PCR list). Defaulting to **PCR 7** binds unlock to Secure Boot policy state so routine firmware updates do not invalidate unattended boot.
 - **VPS/Cloud Mode** &mdash; Simplified single-partition + swap file setup, BIOS/UEFI auto-detection, serial console support (`ttyS0` + GRUB serial), no encryption overhead.
 - **VPS Live Hardening** &mdash; For providers that pre-install Arch Linux (Hostinger, Linode, etc.): hardens filesystem mounts (`/tmp`, `/dev/shm`, `/proc`, `/var/tmp`), generates a rollback script, and runs software hardening. Optional `/var` preparation formats selected destination storage and writes instructions for copying and switching `/var` offline from rescue media.
 - **Recovery Tool** &mdash; Interactive menu to unmount/remount encrypted installations and resume interrupted installs.
 - **UEFI Secure Boot** &mdash; Generates PK/KEK/db/dbx keys, enrolls them in firmware, and signs the boot chain. The UKI profile signs the Unified Kernel Images, systemd-boot, and fwupd's EFI capsule updater with `sbctl`, then re-signs them after package and kernel updates.
 - **NVIDIA, AMD, and Intel GPU Detection** &mdash; Automatically detects GPU hardware and installs the correct driver packages plus VA-API userspace (bare-metal only). Intel iGPUs no longer fall through to `xf86-video-vesa`.
+- **Optional NVIDIA Tensor-Core Unlock ([`Zagitta/gpu-unlock`](https://github.com/Zagitta/gpu-unlock))** &mdash; Opt-in during `archinstall.sh` (disabled by default) or post-install via `utils/gpu-unlock.sh` (`awesome-gpu-unlock`). Builds `gpu-unlock-firmware` and `gpu-unlock-dkms` in an unprivileged ACL-clean workspace, loads `gpu_unlock` in initramfs ahead of `nvidia` to unlock full-rate FP16/BF16/TF32 tensor cores on supported GeForce RTX 20 / 30 / 40 GPUs, and updates/re-signs UKI, systemd-boot, or GRUB kernel command lines (`gpu_unlock.targets=all` or specific PCI BDFs).
 - **Mainline kernel** &mdash; Installs the standard `linux` kernel. We previously shipped `linux-hardened` alongside it, but its stricter module signing and syscall hardening break the NVIDIA proprietary driver (XWayland/DRI3 path stops bridging, gnome-shell loops on `Failed to init X11 display`) and several other proprietary kmods. Users who need `linux-hardened` for non-NVIDIA hardening can install it manually with `pacman -S linux-hardened linux-hardened-headers`.
 - **CPU Microcode** &mdash; Auto-detects Intel/AMD and installs the appropriate microcode package.
 - **Firmware and mobile broadband** &mdash; Installs fwupd with automatic metadata refresh and ModemManager for NetworkManager WWAN support. The UKI profile configures fwupd for the locally generated Secure Boot keys.
@@ -172,7 +189,7 @@ AwesomeArchLinux/
 
 - **AppArmor profiles** for up to 7 services in enforce mode: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), chronyd, and — only if the Stubby binary is installed manually as an opt-in — Stubby DNS.
 - Each profile uses `abi <abi/3.0>`, precise path rules, minimal network access, and least-privilege capabilities.
-- GRUB kernel parameters (`apparmor=1 security=apparmor`) configured automatically.
+- Kernel boot parameters (`lsm=landlock,lockdown,yama,integrity,apparmor,bpf`) configured automatically across UKI, systemd-boot, and GRUB when running `hardening/apparmor/apparmor.sh`.
 - See [`hardening/apparmor/README.md`](hardening/apparmor/README.md) for profile details and customization.
 
 #### VPN (WireGuard)
@@ -285,7 +302,7 @@ AwesomeArchLinux/
 
 #### Browser Hardening
 
-- **Enterprise policies** for Firefox and Chromium/Chrome (telemetry off, HTTPS-Only, site isolation, third-party cookies blocked).
+- **Enterprise policies** for Firefox, Chromium/Chrome, and Brave (telemetry off, HTTPS-Only, site isolation, third-party cookies blocked, uBlock Origin Lite). `utils/brave.sh` also installs a pacman `PostTransaction` hook so `/opt/brave-bin` permissions, stripped POSIX ACLs, and the `4755` `chrome-sandbox` survive every AUR upgrade.
 - **Optional Firejail wrappers** (`--firejail`) and optional [arkenfox](https://github.com/arkenfox/user.js) overlay (`--arkenfox`). A stale vendored `user.js` is not shipped.
 - Custom AppArmor browser profiles are omitted; they rot against GPU, portals, and downloads. The sysctl `strict` profile's `kernel.unprivileged_userns_clone=0` degrades Chromium's sandbox — desktops should stay on `workstation`.
 - See [`hardening/browser/README.md`](hardening/browser/README.md).
@@ -333,18 +350,19 @@ IPv6 remains enabled and hardened by default so SLAAC works. The installer offer
 
 #### Kernel Boot Parameters
 
-Passed via GRUB for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`, `page_alloc.shuffle=1`, `pti=on`, `randomize_kstack_offset=on`, `vsyscall=none`. AMD SME (`mem_encrypt=on`) is **not** in this baseline; enable it with [`hardening/memcrypt/memcrypt.sh`](hardening/memcrypt/memcrypt.sh) after the firmware switch is on.
+Passed via GRUB or embedded into signed systemd-boot UKIs (`/etc/kernel/cmdline`) for defense-in-depth: `slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`, `page_alloc.shuffle=1`, `pti=on`, `randomize_kstack_offset=on`, `vsyscall=none`. AMD SME (`mem_encrypt=on`) is **not** in this baseline; enable it with [`hardening/memcrypt/memcrypt.sh`](hardening/memcrypt/memcrypt.sh) after the firmware switch is on.
 
 #### Workstation Performance (opt-in)
 
 These are companion utilities, not silent installer defaults (except the I/O scheduler udev rule, which is low-risk and now written by `chroot.sh`):
 
-- **zram** (`utils/zram.sh`) &mdash; `zram-generator` at 50% RAM / zstd / priority 100, disk swap kept as overflow. zswap is disabled if found; stacking zswap + zram double-compresses pages.
+- **zram** (`utils/zram.sh`) &mdash; `zram-generator` at 50% RAM / zstd / priority 100, disk swap kept as overflow. Built-in kernel `zswap` is disabled persistently via `tmpfiles.d`; stacking zswap + zram double-compresses pages.
 - **CPU governor** (`utils/cpufreq.sh`) &mdash; `linux-cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
 - **I/O scheduler** (`utils/iosched.sh`) &mdash; BFQ for HDDs, `mq-deadline` for SATA/virtio SSD, `none` for NVMe.
-- **NVMe dropout workaround** (`utils/nvme-stability.py`) &mdash; Opt-in power-management diagnostic for existing signed UKI installs, with staged builds, signature verification, backups and rollback. See [NVMe stability and offline recovery](utils/NVME-STABILITY.md).
-- **Motherboard thermal monitoring** (`utils/board-health.py`) &mdash; Exact ASUS ROG Zenith II Extreme Alpha detection enables minute-by-minute CPU, chipset, VRM and NVMe monitoring on bare-metal installs. Sustained heat and missing sensors produce journal warnings; existing installs can use `--install`. See [board support and tuning notes](utils/ZENITH-II-ALPHA.md).
+- **NVMe dropout workaround** (`utils/nvme-stability.sh`) &mdash; Pure-Bash opt-in power-management diagnostic for existing signed UKI installs, with staged builds, signature verification, backups and rollback. See [NVMe stability and offline recovery](utils/NVME-STABILITY.md).
+- **Motherboard thermal monitoring** (`utils/board-health.sh`) &mdash; Pure-Bash exact ASUS ROG Zenith II Extreme Alpha detection enables minute-by-minute CPU, chipset, VRM and NVMe monitoring on bare-metal installs. Sustained heat and missing sensors produce journal warnings; existing installs can use `--install`. See [board support and tuning notes](utils/ZENITH-II-ALPHA.md).
 - **VA-API** (`utils/vaapi.sh`) &mdash; vendor-correct packages and a pinned `LIBVA_DRIVER_NAME` only when the GPU is unambiguous. Hybrid Intel+NVIDIA laptops are left unpinned on purpose.
+- **NVIDIA tensor-core unlock** (`utils/gpu-unlock.sh` / `awesome-gpu-unlock`) &mdash; Optional [`Zagitta/gpu-unlock`](https://github.com/Zagitta/gpu-unlock) installer and manager (`--status`, `--install`, `--set-targets`, `--disable`, `--uninstall`) for supported Turing (RTX 20), Ampere (RTX 30), and Ada Lovelace (RTX 40) GPUs across UKI + Secure Boot (`sbctl`), systemd-boot, and GRUB.
 
 #### DNS Security
 
@@ -361,7 +379,7 @@ These are companion utilities, not silent installer defaults (except the I/O sch
 
 #### Sudo Hardening
 
-Custom `/etc/sudoers` with: secure path, env reset with curated keep list, `requiretty`, `umask=077`, 30-minute timestamp timeout, 3 password attempts, full I/O logging to `/var/log/sudo.log`, no `rootpw`.
+Custom `/etc/sudoers` with: secure path, env reset with curated keep list, `umask=077`, 30-minute timestamp timeout, 3 password attempts, full I/O logging to `/var/log/sudo.log`, no `rootpw`.
 
 #### Systemd Service Hardening
 
@@ -532,7 +550,7 @@ units; hardware daemons also require representative hot-plug coverage.
 #### Physical Security (bare-metal only)
 
 - **USBGuard** &mdash; Default-block policy with a one-time allow policy generated for devices present at the first service start; root IPC access remains available to authorize later devices.
-- **Bluetooth** &mdash; Strict LE-only profile with Secure Connections required, a 16-byte minimum key for secured GATT characteristics, device privacy, a generic adapter name, and two-minute discoverable/pairable windows. BlueZ does not automatically power newly discovered controllers; the local user opts in when Bluetooth is needed. Classic BR/EDR profiles such as A2DP audio are intentionally unavailable; changing `ControllerMode=le` to `dual` restores compatibility at the cost of a larger wireless attack surface. BlueZ's upstream systemd sandbox is retained and its socket families are restricted.
+- **Bluetooth** &mdash; Hardened BlueZ profile (`ControllerMode=dual` by default so A2DP audio and BLE peripherals both work; `BLUETOOTH_CONTROLLER_MODE=le` available for BLE-only) with Secure Connections required, a 16-byte minimum key for secured GATT characteristics, device privacy, a generic adapter name, and 90-second discoverable/pairable windows. BlueZ's upstream systemd sandbox is retained and its socket families are restricted to `AF_UNIX AF_BLUETOOTH`.
 - **Disk health monitoring** &mdash; `smartd` scans all SATA and NVMe devices, schedules a short self-test daily and a long self-test weekly where supported (NVMe drives present at install time are monitored without scheduled self-tests, which have coincided with controller dropouts), and tracks drive temperature (advisory entries logged at 50 &deg;C; the 70 &deg;C critical threshold raises an alert). Alerts are written to the journal and the console rather than mailed, so they arrive without a configured MTA. `nvme-cli` is installed for post-incident investigation (`nvme smart-log`, `nvme error-log`).
 
 #### File System Security
@@ -604,8 +622,16 @@ recovery-aware migration.
 | `utils/vim.sh` | Vim with plugins and hardening |
 | `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
 | `utils/zsh.sh` | Zsh shell configuration and hardening |
-| `utils/yay.sh` | yay AUR helper installation |
-| `utils/theme.sh` | Desktop theming |
+| `utils/yay.sh` | yay AUR helper installation (safe under `/tmp` `noexec` and home default ACLs) |
+| `utils/brave.sh` | Brave Browser installer, `/opt/brave-bin` permission/ACL/SUID fixer, pacman upgrade hook, and policy helper |
+| `utils/vmware-workstation.sh` | VMware Workstation AUR installer, group-restricted SUID/library permissions, and pacman upgrade hook |
+| `utils/board-health.sh` | Pure-Bash ASUS ROG Zenith II Extreme Alpha EC/NVMe thermal monitor and systemd timer |
+| `utils/nvme-stability.sh` | Pure-Bash reversible NVMe APST/ASPM workaround for signed UKI installations |
+| `utils/zram.sh` | `zram-generator` compressed RAM swap with persistent `zswap` disablement |
+| `utils/cpufreq.sh` | CPU scaling governor configuration via `linux-cpupower` |
+| `utils/iosched.sh` | Automatic udev I/O scheduler rules by block device type |
+| `utils/vaapi.sh` | Hardware video acceleration (VA-API / VDPAU) setup |
+| `utils/theme.sh` | WhiteSur GTK and GRUB theming |
 
 ---
 
@@ -626,14 +652,14 @@ chmod +x *.sh
 ```
 
 The installer will prompt you for:
-- Target disk
+- Target disk and boot profile (`uki` signed systemd-boot UKIs or `grub` encrypted `/boot`)
 - Swap, root, and optional `/var` partition sizes
-- Username and hostname
+- Username, hostname, and optional SSH public key
 - Timezone, locale, and console keymap (with common presets and live preview via `loadkeys`)
 - LUKS encryption passphrase
-- Optional TPM2 binding
-- Sysctl profile
-- GRUB password
+- Optional TPM2 binding and PCR selection
+- Sysctl profile and IPv6 policy
+- GRUB password (`grub` profile only)
 - User and root passwords
 
 #### VPS / Cloud Server
@@ -651,10 +677,9 @@ chmod +x *.sh
 The VPS installer will prompt you for:
 - Target disk (typically `vda` or `sda`)
 - Swap size
-- Username, hostname, and SSH port
+- Username, hostname, SSH port, and SSH public key
 - Timezone, locale, and console keymap (with common presets)
-- Sysctl profile
-- GRUB password
+- Sysctl profile and IPv6 policy
 - User and root passwords
 
 #### VPS Live Hardening (pre-installed Arch Linux)
@@ -696,12 +721,12 @@ After rebooting:
    as a disposable unprivileged user with compiler access. The script sets up
    process accounting and AIDE, preserving an existing AIDE baseline on reruns.
 
-2. **Enable security services**:
+2. **Enable optional MAC / security timers**:
    ```bash
-   systemctl enable --now apparmor
-   systemctl enable --now auditd
-   systemctl enable --now rkhunter-check.timer
-   systemctl enable --now arch-audit.timer
+   sudo ./hardening/apparmor/apparmor.sh          # Configures LSM boot params, profiles & enables AppArmor
+   sudo systemctl enable --now auditd
+   sudo systemctl enable --now rkhunter-check.timer
+   sudo systemctl enable --now arch-audit.timer
    ```
 
 3. **Secure Boot enrollment** (bare-metal, if desired):
@@ -709,23 +734,17 @@ After rebooting:
    *systemd-boot + UKI profile* &mdash; use the bundled helper, which is stage-aware and
    refuses to bind the TPM before Secure Boot is actually enforcing:
    ```bash
-   awesome-secureboot status
-   awesome-secureboot enroll-keys     # requires firmware in Setup Mode
+   sudo awesome-secureboot status
+   sudo awesome-secureboot enroll-keys --microsoft   # requires firmware in Setup Mode (--microsoft preserves GPU Option ROMs)
    # enable Secure Boot in firmware, reboot, then:
-   awesome-secureboot bind-tpm        # binds LUKS unlock to PCR 7
+   sudo awesome-secureboot bind-tpm                  # binds LUKS unlock to configured PCRs (default: 7)
    ```
 
-   *GRUB profile*:
-   ```bash
-   sbctl status
-   sbctl sign -s /efi/EFI/GRUB/grubx64.efi
-   sbctl sign -s /efi/EFI/BOOT/BOOTX64.EFI
-   sbctl sign -s /boot/vmlinuz-linux
-   ```
+   *GRUB profile* &mdash; GRUB unlocks an encrypted `/boot` via PBKDF2; modular GRUB cannot load unsigned external modules under UEFI Secure Boot without building a standalone signed GRUB image. Prefer the **systemd-boot + UKI** profile when UEFI Secure Boot + TPM2 unlock is desired.
 
 4. **TPM2 enrollment** (bare-metal GRUB profile, if TPM was selected):
    ```bash
-   systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0+7 /dev/<partition>
+   sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/<luks-partition>
    ```
    On the UKI profile this is done by `awesome-secureboot bind-tpm` in step 3 instead.
 
@@ -804,6 +823,10 @@ sudo ./utils/zram.sh                           # Compressed RAM swap (keeps disk
 sudo ./utils/cpufreq.sh                        # CPU governor (schedutil)
 sudo ./utils/iosched.sh                        # I/O scheduler udev rules
 sudo ./utils/vaapi.sh                          # Hardware video decode stack
+./utils/brave.sh --policy                      # Install Brave, fix permissions/hook & apply policies
+./utils/board-health.sh --status               # ASUS Zenith II Extreme Alpha thermal status
+./utils/nvme-stability.sh --status             # Signed UKI NVMe power-management status
+./tests/run-tests.sh                           # Run pure-Bash syntax & regression test suite
 ```
 
 ---

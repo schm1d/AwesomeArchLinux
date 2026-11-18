@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 # References: https://docs.kernel.org/admin-guide/sysctl/
 #             https://www.freedesktop.org/software/systemd/man/latest/systemd-sysctl.html
@@ -94,7 +95,7 @@ while (($# > 0)); do
             shift
             ;;
         --root)
-            (($# >= 2)) || die "--root requires an absolute path"
+            [[ $# -ge 2 && -n "${2:-}" ]] || die "--root requires an absolute path"
             TARGET_ROOT="$2"
             shift 2
             ;;
@@ -283,8 +284,18 @@ if [[ "$APPLY_SETTINGS" == true && "$PROFILE" != "strict" ]]; then
     if [[ "$(sysctl -n kernel.kexec_load_disabled 2>/dev/null || true)" == "1" ]]; then
         irreversible_runtime_controls+=("kernel.kexec_load_disabled=1")
     fi
+    io_uring_state="$(sysctl -n kernel.io_uring_disabled 2>/dev/null || true)"
+    if [[ -n "$io_uring_state" && "$io_uring_state" != "0" ]]; then
+        irreversible_runtime_controls+=("kernel.io_uring_disabled=${io_uring_state}")
+    fi
+    if [[ "$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)" == "0" ]]; then
+        irreversible_runtime_controls+=("kernel.unprivileged_userns_clone=0")
+    fi
+    if [[ "$(sysctl -n kernel.panic_on_oops 2>/dev/null || true)" == "1" ]]; then
+        irreversible_runtime_controls+=("kernel.panic_on_oops=1")
+    fi
     if ((${#irreversible_runtime_controls[@]} > 0)); then
-        warn "one-way strict controls remain active until reboot: ${irreversible_runtime_controls[*]}"
+        warn "strict runtime controls remain active until reboot: ${irreversible_runtime_controls[*]}"
     fi
 fi
 

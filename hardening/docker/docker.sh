@@ -37,9 +37,10 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
 
 # --- Colors ---
@@ -129,6 +130,7 @@ info "Detected container runtime: $RUNTIME"
 info "Log: $LOGFILE"
 
 # Redirect output to logfile as well
+install -o root -g root -m 0600 /dev/null "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 # =============================================================================
@@ -137,17 +139,31 @@ exec > >(tee -a "$LOGFILE") 2>&1
 
 bench_pass() {
     printf "  %b[PASS]%b %s\n" "$C_GREEN" "$C_NC" "$1"
-    ((BENCH_PASS++))
+    (( ++BENCH_PASS ))
 }
 
 bench_warn() {
     printf "  %b[WARN]%b %s\n" "$C_YELLOW" "$C_NC" "$1"
-    ((BENCH_WARN++))
+    (( ++BENCH_WARN ))
 }
 
 bench_fail() {
     printf "  %b[FAIL]%b %s\n" "$C_RED" "$C_NC" "$1"
-    ((BENCH_FAIL++))
+    (( ++BENCH_FAIL ))
+}
+
+warn_if_rootless_podman() {
+    local kind="$1"
+    [[ "$RUNTIME" == "podman" ]] || return 0
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)
+        if [[ -n "$sudo_home" && -d "$sudo_home/.local/share/containers" ]]; then
+            warn "Root Podman store has no $kind, while '$SUDO_USER' has rootless Podman storage at $sudo_home/.local/share/containers (sudo inspects rootful Podman only)."
+        else
+            warn "Root Podman store has no $kind; note that sudo inspects rootful Podman, not '$SUDO_USER''s rootless Podman store."
+        fi
+    fi
 }
 
 # =============================================================================
@@ -262,44 +278,41 @@ if [[ "$DO_BENCH" == true ]]; then
     # -----------------------------------------------------------------
     msg "Section 2: Container Runtime"
 
-    if [[ "$RUNTIME" == "docker" ]]; then
-        CONTAINERS=$(docker ps -q 2>/dev/null || true)
-    else
-        CONTAINERS=$(podman ps -q 2>/dev/null || true)
-    fi
+    CONTAINERS=$($RUNTIME ps -q 2>/dev/null || true)
 
     if [[ -z "$CONTAINERS" ]]; then
         info "No running containers found. Skipping container runtime checks."
+        warn_if_rootless_podman "running containers"
     else
-        for CONTAINER_ID in $CONTAINERS; do
-            if [[ "$RUNTIME" == "docker" ]]; then
-                INSPECT=$(docker inspect "$CONTAINER_ID" 2>/dev/null)
-                CNAME=$(echo "$INSPECT" | grep -oP '"Name":\s*"/\K[^"]+' | head -1)
-            else
-                INSPECT=$(podman inspect "$CONTAINER_ID" 2>/dev/null)
-                CNAME=$(echo "$INSPECT" | grep -oP '"Name":\s*"\K[^"]+' | head -1)
-            fi
+        while IFS= read -r CONTAINER_ID; do
+            [[ -z "$CONTAINER_ID" ]] && continue
+            CNAME=$($RUNTIME inspect --format '{{.Name}}' "$CONTAINER_ID" 2>/dev/null || true)
+            CNAME="${CNAME#/}"
             CNAME="${CNAME:-$CONTAINER_ID}"
 
             info "Checking container: $CNAME ($CONTAINER_ID)"
 
             # 2.1 Running as root
-            CONTAINER_USER=$(echo "$INSPECT" | grep -oP '"User":\s*"\K[^"]*' | head -1)
-            if [[ -z "$CONTAINER_USER" || "$CONTAINER_USER" == "root" || "$CONTAINER_USER" == "0" ]]; then
-                bench_warn "2.1 - Container '$CNAME' is running as root"
-            else
-                bench_pass "2.1 - Container '$CNAME' runs as non-root user ($CONTAINER_USER)"
-            fi
+            CONTAINER_USER=$($RUNTIME inspect --format '{{.Config.User}}' "$CONTAINER_ID" 2>/dev/null || true)
+            case "$CONTAINER_USER" in
+                ""|0|root|0:*|root:*)
+                    bench_warn "2.1 - Container '$CNAME' is running as root"
+                    ;;
+                *)
+                    bench_pass "2.1 - Container '$CNAME' runs as non-root user ($CONTAINER_USER)"
+                    ;;
+            esac
 
             # 2.2 Privileged mode
-            if echo "$INSPECT" | grep -q '"Privileged":\s*true'; then
+            PRIVILEGED=$($RUNTIME inspect --format '{{.HostConfig.Privileged}}' "$CONTAINER_ID" 2>/dev/null || true)
+            if [[ "$PRIVILEGED" == "true" ]]; then
                 bench_fail "2.2 - Container '$CNAME' is running in PRIVILEGED mode"
             else
                 bench_pass "2.2 - Container '$CNAME' is not privileged"
             fi
 
             # 2.3 Host network namespace
-            NETMODE=$(echo "$INSPECT" | grep -oP '"NetworkMode":\s*"\K[^"]*' | head -1)
+            NETMODE=$($RUNTIME inspect --format '{{.HostConfig.NetworkMode}}' "$CONTAINER_ID" 2>/dev/null || true)
             if [[ "$NETMODE" == "host" ]]; then
                 bench_warn "2.3 - Container '$CNAME' uses host network namespace"
             else
@@ -307,7 +320,7 @@ if [[ "$DO_BENCH" == true ]]; then
             fi
 
             # 2.4 Host PID namespace
-            PIDMODE=$(echo "$INSPECT" | grep -oP '"PidMode":\s*"\K[^"]*' | head -1)
+            PIDMODE=$($RUNTIME inspect --format '{{.HostConfig.PidMode}}' "$CONTAINER_ID" 2>/dev/null || true)
             if [[ "$PIDMODE" == "host" ]]; then
                 bench_fail "2.4 - Container '$CNAME' uses host PID namespace"
             else
@@ -315,39 +328,42 @@ if [[ "$DO_BENCH" == true ]]; then
             fi
 
             # 2.5 Read-only root filesystem
-            if echo "$INSPECT" | grep -q '"ReadonlyRootfs":\s*true'; then
+            READONLY_ROOTFS=$($RUNTIME inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$CONTAINER_ID" 2>/dev/null || true)
+            if [[ "$READONLY_ROOTFS" == "true" ]]; then
                 bench_pass "2.5 - Container '$CNAME' has read-only root filesystem"
             else
                 bench_warn "2.5 - Container '$CNAME' does NOT have read-only root filesystem"
             fi
 
             # 2.6 Excessive capabilities
-            CAPS_ADD=$(echo "$INSPECT" | grep -oP '"CapAdd":\s*\[\K[^\]]*' | head -1)
-            if [[ -n "$CAPS_ADD" && "$CAPS_ADD" != "null" ]]; then
+            CAPS_ADD=$($RUNTIME inspect --format '{{json .HostConfig.CapAdd}}' "$CONTAINER_ID" 2>/dev/null || true)
+            if [[ -n "$CAPS_ADD" && "$CAPS_ADD" != "null" && "$CAPS_ADD" != "[]" ]]; then
                 bench_warn "2.6 - Container '$CNAME' has added capabilities: $CAPS_ADD"
             else
                 bench_pass "2.6 - Container '$CNAME' has no extra capabilities added"
             fi
 
-            # 2.7 Health check
-            HEALTHCHECK=$(echo "$INSPECT" | grep -oP '"Healthcheck":\s*\{' | head -1)
-            if [[ -z "$HEALTHCHECK" ]]; then
+            # 2.7 Health check (treat null, {}, empty Test, and Podman/Docker ["NONE"] as missing)
+            HEALTHCHECK=$($RUNTIME inspect --format '{{json .Config.Healthcheck}}' "$CONTAINER_ID" 2>/dev/null || true)
+            if [[ -z "$HEALTHCHECK" || "$HEALTHCHECK" == "null" || "$HEALTHCHECK" == "{}" ]] || \
+                [[ "$HEALTHCHECK" == *'["NONE"]'* ]] || \
+                ! [[ "$HEALTHCHECK" == *'"Test":['*'"'* ]]; then
                 bench_warn "2.7 - Container '$CNAME' has no health check configured"
             else
                 bench_pass "2.7 - Container '$CNAME' has a health check"
             fi
 
             # 2.8 Memory limits
-            MEMORY=$(echo "$INSPECT" | grep -oP '"Memory":\s*\K[0-9]+' | head -1)
-            if [[ -z "$MEMORY" || "$MEMORY" == "0" ]]; then
+            MEMORY=$($RUNTIME inspect --format '{{.HostConfig.Memory}}' "$CONTAINER_ID" 2>/dev/null || true)
+            if [[ -z "$MEMORY" || "$MEMORY" == "0" || ! "$MEMORY" =~ ^[0-9]+$ ]]; then
                 bench_warn "2.8 - Container '$CNAME' has no memory limit set"
             else
                 bench_pass "2.8 - Container '$CNAME' has memory limit: $((MEMORY / 1048576))MB"
             fi
 
             # 2.9 CPU limits
-            NANOC=$(echo "$INSPECT" | grep -oP '"NanoCpus":\s*\K[0-9]+' | head -1)
-            CPUSHARES=$(echo "$INSPECT" | grep -oP '"CpuShares":\s*\K[0-9]+' | head -1)
+            NANOC=$($RUNTIME inspect --format '{{.HostConfig.NanoCpus}}' "$CONTAINER_ID" 2>/dev/null || true)
+            CPUSHARES=$($RUNTIME inspect --format '{{.HostConfig.CpuShares}}' "$CONTAINER_ID" 2>/dev/null || true)
             if [[ (-z "$NANOC" || "$NANOC" == "0") && (-z "$CPUSHARES" || "$CPUSHARES" == "0") ]]; then
                 bench_warn "2.9 - Container '$CNAME' has no CPU limit set"
             else
@@ -355,14 +371,14 @@ if [[ "$DO_BENCH" == true ]]; then
             fi
 
             # 2.10 Bind-mounted sensitive paths
-            SENSITIVE_PATHS=("/etc" "/proc" "/sys" "/dev" "/var/run/docker.sock")
-            MOUNTS=$(echo "$INSPECT" | grep -oP '"Source":\s*"\K[^"]*' || true)
+            SENSITIVE_PATHS=("/etc" "/proc" "/sys" "/dev" "/var/run/docker.sock" "/run/docker.sock")
+            MOUNTS=$($RUNTIME inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$CONTAINER_ID" 2>/dev/null || true)
             for SPATH in "${SENSITIVE_PATHS[@]}"; do
-                if echo "$MOUNTS" | grep -q "^${SPATH}$\|^${SPATH}/"; then
+                if grep -Eq "^${SPATH}(/|$)" <<< "$MOUNTS"; then
                     bench_fail "2.10 - Container '$CNAME' has bind mount to sensitive path: $SPATH"
                 fi
             done
-        done
+        done <<< "$CONTAINERS"
     fi
 
     echo
@@ -397,12 +413,12 @@ if [[ "$DO_SCAN" == true ]]; then
 
         # Trivy is in Arch's signed official repositories. Do not fall back to
         # an AUR package or an unauthenticated release archive.
-        pacman -S --noconfirm --needed trivy
+        pacman -Syu --noconfirm --needed trivy
         command -v trivy &>/dev/null || err "Trivy installation completed but no executable was found"
-        TRIVY_VER=$(trivy --version 2>/dev/null | head -1)
+        TRIVY_VER=$(trivy --version 2>/dev/null | head -1 || true)
         info "Installed from the signed Arch repository: $TRIVY_VER"
     else
-        TRIVY_VER=$(trivy --version 2>/dev/null | head -1)
+        TRIVY_VER=$(trivy --version 2>/dev/null | head -1 || true)
         info "Trivy already installed: $TRIVY_VER"
     fi
 
@@ -412,29 +428,28 @@ if [[ "$DO_SCAN" == true ]]; then
     msg "Scanning local images for HIGH and CRITICAL vulnerabilities..."
 
     SCAN_DIR="/var/log/docker-security"
-    mkdir -p "$SCAN_DIR"
+    install -d -m 0750 "$SCAN_DIR"
     SCAN_DATE=$(date +%Y%m%d-%H%M%S)
     SCAN_REPORT="$SCAN_DIR/image-scan-${SCAN_DATE}.json"
 
-    # Initialize JSON report array
-    echo "[" > "$SCAN_REPORT"
-    FIRST_ENTRY=true
-
-    if [[ "$RUNTIME" == "docker" ]]; then
-        IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' || true)
-    else
-        IMAGES=$(podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' || true)
-    fi
+    IMAGES=$($RUNTIME images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' || true)
 
     if [[ -z "$IMAGES" ]]; then
-        info "No local images found to scan."
+        printf '[]\n' > "$SCAN_REPORT"
+        chmod 0640 "$SCAN_REPORT"
+        GENERATED_FILES+=("$SCAN_REPORT")
+        info "No local images found to scan. Wrote empty report: $SCAN_REPORT"
+        warn_if_rootless_podman "images"
     else
+        printf '[\n' > "$SCAN_REPORT"
+        chmod 0640 "$SCAN_REPORT"
+        FIRST_ENTRY=true
         TOTAL_IMAGES=0
         VULN_IMAGES=0
 
         while IFS= read -r IMAGE; do
             [[ -z "$IMAGE" ]] && continue
-            ((TOTAL_IMAGES++))
+            (( ++TOTAL_IMAGES ))
 
             info "Scanning: $IMAGE"
 
@@ -442,25 +457,29 @@ if [[ "$DO_SCAN" == true ]]; then
             if [[ "$FIRST_ENTRY" == true ]]; then
                 FIRST_ENTRY=false
             else
-                echo "," >> "$SCAN_REPORT"
+                printf ',\n' >> "$SCAN_REPORT"
             fi
 
-            # Run Trivy scan
-            SCAN_OUTPUT=$(trivy image --severity HIGH,CRITICAL --format json "$IMAGE" 2>/dev/null || echo "{}")
-            echo "$SCAN_OUTPUT" >> "$SCAN_REPORT"
+            # Run Trivy scan into a variable first so partial output on failure
+            # never corrupts the JSON report array.
+            if ! SCAN_OUTPUT=$(trivy image --severity HIGH,CRITICAL --format json "$IMAGE" 2>/dev/null) || [[ -z "$SCAN_OUTPUT" ]]; then
+                SCAN_OUTPUT="{}"
+            fi
+            printf '%s\n' "$SCAN_OUTPUT" >> "$SCAN_REPORT"
 
             # Check for vulnerabilities in output
-            VULN_COUNT=$(echo "$SCAN_OUTPUT" | grep -c '"VulnerabilityID"' 2>/dev/null || echo "0")
+            VULN_COUNT=$(grep -c '"VulnerabilityID"' <<< "$SCAN_OUTPUT" || true)
+            VULN_COUNT="${VULN_COUNT:-0}"
             if [[ "$VULN_COUNT" -gt 0 ]]; then
                 warn "  Found $VULN_COUNT HIGH/CRITICAL vulnerabilities in $IMAGE"
-                ((VULN_IMAGES++))
+                (( ++VULN_IMAGES ))
             else
                 msg "  No HIGH/CRITICAL vulnerabilities in $IMAGE"
             fi
 
         done <<< "$IMAGES"
 
-        echo "]" >> "$SCAN_REPORT"
+        printf ']\n' >> "$SCAN_REPORT"
         GENERATED_FILES+=("$SCAN_REPORT")
 
         echo
@@ -476,6 +495,8 @@ if [[ "$DO_SCAN" == true ]]; then
     # -----------------------------------------------------------------
     msg "Creating weekly image scan timer..."
 
+    install -d -m 0755 /usr/local/bin /etc/systemd/system
+
     cat > /usr/local/bin/docker-image-scan.sh <<'SCANSCRIPT'
 #!/usr/bin/env bash
 # =============================================================================
@@ -484,9 +505,10 @@ if [[ "$DO_SCAN" == true ]]; then
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCAN_DIR="/var/log/docker-security"
-mkdir -p "$SCAN_DIR"
+install -d -m 0750 "$SCAN_DIR"
 SCAN_DATE=$(date +%Y%m%d-%H%M%S)
 REPORT="$SCAN_DIR/image-scan-${SCAN_DATE}.json"
 
@@ -500,31 +522,47 @@ else
     exit 1
 fi
 
-echo "[" > "$REPORT"
-FIRST=true
+if [[ -z "$IMAGES" ]]; then
+    printf '[]\n' > "$REPORT"
+    chmod 0640 "$REPORT"
+else
+    printf '[\n' > "$REPORT"
+    chmod 0640 "$REPORT"
+    FIRST=true
 
-while IFS= read -r IMAGE; do
-    [[ -z "$IMAGE" ]] && continue
-    if [[ "$FIRST" == true ]]; then
-        FIRST=false
-    else
-        echo "," >> "$REPORT"
-    fi
-    trivy image --severity HIGH,CRITICAL --format json "$IMAGE" >> "$REPORT" 2>/dev/null || echo "{}" >> "$REPORT"
-done <<< "$IMAGES"
+    while IFS= read -r IMAGE; do
+        [[ -z "$IMAGE" ]] && continue
+        if [[ "$FIRST" == true ]]; then
+            FIRST=false
+        else
+            printf ',\n' >> "$REPORT"
+        fi
+        if ! SCAN_OUTPUT=$(trivy image --severity HIGH,CRITICAL --format json "$IMAGE" 2>/dev/null) || [[ -z "$SCAN_OUTPUT" ]]; then
+            SCAN_OUTPUT="{}"
+        fi
+        printf '%s\n' "$SCAN_OUTPUT" >> "$REPORT"
+    done <<< "$IMAGES"
 
-echo "]" >> "$REPORT"
+    printf ']\n' >> "$REPORT"
+fi
 
-# Clean up old reports (keep last 12)
-ls -1t "$SCAN_DIR"/image-scan-*.json 2>/dev/null | tail -n +13 | xargs -r rm -f
+# Clean up old reports (keep newest 12)
+shopt -s nullglob
+REPORTS=( "$SCAN_DIR"/image-scan-*.json )
+shopt -u nullglob
+if (( ${#REPORTS[@]} > 12 )); then
+    rm -f -- "${REPORTS[@]:0:${#REPORTS[@]}-12}"
+fi
 
 echo "Scan complete: $REPORT"
 SCANSCRIPT
 
-    chmod 755 /usr/local/bin/docker-image-scan.sh
+    rmdir /etc/systemd/system/docker-image-scan.service.d 2>/dev/null || true
+    chmod 0755 /usr/local/bin/docker-image-scan.sh
     GENERATED_FILES+=("/usr/local/bin/docker-image-scan.sh")
 
-    cat > /etc/systemd/system/docker-image-scan.service <<'EOF'
+    TMP_SCAN_UNIT=$(mktemp /etc/systemd/system/.docker-image-scan.service.XXXXXX)
+    cat > "$TMP_SCAN_UNIT" <<'EOF'
 [Unit]
 Description=Docker image vulnerability scan (Trivy)
 After=network-online.target
@@ -535,8 +573,11 @@ Type=oneshot
 ExecStart=/usr/local/bin/docker-image-scan.sh
 PrivateTmp=true
 EOF
+    install -o root -g root -m 0644 "$TMP_SCAN_UNIT" /etc/systemd/system/docker-image-scan.service
+    rm -f -- "$TMP_SCAN_UNIT"
 
-    cat > /etc/systemd/system/docker-image-scan.timer <<'EOF'
+    TMP_SCAN_TIMER=$(mktemp /etc/systemd/system/.docker-image-scan.timer.XXXXXX)
+    cat > "$TMP_SCAN_TIMER" <<'EOF'
 [Unit]
 Description=Weekly Docker image vulnerability scan
 
@@ -548,6 +589,8 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    install -o root -g root -m 0644 "$TMP_SCAN_TIMER" /etc/systemd/system/docker-image-scan.timer
+    rm -f -- "$TMP_SCAN_TIMER"
 
     systemctl daemon-reload
     systemctl enable docker-image-scan.timer
@@ -579,99 +622,112 @@ if [[ "$DO_COMPOSE" == true ]]; then
     COMPOSE_ISSUES=0
 
     # 4.1 Missing read_only: true
-    if ! echo "$COMPOSE_CONTENT" | grep -q "read_only:\s*true"; then
+    if ! grep -q "read_only:\s*true" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.1 - Missing 'read_only: true' on one or more services"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.1 - 'read_only: true' found"
     fi
 
     # 4.2 Missing security_opt: [no-new-privileges:true]
-    if ! echo "$COMPOSE_CONTENT" | grep -q "no-new-privileges"; then
+    if ! grep -q "no-new-privileges" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.2 - Missing 'security_opt: [no-new-privileges:true]'"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.2 - 'no-new-privileges' security option found"
     fi
 
     # 4.3 Missing cap_drop: [ALL]
-    if ! echo "$COMPOSE_CONTENT" | grep -q "cap_drop"; then
+    if ! grep -q "cap_drop" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.3 - Missing 'cap_drop: [ALL]' — capabilities not dropped"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.3 - 'cap_drop' found"
     fi
 
     # 4.4 Using privileged: true
-    if echo "$COMPOSE_CONTENT" | grep -q "privileged:\s*true"; then
+    if grep -q "privileged:\s*true" <<< "$COMPOSE_CONTENT"; then
         bench_fail "4.4 - Service uses 'privileged: true' — CRITICAL security risk"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.4 - No 'privileged: true' found"
     fi
 
     # 4.5 Using network_mode: host
-    if echo "$COMPOSE_CONTENT" | grep -q "network_mode:\s*[\"']*host"; then
+    if grep -q "network_mode:\s*[\"']*host" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.5 - Service uses 'network_mode: host' — breaks network isolation"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.5 - No 'network_mode: host' found"
     fi
 
-    # 4.6 Binding to 0.0.0.0 instead of 127.0.0.1
-    if echo "$COMPOSE_CONTENT" | grep -qE '(0\.0\.0\.0:|"0\.0\.0\.0:|-\s*"?[0-9]+:[0-9])' 2>/dev/null; then
-        # Check if any port binding does NOT start with 127.0.0.1
-        if echo "$COMPOSE_CONTENT" | grep -E 'ports:' -A 20 | grep -qE '^\s*-\s*"?[0-9]+:' 2>/dev/null; then
-            bench_warn "4.6 - Ports may be bound to 0.0.0.0 — prefer 127.0.0.1:PORT:PORT"
-            ((COMPOSE_ISSUES++))
-        fi
+    # 4.6 Binding to 0.0.0.0 / [::] / unspecified host interface instead of 127.0.0.1
+    if awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ports:[[:space:]]*(#.*)?$/ { in_ports = 1; ports_indent = match($0, /[^[:space:]]/) - 1; next }
+        in_ports {
+            cur_indent = match($0, /[^[:space:]]/) - 1
+            if (cur_indent >= 0 && cur_indent <= ports_indent && $0 !~ /^[[:space:]]*-/) {
+                in_ports = 0
+            }
+        }
+        /(^|[^0-9.])0\.0\.0\.0:[0-9]/ || /\[::\]:[0-9]/ || /(^|[[:space:]"'\'']):::[0-9]/ || /host_ip:[[:space:]]*["'\'']?(0\.0\.0\.0|::)["'\'']?([[:space:]]|$)/ {
+            found = 1; exit
+        }
+        in_ports && /^[[:space:]]*-[[:space:]]*["'\'']?[0-9]+(-[0-9]+)?:[0-9]+/ {
+            found = 1; exit
+        }
+        END { exit !found }
+    ' <<< "$COMPOSE_CONTENT"; then
+        bench_warn "4.6 - Ports bound to 0.0.0.0, [::], or unspecified interface — prefer 127.0.0.1:PORT:PORT"
+        (( ++COMPOSE_ISSUES ))
     else
-        bench_pass "4.6 - No 0.0.0.0 port bindings detected"
+        bench_pass "4.6 - No wildcard (0.0.0.0 / [::] / unspecified) port bindings detected"
     fi
 
     # 4.7 Missing mem_limit and cpus
-    if ! echo "$COMPOSE_CONTENT" | grep -qE "(mem_limit|memory:)" 2>/dev/null; then
+    if ! grep -qE "(mem_limit|memory:)" <<< "$COMPOSE_CONTENT" 2>/dev/null; then
         bench_warn "4.7 - Missing memory limits (mem_limit or deploy.resources.limits.memory)"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.7 - Memory limits found"
     fi
 
-    if ! echo "$COMPOSE_CONTENT" | grep -qE "(cpus:|cpu_count:)" 2>/dev/null; then
+    if ! grep -qE "(cpus:|cpu_count:)" <<< "$COMPOSE_CONTENT" 2>/dev/null; then
         bench_warn "4.7 - Missing CPU limits (cpus or deploy.resources.limits.cpus)"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.7 - CPU limits found"
     fi
 
     # 4.8 Missing healthcheck
-    if ! echo "$COMPOSE_CONTENT" | grep -q "healthcheck:"; then
+    if ! grep -q "healthcheck:" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.8 - Missing 'healthcheck' definition"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.8 - 'healthcheck' found"
     fi
 
     # 4.9 Using :latest tag
-    if echo "$COMPOSE_CONTENT" | grep -qE "image:.*:latest"; then
+    if grep -qE "image:.*:latest" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.9 - Using ':latest' tag — pin to a specific version"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.9 - No ':latest' tag detected"
     fi
 
     # 4.10 Mounting docker.sock
-    if echo "$COMPOSE_CONTENT" | grep -q "docker.sock"; then
+    if grep -q "docker.sock" <<< "$COMPOSE_CONTENT"; then
         bench_fail "4.10 - Docker socket mounted in container — CRITICAL security risk"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.10 - Docker socket not mounted"
     fi
 
     # 4.11 Missing tmpfs for /tmp
-    if ! echo "$COMPOSE_CONTENT" | grep -q "tmpfs:"; then
+    if ! grep -q "tmpfs:" <<< "$COMPOSE_CONTENT"; then
         bench_warn "4.11 - Missing 'tmpfs' mount for /tmp"
-        ((COMPOSE_ISSUES++))
+        (( ++COMPOSE_ISSUES ))
     else
         bench_pass "4.11 - 'tmpfs' mount found"
     fi

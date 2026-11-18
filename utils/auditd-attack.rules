@@ -67,8 +67,12 @@
 
 # Rules -----------------------------------------------------------------------
 
-## Kernel Related Events
+## Kernel & Boot Chain Related Events
 -w /etc/sysctl.d/ -p wa -k sysctl
+-w /etc/kernel/cmdline -p wa -k boot_cmdline
+-w /etc/mkinitcpio.conf -p wa -k boot_initramfs
+-w /etc/mkinitcpio.d/ -p wa -k boot_initramfs
+-w /var/lib/sbctl/ -p wa -k secureboot_keys
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/insmod -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/modprobe -k T1215_Kernel_Modules_and_Extensions
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/rmmod -k T1215_Kernel_Modules_and_Extensions
@@ -79,10 +83,8 @@
 -w /etc/modprobe.d/ -p wa -k T1215_Kernel_Modules_and_Extensions
 
 ## Time Related Events
--a exit,always -F arch=b32 -S adjtimex -S settimeofday -S clock_settime -k T1099_Timestomp
--a exit,always -F arch=b64 -S adjtimex -S settimeofday -S clock_settime -k T1099_Timestomp
--a always,exit -F arch=b32 -S clock_settime -k T1099_Timestomp
--a always,exit -F arch=b64 -S clock_settime -k T1099_Timestomp
+-a always,exit -F arch=b32 -S adjtimex -S settimeofday -S clock_settime -k T1099_Timestomp
+-a always,exit -F arch=b64 -S adjtimex -S settimeofday -S clock_settime -k T1099_Timestomp
 -w /etc/localtime -p wa -k T1099_Timestomp
 -w /etc/ntp.conf -p wa -k T1099_Timestomp
 -w /etc/chrony.conf -p wa -k T1099_Timestomp
@@ -101,7 +103,7 @@
 -w /etc/crontab -p wa -k T1168_Local_Job_Scheduling
 # /var/spool/cron/crontabs/ is a Debian/Ubuntu path; Arch uses
 # /var/spool/cron/ directly.
--w /var/spool/cron/ -k T1168_Local_Job_Scheduling
+-w /var/spool/cron/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/inittab -p wa -k T1168_Local_Job_Scheduling
 -w /etc/init.d/ -p wa -k T1168_Local_Job_Scheduling
 -w /etc/init/ -p wa -k T1168_Local_Job_Scheduling
@@ -189,7 +191,7 @@
 -w /etc/pam.d/system-auth -p wa -k T1201_Password_Policy_Discovery
 
 ## SSH Related Events
--w /etc/ssh/sshd_config -k T1021_Remote_Services
+-w /etc/ssh/sshd_config -p wa -k T1021_Remote_Services
 
 ## C2 Related Events
 # Log 64-bit processes (a2!=110 filters local UNIX socket calls)
@@ -230,28 +232,29 @@
 -a always,exit -F arch=b64 -S setxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -F exit=EPERM -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -F exit=EPERM -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -F exit=-EPERM -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -F exit=-EPERM -k T1166_Setuid_and_Setgid
 -w /usr/bin/ -p wa -k T1068_Exploitation_for_Privilege_Escalation
 
 ## Recon Related Events
 -w /etc/group -p wa -k T1087_Account_Discovery
 -w /etc/passwd -p wa -k T1087_Account_Discovery
--w /etc/gshadow -k T1087_Account_Discovery
--w /etc/shadow -k T1087_Account_Discovery
--w /etc/security/opasswd -k T1087_Account_Discovery
--w /usr/sbin/nologin -k T1087_Account_Discovery
--w /sbin/nologin -k T1087_Account_Discovery
+-w /etc/gshadow -p wa -k T1087_Account_Discovery
+-w /etc/shadow -p wa -k T1087_Account_Discovery
+-w /etc/security/opasswd -p wa -k T1087_Account_Discovery
+-w /usr/sbin/nologin -p wa -k T1087_Account_Discovery
+-w /sbin/nologin -p wa -k T1087_Account_Discovery
 -w /usr/bin/whoami -p x -k T1033_System_Owner_User_Discovery
--w /etc/hostname -p r -k T1082_System_Information_Discovery
+-w /etc/hostname -p wa -k T1082_System_Information_Discovery
 -w /sbin/iptables -p x -k T1082_System_Information_Discovery
 -w /sbin/ifconfig -p x -k T1082_System_Information_Discovery
 -w /etc/login.defs -p wa -k T1082_System_Information_Discovery
--w /etc/resolv.conf -k T1016_System_Network_Configuration_Discovery
--w /etc/hosts.allow -k T1016_System_Network_Configuration_Discovery
--w /etc/hosts.deny -k T1016_System_Network_Configuration_Discovery
+-w /etc/resolv.conf -p wa -k T1016_System_Network_Configuration_Discovery
+-w /etc/systemd/resolved.conf.d/ -p wa -k T1016_System_Network_Configuration_Discovery
+-w /etc/hosts.allow -p wa -k T1016_System_Network_Configuration_Discovery
+-w /etc/hosts.deny -p wa -k T1016_System_Network_Configuration_Discovery
 -w /etc/securetty -p wa -k T1082_System_Information_Discovery
 -w /var/log/faillog -p wa -k T1082_System_Information_Discovery
 -w /var/log/lastlog -p wa -k T1082_System_Information_Discovery
@@ -305,20 +308,14 @@
 ## Code Injection Related Events
 -a always,exit -F arch=b32 -S ptrace -k T1055_Process_Injection
 -a always,exit -F arch=b64 -S ptrace -k T1055_Process_Injection
--a always,exit -F arch=b32 -S ptrace -F a0=0x4 -k T1055_Process_Injection
--a always,exit -F arch=b64 -S ptrace -F a0=0x4 -k T1055_Process_Injection
--a always,exit -F arch=b32 -S ptrace -F a0=0x5 -k T1055_Process_Injection
--a always,exit -F arch=b64 -S ptrace -F a0=0x5 -k T1055_Process_Injection
--a always,exit -F arch=b32 -S ptrace -F a0=0x6 -k T1055_Process_Injection
--a always,exit -F arch=b64 -S ptrace -F a0=0x6 -k T1055_Process_Injection
 
 ## Shell Configuration Persistence Related Events
--w /etc/profile.d/ -k T1156_bash_profile_and_bashrc
--w /etc/profile -k T1156_bash_profile_and_bashrc
--w /etc/shells -k T1156_bash_profile_and_bashrc
--w /etc/bash.bashrc -k T1156_bash_profile_and_bashrc
--w /etc/csh.cshrc -k T1156_bash_profile_and_bashrc
--w /etc/csh.login -k T1156_bash_profile_and_bashrc
+-w /etc/profile.d/ -p wa -k T1156_bash_profile_and_bashrc
+-w /etc/profile -p wa -k T1156_bash_profile_and_bashrc
+-w /etc/shells -p wa -k T1156_bash_profile_and_bashrc
+-w /etc/bash.bashrc -p wa -k T1156_bash_profile_and_bashrc
+-w /etc/csh.cshrc -p wa -k T1156_bash_profile_and_bashrc
+-w /etc/csh.login -p wa -k T1156_bash_profile_and_bashrc
 
 ## Temporary Directory Monitoring
 -w /tmp/ -p wa -k T1074_Temporary_File_Creation

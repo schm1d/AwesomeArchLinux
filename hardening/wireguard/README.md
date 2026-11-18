@@ -18,16 +18,19 @@ sudo ./wireguard.sh -d 1.1.1.1,1.0.0.1
 ## Usage
 
 ```
-sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d DNS] [-h]
+sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d DNS] [-e ENDPOINT] [--add-client NAME] [--force] [-h]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-p PORT` | `51820` | WireGuard listen port (UDP) |
-| `-s SUBNET` | `10.0.0.0/24` | VPN subnet in CIDR notation |
+| `-s SUBNET` | `10.0.0.0/24` | VPN subnet in IPv4 CIDR notation (`/8`–`/30`) |
 | `-c CLIENT_NAME` | `client` | Base name for client config files |
 | `-n NUM_CLIENTS` | `1` | Number of client configs to generate |
-| `-d DNS` | `9.9.9.9,149.112.112.112` | DNS servers pushed to clients (Quad9) |
+| `-d DNS` | `9.9.9.9,149.112.112.112` | Comma-separated DNS server IPs pushed to clients (Quad9; inherited from existing clients on `--add-client` unless `-d` is passed) |
+| `-e ENDPOINT` | auto-detected | Public IPv4 or DNS hostname written to client `Endpoint` (inherited from existing clients on `--add-client` unless `-e` is passed) |
+| `--add-client NAME` | | Safely add one new peer to an existing `wg0.conf` and live-sync `wg0` |
+| `--force` | off | Back up existing `wg0.conf` and allow overwriting existing client keys/configs |
 | `-h` | | Show help |
 
 ## What the Script Does
@@ -64,7 +67,13 @@ sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d 
 
 ## Adding More Clients
 
-After the initial setup, you can add clients manually:
+After the initial setup, add a new client without restarting `wg0` or touching existing peers:
+
+```bash
+sudo ./wireguard.sh --add-client tablet
+```
+
+Or add clients manually:
 
 ```bash
 # Generate keys

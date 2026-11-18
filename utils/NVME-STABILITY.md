@@ -1,6 +1,6 @@
 # NVMe controller dropouts with signed UKIs
 
-Use `nvme-stability.py` to test the Linux NVMe driver's suggested workaround for
+Use `nvme-stability.sh` to test the Linux NVMe driver's suggested workaround for
 controllers that disappear, fail a reset, and cause ext4 journals to abort:
 
 ```text
@@ -22,8 +22,8 @@ NVMe numbering stays the same between boots:
 lsblk -o NAME,TYPE,SIZE,MODEL,FSTYPE,MOUNTPOINTS
 sudo smartctl -x /dev/nvme0
 sudo nvme error-log /dev/nvme0 -e 16
-python3 utils/nvme-stability.py --status
-sudo python3 utils/nvme-stability.py --apply
+./utils/nvme-stability.sh --status
+sudo ./utils/nvme-stability.sh --apply
 ```
 
 `/dev/nvme0` is a valid controller device for these tools. If it disappears during
@@ -31,13 +31,13 @@ a failure, changing to `/dev/nvme0n1` does not repair that controller.
 
 The utility supports the project's `linux.preset` with default and fallback UKIs
 at `/efi/EFI/Linux/arch-linux{,-fallback}.efi`, an empty default options value, and
-fallback options `-S autodetect`. It requires Python 3, mkinitcpio, sbctl and the
+fallback options `-S autodetect`. It runs natively in Bash using `coreutils`, `mkinitcpio`, `sbctl` and the
 existing signing keys. It refuses other preset layouts rather than guessing
 which images will boot.
 
 The utility preserves other command-line options, including LUKS, LVM, TPM and
 kernel hardening. It saves the original command line and both signed UKIs under
-`/var/lib/awesomearch/nvme-stability/backup-*`, builds new images in that directory,
+`/var/lib/awesomearchlinux/nvme-stability/backup-*`, builds new images in that directory,
 and verifies the embedded arguments and sbctl signatures before replacing the
 boot files. Signature checks use temporary copies on the ESP, outside the boot
 entry directory, to respect sbctl's Landlock sandbox. Boot files are replaced
@@ -54,7 +54,7 @@ re-enroll TPM tokens merely to test this workaround.
 After reboot:
 
 ```bash
-python3 utils/nvme-stability.py --status
+./utils/nvme-stability.sh --status
 sudo sbctl verify /efi/EFI/Linux/arch-linux.efi /efi/EFI/Linux/arch-linux-fallback.efi
 journalctl -k -b --no-pager -g 'nvme|I/O error|aborted journal|Remounting filesystem'
 ```

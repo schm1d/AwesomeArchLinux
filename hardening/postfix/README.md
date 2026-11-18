@@ -8,7 +8,7 @@ Installs and configures a full hardened mail server on Arch Linux with [Postfix]
 # Full mail server (requires TLS cert at /etc/letsencrypt/live/mail.example.com/)
 sudo ./postfix.sh -d example.com
 
-# Preview configs without starting services
+# Preview planned configuration and DNS records without modifying the system
 sudo ./postfix.sh -d example.com --dry-run
 
 # With custom hostname and outbound relay
@@ -40,7 +40,7 @@ sudo ./postfix.sh -d example.com -H mx1.example.com \
 | `--relay-password-file FILE` | Read the SMTP relay password from a private, non-symlink file | |
 | `--relay-spf-include DOMAIN` | Provider-published SPF include domain | |
 | `-e EMAIL` | Admin email address | `postmaster@$DOMAIN` |
-| `--dry-run` | Write configs, validate, don't start services | |
+| `--dry-run` | Preview planned configuration and DNS records without modifying the system | |
 | `-h` | Show help | |
 
 ## Architecture
@@ -124,7 +124,7 @@ sudo ./postfix.sh -d example.com -H mx1.example.com \
 - RSA 2048-bit key generation
 - Sign and verify mode
 - `OversignHeaders From` — prevents header injection
-- Milter socket shared with Postfix
+- Milter socket at `/run/opendkim/opendkim.sock` (`UMask 007`, `UserID opendkim:postfix`, leaving Postfix's `0700` `/var/spool/postfix/private` directory untouched)
 
 ### 5. rspamd
 
@@ -146,7 +146,7 @@ All services (Postfix, Dovecot, OpenDKIM, rspamd) get hardening overrides:
 - `NoNewPrivileges=yes`, `LockPersonality=yes`
 - `RestrictNamespaces=yes`, `PrivateDevices=yes`
 - `SystemCallArchitectures=native`
-- Service-specific `CapabilityBoundingSet` and `ReadWritePaths`
+- Explicit `CapabilityBoundingSet=` reset followed by minimal per-daemon capabilities (`CAP_KILL` included for Postfix and Dovecot master processes) and scoped `ReadWritePaths`
 
 ### 7. DNS Record Generation
 
@@ -158,7 +158,7 @@ The script outputs all required DNS records:
 | **SPF** | Authorizes sending IPs |
 | **DKIM** | Public key for signature verification |
 | **DMARC** | Policy for failed SPF/DKIM (starts at quarantine) |
-| **DANE/TLSA** | Certificate pinning via DNSSEC |
+| **DANE/TLSA** | Certificate pinning via DNSSEC (`TLSA 3 1 1` leaf SPKI — requires `certbot --reuse-key` / `reuse_key = True` — and `TLSA 2 1 1` issuing CA SPKI from `chain.pem`) |
 | **MTA-STS** | Strict Transport Security for SMTP |
 | **TLS-RPT** | TLS failure reporting |
 | **PTR** | Reverse DNS (set at hosting provider) |
@@ -168,11 +168,9 @@ The script outputs all required DNS records:
 ### Add Virtual Users
 
 ```bash
-# Generate password hash
-doveadm pw -s BLF-CRYPT
-
-# Add to Dovecot users file
-echo 'user@example.com:{BLF-CRYPT}$2y$05$...' >> /etc/dovecot/users
+# Generate password hash and append passwd-file entry
+HASH=$(doveadm pw -s BLF-CRYPT)
+printf '%s:%s::::::\n' "user@example.com" "$HASH" >> /etc/dovecot/users
 
 # Add mailbox mapping
 echo 'user@example.com example.com/user/Maildir/' >> /etc/postfix/vmailbox
@@ -218,7 +216,7 @@ max_age: 604800
 
 ```bash
 # Send a test email
-echo "Hello from $(hostname)" | mail -s "Test" user@example.com
+echo "Hello from $(uname -n)" | mail -s "Test" user@example.com
 
 # Check mail queue
 mailq
@@ -273,7 +271,8 @@ journalctl -u dovecot -e
 
 # Validate configs
 postfix check
-dovecot -n
+doveconf -n
+rspamadm configtest
 
 # If systemd hardening is too restrictive
 systemctl revert postfix    # removes hardening override

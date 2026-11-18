@@ -27,3 +27,9 @@ aal_valid_email() {
     [[ "$local_part" =~ ^[A-Za-z0-9_%+-]+([.][A-Za-z0-9_%+-]+)*$ ]] || return 1
     aal_valid_hostname "$domain_part"
 }
+
+aal_valid_fqdn() {
+    local name="$1"
+
+    [[ "$name" == *.* ]] && aal_valid_hostname "$name"
+}

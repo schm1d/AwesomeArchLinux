@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Post-install security packages: root orchestrates, AUR builds are unprivileged.
 set -euo pipefail
+umask 022
 
 [[ "$(id -u)" == 0 ]] || {
     echo "Run as root: sudo /root/install-aur-packages.sh" >&2
@@ -28,7 +29,11 @@ for package in aide acct; do
     fi
 done
 
-systemctl enable --now psacct.service
+if systemctl list-unit-files acct.service 2>/dev/null | grep -q '^acct\.service'; then
+    systemctl enable --now acct.service
+else
+    systemctl enable --now psacct.service
+fi
 
 # Use the shared configurator so the config, database paths and timer agree.
 # Rerunning package setup must not silently replace an integrity baseline.

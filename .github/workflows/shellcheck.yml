@@ -3,10 +3,10 @@ name: ShellCheck
 on:
   push:
     branches: [main]
-    paths: ['**.sh']
+    paths: ['**.sh', '.github/workflows/shellcheck.yml']
   pull_request:
     branches: [main]
-    paths: ['**.sh']
+    paths: ['**.sh', '.github/workflows/shellcheck.yml']
 
 jobs:
   shellcheck:
@@ -17,10 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install ShellCheck
-        run: sudo apt-get install -y shellcheck
+      - name: Install ShellCheck and test dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck gdisk acl
 
       - name: Find and lint all shell scripts
+        shell: bash
         run: |
           echo "::group::Scripts found"
           find . -name '*.sh' -type f | sort
@@ -38,9 +39,13 @@ jobs:
             echo "::endgroup::"
           done < <(find . -name '*.sh' -type f | sort)
 
-          if [ "$FAILED" -eq 1 ]; then
+          if [[ "$FAILED" -eq 1 ]]; then
             echo "::error::ShellCheck found issues in one or more scripts"
             exit 1
           fi
 
           echo "All scripts passed ShellCheck."
+
+      - name: Run pure-Bash regression test suite
+        shell: bash
+        run: ./tests/run-tests.sh

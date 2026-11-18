@@ -3,7 +3,8 @@
 # =============================================================================
 # Script:      neovim.sh
 # Description: Installs NeoVim with vim-plug and nvim-treesitter for enhanced
-#              syntax highlighting. Applies secure permissions on config files.
+#              syntax highlighting. Applies editor hardening and secure
+#              permissions while avoiding /tmp noexec failures.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
@@ -16,6 +17,7 @@ set -euo pipefail
 BBlue='\033[1;34m'
 BRed='\033[1;31m'
 BGreen='\033[1;32m'
+BYellow='\033[1;33m'
 NC='\033[0m'
 
 # Must NOT run as root — config goes into user home
@@ -24,28 +26,38 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
-# Install Neovim if not already installed
+for cmd in git curl tar; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo -e "${BRed}Required command '$cmd' not found. Install it first.${NC}" >&2
+        exit 1
+    fi
+done
+
 if ! command -v nvim &>/dev/null; then
     echo -e "${BBlue}Installing Neovim...${NC}"
-    sudo pacman -S --noconfirm neovim
+    sudo pacman -S --needed --noconfirm neovim
 fi
 
-# Create Neovim config directory
-mkdir -p "$HOME/.config/nvim"
+mkdir -p -m 0700 "$HOME/.config" "$HOME/.config/nvim" "$HOME/.cache" "$HOME/.cache/nvim/tmp"
+if command -v setfacl &>/dev/null; then
+    setfacl -b -k "$HOME/.cache/nvim/tmp" 2>/dev/null || true
+fi
 
-# Create init.vim with basic configurations if it doesn't exist
 INITVIM="$HOME/.config/nvim/init.vim"
 if [ ! -f "$INITVIM" ]; then
     echo -e "${BBlue}Creating init.vim...${NC}"
     cat > "$INITVIM" <<'EOL'
 set encoding=utf-8
+set nomodeline
+set modelines=0
 filetype on
 syntax on
 filetype plugin on
 EOL
+elif ! grep -q "set nomodeline" "$INITVIM"; then
+    printf '\nset nomodeline\nset modelines=0\n' >> "$INITVIM"
 fi
 
-# Install vim-plug if not already installed
 PLUG_VIM="$HOME/.local/share/nvim/site/autoload/plug.vim"
 if [ ! -f "$PLUG_VIM" ]; then
     echo -e "${BBlue}Installing vim-plug...${NC}"
@@ -53,13 +65,12 @@ if [ ! -f "$PLUG_VIM" ]; then
         https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
 fi
 
-# Create plugins.vim with nvim-treesitter if it doesn't exist
 PLUGINS_FILE="$HOME/.config/nvim/plugins.vim"
 if [ ! -f "$PLUGINS_FILE" ]; then
     echo -e "${BBlue}Creating plugins.vim with nvim-treesitter...${NC}"
     cat > "$PLUGINS_FILE" <<'EOL'
 call plug#begin()
-Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}
+Plug 'nvim-treesitter/nvim-treesitter', {'branch': 'master', 'do': ':TSUpdate'}
 call plug#end()
 
 lua << EOF
@@ -75,20 +86,23 @@ EOL
 else
     if ! grep -q "nvim-treesitter/nvim-treesitter" "$PLUGINS_FILE"; then
         echo -e "${BBlue}Adding nvim-treesitter to existing plugins.vim...${NC}"
-        sed -i "/call plug#begin()/a Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}" "$PLUGINS_FILE"
+        sed -i "/call plug#begin()/a Plug 'nvim-treesitter/nvim-treesitter', {'branch': 'master', 'do': ':TSUpdate'}" "$PLUGINS_FILE"
     fi
 fi
 
-# Ensure plugins.vim is sourced in init.vim
 if ! grep -q "source.*plugins.vim" "$INITVIM"; then
     echo "source $PLUGINS_FILE" >> "$INITVIM"
 fi
 
-# Install plugins in headless mode
 echo -e "${BBlue}Installing plugins...${NC}"
-nvim --headless +PlugInstall +qall 2>/dev/null || true
+TMPDIR="$HOME/.cache/nvim/tmp" GIT_TERMINAL_PROMPT=0 nvim --headless +PlugInstall +qall 2>/dev/null || true
 
-# Set secure permissions (no sudo needed — user files)
+if command -v cc &>/dev/null && [[ -x "$(command -v cc)" ]]; then
+    TMPDIR="$HOME/.cache/nvim/tmp" nvim --headless "+TSUpdateSync" +qall 2>/dev/null || true
+else
+    echo -e "${BYellow}Note: C compiler not accessible in current session (check 'compilers' group membership); treesitter parsers will compile once compiler access is active.${NC}"
+fi
+
 chmod 600 "$INITVIM" "$PLUGINS_FILE"
 chmod 700 "$HOME/.config/nvim"
 

@@ -18,9 +18,10 @@ sudo ./wordpress.sh -d blog.example.com -w /srv/http/wordpress --db-name wpblog 
 |------|-------------|---------|
 | `-d DOMAIN` | Domain name for the WordPress site | *required* |
 | `-w WP_PATH` | WordPress installation path | `/var/www/wordpress` |
-| `--db-name DB` | Database name | `wordpress` |
-| `--db-user USER` | Database user | `wpuser` |
-| `--db-host HOST` | Database host | `localhost` |
+| `--db-name DB` | Database name written to `wp-config.php` when passed or when `DB_NAME` is still a placeholder | `wordpress` |
+| `--db-user USER` | Database user written to `wp-config.php` when passed or when `DB_USER` is still a placeholder | `wpuser` |
+| `--db-host HOST` | Database host written to `wp-config.php` when passed | `localhost` |
+| `--fresh-install` | Randomize `$table_prefix` and preserve `wp-admin/install.php` even when DB credentials are already configured | off |
 | `-h` | Show help | |
 
 ### Prerequisites
@@ -45,7 +46,7 @@ Checks that `wp-config.php` or `wp-includes/` exists at the specified path befor
 |----------|-------|---------|
 | `DISALLOW_FILE_EDIT` | `true` | Disable the theme/plugin editor in wp-admin |
 | `DISALLOW_FILE_MODS` | `false` | Allow updates from admin (set `true` for locked-down servers) |
-| `FORCE_SSL_ADMIN` | `true` | Force HTTPS for wp-admin and wp-login.php |
+| `FORCE_SSL_ADMIN` | `true` (`false` if HTTP-only) | Force HTTPS for wp-admin and wp-login.php when SSL certs exist |
 | `WP_AUTO_UPDATE_CORE` | `'minor'` | Auto-update minor/security releases only |
 | `WP_DEBUG` | `false` | Disable debug output in production |
 | `WP_DEBUG_DISPLAY` | `false` | Never display errors to visitors |
@@ -57,7 +58,7 @@ Checks that `wp-config.php` or `wp-includes/` exists at the specified path befor
 
 Additionally:
 - **Security keys/salts** are regenerated from `https://api.wordpress.org/secret-key/1.1/salt/`
-- **Table prefix** is randomized (4-char string) if still set to `wp_`
+- **Table prefix** is randomized (4-char string) if still set to `wp_` on unconfigured installs (or when `--fresh-install` is passed; existing configured databases keep their prefix so live sites are not broken)
 - A comment block for **custom `WP_CONTENT_DIR`** is added
 
 ### 3. File Permissions
@@ -74,24 +75,24 @@ Additionally:
 
 Files removed:
 - `wp-config-sample.php`, `readme.html`, `license.txt` (information disclosure)
-- `wp-admin/install.php` (if WordPress is already installed)
+- `wp-admin/install.php` (only when WordPress DB credentials are already configured and `--fresh-install` is not set)
 
 ### 4. nginx Server Block
 
-A complete, hardened nginx configuration for WordPress:
+A complete, hardened nginx configuration for WordPress (with all deny regexes evaluated **above** `location ~ \.php$`):
 
 - **PHP-FPM** via Unix socket with `try_files $uri =404` to prevent arbitrary PHP execution
 - **WordPress permalinks**: `try_files $uri $uri/ /index.php?$args`
 - **xmlrpc.php blocked**: `deny all; return 403`
 - **wp-config.php blocked**: direct access returns 403
-- **PHP blocked in uploads**: prevents execution of uploaded PHP files
-- **PHP blocked in wp-includes**: prevents direct access to include files
-- **PHP blocked in wp-content**: except index.php files
-- **.htaccess/.htpasswd blocked**: hidden file protection
+- **PHP blocked in uploads**: prevents execution of uploaded PHP files (`403`)
+- **PHP blocked in wp-includes**: prevents direct access to include files (`403`)
+- **PHP blocked in wp-content**: all direct `.php` requests under `/wp-content/` are denied (`403`)
+- **.htaccess/.htpasswd & dotfiles blocked**: hidden file protection (except `.well-known`)
 - **Rate limiting**: wp-login.php (1r/s, burst 3), admin-ajax.php (10r/s, burst 20)
 - **Static asset caching**: 1 year, immutable for images, CSS, JS, fonts
 - **FastCGI cache**: included as commented template
-- **Security headers**: CSP (WordPress-tuned), X-Frame-Options, X-Content-Type-Options, COOP
+- **Security headers**: CSP (WordPress-tuned; `upgrade-insecure-requests` and `Strict-Transport-Security` emitted only when SSL is enabled), X-Frame-Options, X-Content-Type-Options, COOP
 - **X-Powered-By hidden**: via `fastcgi_hide_header`
 - **X-Robots-Tag**: `noindex, nofollow` for wp-admin
 
@@ -110,18 +111,21 @@ A complete, hardened nginx configuration for WordPress:
 | `post_max_size` | `10M` | Match upload limit |
 | `max_execution_time` | `30` | Prevent long-running scripts |
 | `max_input_vars` | `3000` | WordPress admin needs more than default 1000 |
-| `open_basedir` | `WP_PATH:/tmp` | Restrict PHP file access to WordPress dir |
+| `open_basedir` | `WP_PATH:/tmp:/var/log/php:/usr/share/php` | Restrict PHP file access |
+| `error_log` | `/var/log/php/wordpress-errors.log` | Log PHP errors outside public webroot |
 | `session.cookie_httponly` | `1` | Prevent JavaScript access to session cookies |
-| `session.cookie_secure` | `1` | Cookies only over HTTPS |
+| `session.cookie_secure` | `1` (`0` if HTTP-only) | Restrict cookies to HTTPS when SSL is enabled |
 | `display_errors` | `Off` | Never show errors to visitors |
+
+> **Compatibility with `../php/php.sh`:** The script checks `/etc/php/php.ini` and `/etc/php/php-fpm.d/*.conf` and warns if both `curl_exec` is disabled and `allow_url_fopen=Off` (WordPress needs `curl_exec` for updates, loopback cron, and remote API calls) or if `php_admin_value[open_basedir]` excludes `WP_PATH` or `/var/log/php`.
 
 ### 7. WP-Cron Replacement
 
 WordPress's built-in wp-cron runs on every page load, which is inefficient and unreliable. This script:
 
 1. Sets `DISABLE_WP_CRON` to `true` in wp-config.php
-2. Creates a systemd timer that runs every 15 minutes
-3. Uses `wp-cli cron event run --due-now` if wp-cli is installed, otherwise falls back to `curl`
+2. Creates a per-domain systemd timer (`wordpress-cron-<domain>.timer`) that runs every 15 minutes (`ProtectSystem=strict`)
+3. Uses `wp-cli cron event run --due-now` if wp-cli is installed, otherwise falls back to `curl -fsS --max-time 30 --resolve <domain>:<port>:127.0.0.1`
 
 ## WordPress Security Best Practices
 
@@ -219,8 +223,8 @@ Check the browser console (F12 > Console) for CSP violation reports.
 | `/etc/fail2ban/filter.d/wordpress-xmlrpc.conf` | xmlrpc.php filter |
 | `/etc/fail2ban/jail.d/wordpress.conf` | WordPress fail2ban jails |
 | `<WP_PATH>/.user.ini` | PHP runtime restrictions |
-| `/etc/systemd/system/wordpress-cron.service` | WP-Cron systemd service |
-| `/etc/systemd/system/wordpress-cron.timer` | WP-Cron systemd timer |
+| `/etc/systemd/system/wordpress-cron-<domain>.service` | Per-domain WP-Cron systemd service |
+| `/etc/systemd/system/wordpress-cron-<domain>.timer` | Per-domain WP-Cron systemd timer |
 
 ### FastCGI Cache
 
@@ -412,12 +416,13 @@ Ensure WordPress-related logs do not grow unbounded:
 
 ```bash
 # /etc/logrotate.d/wordpress
-/var/www/wordpress/wp-content/php-errors.log {
+/var/log/php/wordpress-errors.log {
     weekly
     rotate 4
     compress
     missingok
     notifempty
+    su http http
     create 640 http http
 }
 ```

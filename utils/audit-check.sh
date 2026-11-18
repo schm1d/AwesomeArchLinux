@@ -4,37 +4,24 @@
 # Script:      audit-check.sh
 # Description: Hardening compliance checker for Arch Linux.
 #              Validates that AwesomeArchLinux security hardening has been
-#              correctly applied by checking sysctl parameters, filesystem
-#              permissions, authentication config, SSH hardening, network
-#              security, service status, boot security, disabled modules,
-#              and optional workstation modules (WARN if missing).
-#              Outputs a pass/fail/warn report with a final score.
+#              correctly applied across sysctl, filesystem, authentication,
+#              SSH, network, services, boot chain, disabled modules, and
+#              optional workstation hardening.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
 # Usage:       sudo ./audit-check.sh [--verbose] [--json] [-h]
-#
-# Options:
-#   --verbose   Show actual values for failed/warned checks
-#   --json      Output results as a JSON object
-#   -h, --help  Show this help message
-#
-# Exit codes:
-#   0 — All checks passed
-#   1 — One or more checks failed
 # =============================================================================
 
 set -euo pipefail
 
-# --- Colors ---
 readonly C_BLUE='\033[1;34m'
 readonly C_RED='\033[1;31m'
 readonly C_GREEN='\033[1;32m'
 readonly C_YELLOW='\033[1;33m'
 readonly C_NC='\033[0m'
 
-# --- Globals ---
 VERBOSE=false
 JSON_OUTPUT=false
 PASS_COUNT=0
@@ -42,62 +29,80 @@ FAIL_COUNT=0
 WARN_COUNT=0
 TOTAL_COUNT=0
 
-# JSON accumulator — array of result objects
 declare -a JSON_RESULTS=()
 CURRENT_CATEGORY=""
 
-# --- Logging helpers ---
 msg()  { printf "%b[+]%b %s\n" "$C_GREEN"  "$C_NC" "$1"; }
 info() { printf "%b[*]%b %s\n" "$C_BLUE"   "$C_NC" "$1"; }
 warn() { printf "%b[!]%b %s\n" "$C_YELLOW" "$C_NC" "$1"; }
 err()  { printf "%b[!]%b %s\n" "$C_RED"    "$C_NC" "$1" >&2; exit 1; }
 
-# --- Result helpers ---
-result_pass() {
-    local description="$1"
-    ((TOTAL_COUNT++)) || true
-    ((PASS_COUNT++))  || true
-    if [[ "$JSON_OUTPUT" == false ]]; then
-        printf "  %b[PASS]%b %s\n" "$C_GREEN" "$C_NC" "$description"
+resolve_hostname() {
+    if [[ -n "${HOSTNAME:-}" ]]; then
+        printf '%s' "$HOSTNAME"
+    elif [[ -r /etc/hostname ]]; then
+        tr -d '[:space:]' < /etc/hostname
+    else
+        uname -n
     fi
-    JSON_RESULTS+=("{\"category\":\"${CURRENT_CATEGORY}\",\"status\":\"PASS\",\"description\":$(json_escape "$description")}")
 }
 
-result_fail() {
-    local description="$1"
-    local actual="${2:-}"
-    ((TOTAL_COUNT++)) || true
-    ((FAIL_COUNT++))  || true
-    if [[ "$JSON_OUTPUT" == false ]]; then
-        printf "  %b[FAIL]%b %s\n" "$C_RED" "$C_NC" "$description"
-        if [[ "$VERBOSE" == true && -n "$actual" ]]; then
-            printf "         %b=> actual: %s%b\n" "$C_YELLOW" "$actual" "$C_NC"
-        fi
+is_vps_profile() {
+    if [[ -r /root/.install-env ]] && grep -qE 'INSTALL_TYPE=.*vps' /root/.install-env 2>/dev/null; then
+        return 0
     fi
-    JSON_RESULTS+=("{\"category\":\"${CURRENT_CATEGORY}\",\"status\":\"FAIL\",\"description\":$(json_escape "$description"),\"actual\":$(json_escape "$actual")}")
-}
-
-result_warn() {
-    local description="$1"
-    local actual="${2:-}"
-    ((TOTAL_COUNT++)) || true
-    ((WARN_COUNT++))  || true
-    if [[ "$JSON_OUTPUT" == false ]]; then
-        printf "  %b[WARN]%b %s\n" "$C_YELLOW" "$C_NC" "$description"
-        if [[ "$VERBOSE" == true && -n "$actual" ]]; then
-            printf "         %b=> actual: %s%b\n" "$C_YELLOW" "$actual" "$C_NC"
-        fi
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet 2>/dev/null; then
+        return 0
     fi
-    JSON_RESULTS+=("{\"category\":\"${CURRENT_CATEGORY}\",\"status\":\"WARN\",\"description\":$(json_escape "$description"),\"actual\":$(json_escape "$actual")}")
+    return 1
 }
 
 json_escape() {
     local s="$1"
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
+    s="${s//$'\r'/\\r}"
     s="${s//$'\n'/\\n}"
     s="${s//$'\t'/\\t}"
     printf '"%s"' "$s"
+}
+
+result_pass() {
+    local description="$1"
+    (( ++TOTAL_COUNT ))
+    (( ++PASS_COUNT ))
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        printf "  %b[PASS]%b %s\n" "$C_GREEN" "$C_NC" "$description"
+    fi
+    JSON_RESULTS+=("{\"category\":$(json_escape "$CURRENT_CATEGORY"),\"status\":\"PASS\",\"description\":$(json_escape "$description")}")
+}
+
+result_fail() {
+    local description="$1"
+    local actual="${2:-}"
+    (( ++TOTAL_COUNT ))
+    (( ++FAIL_COUNT ))
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        printf "  %b[FAIL]%b %s\n" "$C_RED" "$C_NC" "$description"
+        if [[ "$VERBOSE" == true && -n "$actual" ]]; then
+            printf "         %b=> actual: %s%b\n" "$C_YELLOW" "$actual" "$C_NC"
+        fi
+    fi
+    JSON_RESULTS+=("{\"category\":$(json_escape "$CURRENT_CATEGORY"),\"status\":\"FAIL\",\"description\":$(json_escape "$description"),\"actual\":$(json_escape "$actual")}")
+}
+
+result_warn() {
+    local description="$1"
+    local actual="${2:-}"
+    (( ++TOTAL_COUNT ))
+    (( ++WARN_COUNT ))
+    if [[ "$JSON_OUTPUT" == false ]]; then
+        printf "  %b[WARN]%b %s\n" "$C_YELLOW" "$C_NC" "$description"
+        if [[ "$VERBOSE" == true && -n "$actual" ]]; then
+            printf "         %b=> actual: %s%b\n" "$C_YELLOW" "$actual" "$C_NC"
+        fi
+    fi
+    JSON_RESULTS+=("{\"category\":$(json_escape "$CURRENT_CATEGORY"),\"status\":\"WARN\",\"description\":$(json_escape "$description"),\"actual\":$(json_escape "$actual")}")
 }
 
 category_header() {
@@ -108,17 +113,16 @@ category_header() {
     fi
 }
 
-# --- Sysctl helper ---
 check_sysctl() {
     local key="$1"
     local expected="$2"
     local description="$3"
-    local mode="${4:-exact}"  # exact or min
+    local mode="${4:-exact}"
 
     local actual
     if actual=$(sysctl -n "$key" 2>/dev/null); then
         if [[ "$mode" == "min" ]]; then
-            if [[ "$actual" -ge "$expected" ]]; then
+            if [[ "$actual" =~ ^-?[0-9]+$ ]] && (( actual >= expected )); then
                 result_pass "$description ($key = $actual)"
             else
                 result_fail "$description ($key should be >= $expected)" "$actual"
@@ -155,7 +159,6 @@ check_sysctl_one_of() {
     fi
 }
 
-# --- Usage ---
 usage() {
     cat <<EOF
 Usage: sudo $0 [--verbose] [--json] [-h]
@@ -171,17 +174,10 @@ Options:
 Exit codes:
   0 — All checks passed
   1 — One or more checks failed
-
-Examples:
-  sudo $0
-  sudo $0 --verbose
-  sudo $0 --json
-  sudo $0 --verbose --json
 EOF
     exit 0
 }
 
-# --- Parse Arguments ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --verbose)    VERBOSE=true; shift ;;
@@ -191,7 +187,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- Root Check ---
 [[ $(id -u) -eq 0 ]] || err "Must be run as root (use sudo)"
 
 # =============================================================================
@@ -200,43 +195,30 @@ done
 check_kernel_hardening() {
     category_header "Kernel Hardening (sysctl)"
 
-    check_sysctl "kernel.dmesg_restrict" "1" \
-        "Dmesg access restricted to root"
+    check_sysctl "kernel.dmesg_restrict" "1" "Dmesg access restricted to root"
+    check_sysctl "fs.protected_hardlinks" "1" "Protected hardlinks enabled"
+    check_sysctl "fs.protected_symlinks" "1" "Protected symlinks enabled"
+    check_sysctl "fs.protected_fifos" "2" "Protected FIFOs enabled"
+    check_sysctl "fs.protected_regular" "2" "Protected regular files in sticky dirs enabled"
+    check_sysctl "fs.suid_dumpable" "0" "SUID core dumps disabled"
 
     if [[ -f /etc/sysctl.d/90-awesome-strict.conf ]]; then
-        check_sysctl "kernel.kptr_restrict" "2" \
-            "Strict kernel pointer restriction"
-        check_sysctl "kernel.yama.ptrace_scope" "2" \
-            "Strict ptrace restriction" "min"
-        check_sysctl "kernel.kexec_load_disabled" "1" \
-            "Strict kexec loading disabled"
-        check_sysctl "kernel.unprivileged_bpf_disabled" "1" \
-            "Strict unprivileged BPF policy"
-        check_sysctl "net.ipv4.conf.all.rp_filter" "1" \
-            "Strict reverse path filtering"
+        check_sysctl "kernel.kptr_restrict" "2" "Strict kernel pointer restriction"
+        check_sysctl "kernel.yama.ptrace_scope" "2" "Strict ptrace restriction" "min"
+        check_sysctl "kernel.kexec_load_disabled" "1" "Strict kexec loading disabled"
+        check_sysctl "kernel.unprivileged_bpf_disabled" "1" "Strict unprivileged BPF policy"
+        check_sysctl "net.ipv4.conf.all.rp_filter" "1" "Strict reverse path filtering"
     else
-        check_sysctl "kernel.kptr_restrict" "1" \
-            "Kernel pointer restriction" "min"
-        check_sysctl "kernel.yama.ptrace_scope" "1" \
-            "Compatible ptrace restriction" "min"
-        # Both values disable ordinary unprivileged BPF. Value 1 is the
-        # irreversible strict state; value 2 remains reversible by an admin.
-        check_sysctl_one_of "kernel.unprivileged_bpf_disabled" "1,2" \
-            "Unprivileged BPF restricted"
-        check_sysctl "net.ipv4.conf.all.rp_filter" "2" \
-            "VPN-compatible reverse path filtering"
+        check_sysctl "kernel.kptr_restrict" "1" "Kernel pointer restriction" "min"
+        check_sysctl "kernel.yama.ptrace_scope" "1" "Compatible ptrace restriction" "min"
+        check_sysctl_one_of "kernel.unprivileged_bpf_disabled" "1,2" "Unprivileged BPF restricted"
+        check_sysctl "net.ipv4.conf.all.rp_filter" "2" "VPN-compatible reverse path filtering"
     fi
 
-    check_sysctl "net.ipv4.tcp_syncookies" "1" \
-        "TCP SYN cookies enabled"
+    check_sysctl "net.ipv4.tcp_syncookies" "1" "TCP SYN cookies enabled"
+    check_sysctl "net.ipv4.conf.all.accept_redirects" "0" "ICMP redirects disabled (accept)"
+    check_sysctl "net.ipv4.conf.all.send_redirects" "0" "ICMP redirects disabled (send)"
 
-    check_sysctl "net.ipv4.conf.all.accept_redirects" "0" \
-        "ICMP redirects disabled (accept)"
-
-    check_sysctl "net.ipv4.conf.all.send_redirects" "0" \
-        "ICMP redirects disabled (send)"
-
-    # ip_forward: warn if enabled (may be intentional for VPN/Docker)
     local ip_fwd
     ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "unknown")
     if [[ "$ip_fwd" == "0" ]]; then
@@ -244,23 +226,18 @@ check_kernel_hardening() {
     elif [[ "$ip_fwd" == "1" ]]; then
         result_warn "IP forwarding is enabled — may be intentional for VPN/Docker" "$ip_fwd"
     else
-        result_fail "Could not read -r net.ipv4.ip_forward" "$ip_fwd"
+        result_fail "Could not read net.ipv4.ip_forward" "$ip_fwd"
     fi
 
     if [[ -f /etc/sysctl.d/90-awesome-ipv6-disabled.conf ]]; then
-        check_sysctl "net.ipv6.conf.all.disable_ipv6" "1" \
-            "Selected IPv6-disable policy enforced"
+        check_sysctl "net.ipv6.conf.all.disable_ipv6" "1" "Selected IPv6-disable policy enforced"
     else
-        check_sysctl "net.ipv6.conf.all.disable_ipv6" "0" \
-            "IPv6 enabled by selected policy"
-        check_sysctl "net.ipv6.conf.all.accept_redirects" "0" \
-            "IPv6 redirects disabled"
-        check_sysctl "net.ipv6.conf.all.accept_source_route" "-1" \
-            "All IPv6 source-routing headers rejected"
+        check_sysctl "net.ipv6.conf.all.disable_ipv6" "0" "IPv6 enabled by selected policy"
+        check_sysctl "net.ipv6.conf.all.accept_redirects" "0" "IPv6 redirects disabled"
+        check_sysctl "net.ipv6.conf.all.accept_source_route" "-1" "All IPv6 source-routing headers rejected"
     fi
 
-    check_sysctl "kernel.randomize_va_space" "2" \
-        "Full ASLR enabled"
+    check_sysctl "kernel.randomize_va_space" "2" "Full ASLR enabled"
 }
 
 # =============================================================================
@@ -269,11 +246,11 @@ check_kernel_hardening() {
 check_filesystem_security() {
     category_header "Filesystem Security"
 
-    # Helper: check mount options for a given mountpoint
     check_mount_opts() {
         local mpoint="$1"
-        local required_opts="$2"  # comma-separated
+        local required_opts="$2"
         local description="$3"
+        local warn_on_noexec="${4:-false}"
 
         local mount_line
         mount_line=$(findmnt -n -o OPTIONS "$mpoint" 2>/dev/null || echo "")
@@ -285,9 +262,10 @@ check_filesystem_security() {
 
         local all_present=true
         local missing=""
+        local -a OPTS=()
         IFS=',' read -ra OPTS <<< "$required_opts"
         for opt in "${OPTS[@]}"; do
-            if ! echo ",$mount_line," | grep -q ",$opt,"; then
+            if [[ ",$mount_line," != *",$opt,"* ]]; then
                 all_present=false
                 missing="${missing:+$missing, }$opt"
             fi
@@ -295,16 +273,21 @@ check_filesystem_security() {
 
         if [[ "$all_present" == true ]]; then
             result_pass "$description ($mpoint has $required_opts)"
+        elif [[ "$warn_on_noexec" == true && "$missing" == "noexec" ]]; then
+            result_warn "$description — $mpoint omits noexec on VPS profile" "$mount_line"
         else
             result_fail "$description — missing: $missing" "$mount_line"
         fi
     }
 
-    check_mount_opts "/tmp" "nosuid,nodev,noexec" "/tmp mount hardened"
+    if is_vps_profile; then
+        check_mount_opts "/tmp" "nosuid,nodev,noexec" "/tmp mount hardened" "true"
+    else
+        check_mount_opts "/tmp" "nosuid,nodev,noexec" "/tmp mount hardened" "false"
+    fi
 
-    local tmp_source tmp_fstype tmp_size_bytes
-    read -r tmp_source tmp_fstype < <(findmnt -n -o SOURCE,FSTYPE /tmp 2>/dev/null) || true
-    tmp_size_bytes=""
+    local tmp_source="" tmp_fstype="" tmp_size_bytes=""
+    read -r tmp_source tmp_fstype < <(findmnt -n -o SOURCE,FSTYPE /tmp 2>/dev/null || true) || true
     if [[ "$tmp_fstype" == "tmpfs" ]]; then
         tmp_size_bytes=$(findmnt -n -b -o SIZE /tmp 2>/dev/null || true)
     elif [[ "$tmp_source" == /dev/* ]]; then
@@ -314,8 +297,7 @@ check_filesystem_security() {
         tmp_size_bytes=$(findmnt -n -b -o SIZE /tmp 2>/dev/null || true)
     fi
 
-    if [[ "$tmp_size_bytes" =~ ^[0-9]+$ ]] &&
-       ((tmp_size_bytes >= 10 * 1073741824)); then
+    if [[ "$tmp_size_bytes" =~ ^[0-9]+$ ]] && (( tmp_size_bytes >= 10 * 1073741824 )); then
         result_pass "/tmp capacity is at least 10 GiB ($((tmp_size_bytes / 1073741824)) GiB)"
     else
         result_fail "/tmp capacity should be at least 10 GiB" "${tmp_size_bytes:-unknown} bytes"
@@ -323,18 +305,14 @@ check_filesystem_security() {
 
     check_mount_opts "/dev/shm" "nosuid,nodev,noexec" "/dev/shm mount hardened"
 
-    # Check /proc hidepid
     local proc_opts
     proc_opts=$(findmnt -n -o OPTIONS /proc 2>/dev/null || echo "")
-    if echo "$proc_opts" | grep -q "hidepid=2"; then
-        result_pass "/proc mounted with hidepid=2"
-    elif echo "$proc_opts" | grep -q "hidepid=invisible"; then
-        result_pass "/proc mounted with hidepid=invisible"
+    if [[ "$proc_opts" == *hidepid=2* || "$proc_opts" == *hidepid=invisible* ]]; then
+        result_pass "/proc mounted with hidepid (${proc_opts})"
     else
         result_fail "/proc should have hidepid=2" "$proc_opts"
     fi
 
-    # Check /etc/shadow permissions
     if [[ -f /etc/shadow ]]; then
         local shadow_perms
         shadow_perms=$(stat -c '%a' /etc/shadow 2>/dev/null || echo "unknown")
@@ -347,7 +325,6 @@ check_filesystem_security() {
         result_fail "/etc/shadow does not exist" "missing"
     fi
 
-    # Check /etc/gshadow permissions
     if [[ -f /etc/gshadow ]]; then
         local gshadow_perms
         gshadow_perms=$(stat -c '%a' /etc/gshadow 2>/dev/null || echo "unknown")
@@ -360,7 +337,6 @@ check_filesystem_security() {
         result_fail "/etc/gshadow does not exist" "missing"
     fi
 
-    # Check /boot permissions
     if [[ -d /boot ]]; then
         local boot_perms
         boot_perms=$(stat -c '%a' /boot 2>/dev/null || echo "unknown")
@@ -373,10 +349,9 @@ check_filesystem_security() {
         result_warn "/boot directory not found" "missing"
     fi
 
-    # Check UMASK in /etc/login.defs
     if [[ -f /etc/login.defs ]]; then
         local umask_val
-        umask_val=$(grep -E '^\s*UMASK\s+' /etc/login.defs 2>/dev/null | awk '{print $2}' | tail -1)
+        umask_val=$(awk '/^[[:space:]]*UMASK[[:space:]]+/ { val = $2 } END { print val }' /etc/login.defs 2>/dev/null)
         if [[ "$umask_val" == "027" || "$umask_val" == "0027" ]]; then
             result_pass "UMASK set to $umask_val in /etc/login.defs"
         elif [[ -n "$umask_val" ]]; then
@@ -395,12 +370,8 @@ check_filesystem_security() {
 check_authentication() {
     category_header "Authentication"
 
-    # Check PAM faillock configuration
     local faillock_found=false
-    if grep -rq "pam_faillock" /etc/pam.d/ 2>/dev/null; then
-        faillock_found=true
-    fi
-    if [[ -f /etc/security/faillock.conf ]]; then
+    if grep -rq "pam_faillock" /etc/pam.d/ 2>/dev/null || [[ -f /etc/security/faillock.conf ]]; then
         faillock_found=true
     fi
     if [[ "$faillock_found" == true ]]; then
@@ -409,18 +380,16 @@ check_authentication() {
         result_fail "PAM faillock is not configured" "not found in /etc/pam.d/ or /etc/security/faillock.conf"
     fi
 
-    # Check PAM pwquality (minlen >= 12)
     local pwquality_configured=false
     local minlen_val=""
     if grep -rq "pam_pwquality" /etc/pam.d/ 2>/dev/null; then
         pwquality_configured=true
     fi
     if [[ -f /etc/security/pwquality.conf ]]; then
-        minlen_val=$(grep -E '^\s*minlen\s*=' /etc/security/pwquality.conf 2>/dev/null \
-            | sed 's/.*=\s*//' | tr -d ' ' | tail -1)
+        minlen_val=$(awk -F= '/^[[:space:]]*minlen[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); val = $2 } END { print val }' /etc/security/pwquality.conf 2>/dev/null)
     fi
 
-    if [[ "$pwquality_configured" == true && -n "$minlen_val" && "$minlen_val" -ge 12 ]] 2>/dev/null; then
+    if [[ "$pwquality_configured" == true && "$minlen_val" =~ ^[0-9]+$ ]] && (( minlen_val >= 12 )); then
         result_pass "PAM pwquality configured with minlen = $minlen_val (>= 12)"
     elif [[ "$pwquality_configured" == true && -n "$minlen_val" ]]; then
         result_fail "PAM pwquality minlen should be >= 12" "minlen = $minlen_val"
@@ -430,11 +399,9 @@ check_authentication() {
         result_fail "PAM pwquality is not configured" "not found"
     fi
 
-    # Check password hashing algorithm = YESCRYPT
     if [[ -f /etc/login.defs ]]; then
         local hash_algo
-        hash_algo=$(grep -E '^\s*ENCRYPT_METHOD\s+' /etc/login.defs 2>/dev/null \
-            | awk '{print $2}' | tail -1)
+        hash_algo=$(awk '/^[[:space:]]*ENCRYPT_METHOD[[:space:]]+/ { val = $2 } END { print val }' /etc/login.defs 2>/dev/null)
         if [[ "${hash_algo^^}" == "YESCRYPT" ]]; then
             result_pass "Password hashing algorithm is YESCRYPT"
         elif [[ -n "$hash_algo" ]]; then
@@ -446,19 +413,21 @@ check_authentication() {
         result_fail "Cannot check password hashing — /etc/login.defs missing" "missing"
     fi
 
-    # Check /etc/securetty
-    if [[ -f /etc/securetty ]]; then
-        local tty_count
-        tty_count=$(grep -cve '^\s*$' -e '^\s*#' /etc/securetty 2>/dev/null || echo "0")
-        if [[ "$tty_count" -eq 0 ]]; then
-            result_pass "/etc/securetty exists and is empty (no direct root login)"
-        elif [[ "$tty_count" -le 2 ]]; then
-            result_pass "/etc/securetty is restrictive ($tty_count entries)"
+    if [[ -f /etc/securetty ]] || grep -rq "pam_securetty" /etc/pam.d/ 2>/dev/null; then
+        if [[ -f /etc/securetty ]]; then
+            local tty_count
+            tty_count=$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' /etc/securetty 2>/dev/null || true)
+            tty_count="${tty_count:-0}"
+            if (( tty_count == 0 )); then
+                result_pass "/etc/securetty exists and is empty (no direct root TTY login)"
+            elif (( tty_count <= 2 )); then
+                result_pass "/etc/securetty is restrictive ($tty_count entries)"
+            else
+                result_warn "/etc/securetty has $tty_count entries — consider restricting" "$tty_count entries"
+            fi
         else
-            result_warn "/etc/securetty has $tty_count entries — consider restricting" "$tty_count entries"
+            result_warn "pam_securetty referenced in /etc/pam.d/ without /etc/securetty" "file missing"
         fi
-    else
-        result_warn "/etc/securetty does not exist — root login may be unrestricted on TTYs" "file missing"
     fi
 }
 
@@ -471,44 +440,55 @@ check_ssh_hardening() {
     local sshd_config="/etc/ssh/sshd_config"
     local sshd_config_d="/etc/ssh/sshd_config.d"
 
-    # Helper: get effective SSH config value (checks config.d overrides too)
-    get_ssh_setting() {
-        local key="$1"
-        local value=""
-
-        # Check sshd_config.d/ drop-in files first (they typically override)
-        if [[ -d "$sshd_config_d" ]]; then
-            value=$(grep -rhi "^\s*${key}\s\+" "$sshd_config_d" 2>/dev/null \
-                | tail -1 | awk '{print $2}')
-        fi
-
-        # Fall back to main config
-        if [[ -z "$value" && -f "$sshd_config" ]]; then
-            value=$(grep -hi "^\s*${key}\s\+" "$sshd_config" 2>/dev/null \
-                | tail -1 | awk '{print $2}')
-        fi
-
-        echo "$value"
-    }
-
     if [[ ! -f "$sshd_config" ]]; then
         result_warn "sshd_config not found — SSH may not be installed" "file missing"
         return
     fi
 
-    # PermitRootLogin
-    local val
-    val=$(get_ssh_setting "PermitRootLogin")
+    local sshd_effective=""
+    if command -v sshd >/dev/null 2>&1; then
+        sshd_effective="$(sshd -T 2>/dev/null || true)"
+    fi
+
+    # OpenSSH uses first-match-wins across included *.conf files then sshd_config.
+    get_ssh_setting() {
+        local key="$1"
+        if [[ -n "$sshd_effective" ]]; then
+            local eff
+            eff=$(awk -v k="${key,,}" '$1 == k { print $2; exit }' <<<"$sshd_effective")
+            if [[ -n "$eff" ]]; then
+                printf '%s' "$eff"
+                return
+            fi
+        fi
+
+        local -a files=()
+        if [[ -d "$sshd_config_d" ]]; then
+            shopt -s nullglob
+            files=("$sshd_config_d"/*.conf)
+            shopt -u nullglob
+        fi
+        files+=("$sshd_config")
+
+        awk -v k="${key,,}" '
+            /^[[:space:]]*#/ || NF < 2 { next }
+            tolower($1) == k { print $2; exit }
+        ' "${files[@]}" 2>/dev/null || true
+    }
+
+    local val disable_fwd
+    disable_fwd="$(get_ssh_setting "DisableForwarding")"
+
+    val="$(get_ssh_setting "PermitRootLogin")"
     if [[ "${val,,}" == "no" ]]; then
         result_pass "PermitRootLogin = no"
     elif [[ -n "$val" ]]; then
         result_fail "PermitRootLogin should be no" "$val"
     else
-        result_fail "PermitRootLogin not explicitly set (default may allow root)" "not set"
+        result_fail "PermitRootLogin not explicitly set" "not set"
     fi
 
-    # PasswordAuthentication
-    val=$(get_ssh_setting "PasswordAuthentication")
+    val="$(get_ssh_setting "PasswordAuthentication")"
     if [[ "${val,,}" == "no" ]]; then
         result_pass "PasswordAuthentication = no"
     elif [[ -n "$val" ]]; then
@@ -517,27 +497,24 @@ check_ssh_hardening() {
         result_warn "PasswordAuthentication not explicitly set (default: yes)" "not set"
     fi
 
-    # X11Forwarding
-    val=$(get_ssh_setting "X11Forwarding")
-    if [[ "${val,,}" == "no" ]]; then
-        result_pass "X11Forwarding = no"
+    val="$(get_ssh_setting "X11Forwarding")"
+    if [[ "${val,,}" == "no" || "${disable_fwd,,}" == "yes" ]]; then
+        result_pass "X11Forwarding disabled (${val:-DisableForwarding=yes})"
     elif [[ -n "$val" ]]; then
         result_fail "X11Forwarding should be no" "$val"
     else
         result_pass "X11Forwarding not set (default: no)"
     fi
 
-    # Protocol (2 is default in modern OpenSSH; setting is deprecated)
-    val=$(get_ssh_setting "Protocol")
+    val="$(get_ssh_setting "Protocol")"
     if [[ -z "$val" || "$val" == "2" ]]; then
         result_pass "SSH Protocol = 2 (${val:-default})"
     else
         result_fail "SSH Protocol should be 2" "$val"
     fi
 
-    # MaxAuthTries
-    val=$(get_ssh_setting "MaxAuthTries")
-    if [[ -n "$val" && "$val" -le 3 ]] 2>/dev/null; then
+    val="$(get_ssh_setting "MaxAuthTries")"
+    if [[ "$val" =~ ^[0-9]+$ ]] && (( val <= 3 )); then
         result_pass "MaxAuthTries = $val (<= 3)"
     elif [[ -n "$val" ]]; then
         result_fail "MaxAuthTries should be <= 3" "$val"
@@ -545,24 +522,22 @@ check_ssh_hardening() {
         result_fail "MaxAuthTries not set (default: 6)" "not set"
     fi
 
-    # AllowTcpForwarding
-    val=$(get_ssh_setting "AllowTcpForwarding")
-    if [[ "${val,,}" == "no" ]]; then
-        result_pass "AllowTcpForwarding = no"
+    val="$(get_ssh_setting "AllowTcpForwarding")"
+    if [[ "${val,,}" == "no" || "${disable_fwd,,}" == "yes" ]]; then
+        result_pass "TCP forwarding disabled (${val:+AllowTcpForwarding=$val}${val:-DisableForwarding=yes})"
     elif [[ -n "$val" ]]; then
-        result_fail "AllowTcpForwarding should be no" "$val"
+        result_fail "AllowTcpForwarding should be no (or DisableForwarding yes)" "$val"
     else
-        result_fail "AllowTcpForwarding not set (default: yes)" "not set"
+        result_fail "TCP forwarding not disabled" "not set"
     fi
 
-    # AllowAgentForwarding
-    val=$(get_ssh_setting "AllowAgentForwarding")
-    if [[ "${val,,}" == "no" ]]; then
-        result_pass "AllowAgentForwarding = no"
+    val="$(get_ssh_setting "AllowAgentForwarding")"
+    if [[ "${val,,}" == "no" || "${disable_fwd,,}" == "yes" ]]; then
+        result_pass "Agent forwarding disabled (${val:+AllowAgentForwarding=$val}${val:-DisableForwarding=yes})"
     elif [[ -n "$val" ]]; then
-        result_fail "AllowAgentForwarding should be no" "$val"
+        result_fail "AllowAgentForwarding should be no (or DisableForwarding yes)" "$val"
     else
-        result_fail "AllowAgentForwarding not set (default: yes)" "not set"
+        result_fail "Agent forwarding not disabled" "not set"
     fi
 }
 
@@ -572,31 +547,29 @@ check_ssh_hardening() {
 check_network_security() {
     category_header "Network Security"
 
-    # nftables
     if systemctl is-active --quiet nftables 2>/dev/null; then
-        result_pass "nftables is active"
+        result_pass "Firewall is active (nftables)"
+    elif systemctl is-active --quiet firehol 2>/dev/null; then
+        result_pass "Firewall is active (FireHOL)"
+    elif systemctl is-active --quiet iptables 2>/dev/null; then
+        result_pass "Firewall is active (iptables fallback)"
     else
-        result_fail "nftables is not active" "$(systemctl is-active nftables 2>/dev/null || echo 'not found')"
+        result_fail "No host firewall service is active" \
+            "nftables=$(systemctl is-active nftables 2>/dev/null || echo 'inactive'), firehol=$(systemctl is-active firehol 2>/dev/null || echo 'inactive'), iptables=$(systemctl is-active iptables 2>/dev/null || echo 'inactive')"
     fi
 
-    # fail2ban
     if systemctl is-active --quiet fail2ban 2>/dev/null; then
         result_pass "fail2ban is active"
+    elif systemctl is-active --quiet crowdsec 2>/dev/null; then
+        result_pass "CrowdSec IDS is active"
     else
         result_fail "fail2ban is not active" "$(systemctl is-active fail2ban 2>/dev/null || echo 'not found')"
     fi
 
-    # DNS-over-TLS — default path is systemd-resolved native DoT. Assert the
-    # drop-in config directly: resolvectl's "DNSOverTLS setting: <value>" only
-    # appears in per-link sections, and the global drop-in at
-    # /etc/systemd/resolved.conf.d/*.conf is what this repo actually stands
-    # up, so it's the right unit of compliance. Stubby remains a valid
-    # opt-in fallback.
     local dot_setting
     dot_setting=$(grep -hE '^[[:space:]]*DNSOverTLS[[:space:]]*=[[:space:]]*(yes|opportunistic)' \
         /etc/systemd/resolved.conf.d/*.conf /etc/systemd/resolved.conf 2>/dev/null | tail -n1 || true)
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null && \
-       [[ -n "$dot_setting" ]]; then
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null && [[ -n "$dot_setting" ]]; then
         result_pass "DNS-over-TLS via systemd-resolved is active"
     elif systemctl is-active --quiet stubby 2>/dev/null; then
         result_pass "DNS-over-TLS via stubby (opt-in) is active"
@@ -605,17 +578,16 @@ check_network_security() {
             "resolved=$(systemctl is-active systemd-resolved 2>/dev/null || echo 'not found'), stubby=$(systemctl is-active stubby 2>/dev/null || echo 'not found'), DoT=${dot_setting:-missing}"
     fi
 
-    # Listening services on 0.0.0.0
-    local expected_listeners="sshd\|stubby\|systemd-resolve\|dnsmasq\|fail2ban"
     local unexpected
-    unexpected=$(ss -tlnp 2>/dev/null | grep '0\.0\.0\.0' | grep -v "$expected_listeners" || true)
+    unexpected=$(ss -tlnpH 2>/dev/null \
+        | awk '$4 ~ /^(0\.0\.0\.0:|\[::\]:|\*:)/ && $0 !~ /users:\(\("(sshd|stubby|systemd-resolve)"/ { print }' || true)
 
     if [[ -z "$unexpected" ]]; then
-        result_pass "No unexpected services listening on 0.0.0.0"
+        result_pass "No unexpected TCP services listening on wildcard addresses (0.0.0.0 / [::])"
     else
         local count
-        count=$(echo "$unexpected" | wc -l)
-        result_warn "$count unexpected service(s) listening on 0.0.0.0" "$unexpected"
+        count=$(awk 'END { print NR }' <<<"$unexpected")
+        result_warn "$count unexpected service(s) listening on wildcard addresses" "$unexpected"
     fi
 }
 
@@ -625,9 +597,6 @@ check_network_security() {
 check_service_security() {
     category_header "Service Security"
 
-    # Validate the merged upstream units and local drop-ins. Exposure scores are
-    # intentionally not treated as a pass/fail target: session brokers such as
-    # sshd must retain facilities that leaf daemons can safely lose.
     local failed_units verify_output unit
     local -a hardened_units=(
         sshd.service
@@ -638,6 +607,7 @@ check_service_security() {
         chronyd.service
         usbguard.service
         bluetooth.service
+        awesome-board-health.service
     )
 
     failed_units=$(systemctl --failed --no-legend --plain 2>/dev/null || true)
@@ -658,8 +628,6 @@ check_service_security() {
         fi
     done
 
-    # A syntactically valid sandbox can still cripple its daemon. Probe the
-    # interfaces administrators actually depend on, without changing state.
     probe_active_service() {
         local service="$1"
         local description="$2"
@@ -687,34 +655,63 @@ check_service_security() {
 
     probe_active_service sshd.service "sshd accepts its installed configuration" sshd -t
     probe_active_service NetworkManager.service "NetworkManager responds over its control interface" nmcli general status
-    probe_active_service auditd.service "auditd reports kernel audit status" auditctl -s
     probe_active_service clamav-daemon.service "ClamAV daemon answers a ping" clamdscan --ping 5
     probe_active_service fail2ban.service "fail2ban daemon answers a ping" fail2ban-client ping
     probe_active_service chronyd.service "chronyd answers a tracking query" chronyc tracking
     probe_active_service usbguard.service "USBGuard IPC policy permits root device listing" usbguard list-devices
 
-    # AppArmor
-    if systemctl is-enabled --quiet apparmor 2>/dev/null; then
-        result_pass "AppArmor is enabled"
-    else
-        result_fail "AppArmor is not enabled" "$(systemctl is-enabled apparmor 2>/dev/null || echo 'not found')"
-    fi
-
-    # auditd
+    # Verify auditd is both enabled and actively enforcing kernel audit rules
     if systemctl is-enabled --quiet auditd 2>/dev/null; then
         result_pass "auditd is enabled"
     else
         result_fail "auditd is not enabled" "$(systemctl is-enabled auditd 2>/dev/null || echo 'not found')"
     fi
+    if command -v auditctl >/dev/null 2>&1 && systemctl is-active --quiet auditd 2>/dev/null; then
+        local audit_status
+        audit_status="$(auditctl -s 2>/dev/null || true)"
+        if grep -qE '^enabled [12]\b' <<<"$audit_status"; then
+            result_pass "Kernel audit subsystem is active ($(awk '/^enabled / { print $1"="$2 }' <<<"$audit_status"))"
+        else
+            result_fail "auditd is running but kernel auditing is disabled (enabled 0)" "$audit_status"
+        fi
+    fi
 
-    # ClamAV freshclam
-    if systemctl is-enabled --quiet clamav-freshclam 2>/dev/null; then
-        result_pass "ClamAV freshclam is enabled"
+    # Journal sealing check
+    if [[ -r /etc/machine-id ]]; then
+        local mid
+        mid="$(tr -d '[:space:]' < /etc/machine-id)"
+        if [[ -n "$mid" && -f "/var/log/journal/${mid}/fss" ]]; then
+            result_pass "Systemd journal Forward Secure Sealing (FSS) state is initialized"
+            if compgen -G "/root/journal-sealing/verification-*.txt" >/dev/null; then
+                result_warn "Journal sealing verification key is still stored locally in /root/journal-sealing/" \
+                    "export off-machine and remove local copy"
+            fi
+        else
+            result_warn "Journal FSS sealing file not found under /var/log/journal/${mid:-unknown}" "fss missing"
+        fi
+    fi
+
+    # AppArmor: verify kernel LSM parameter as well as unit state
+    local aa_kernel="N"
+    if [[ -r /sys/module/apparmor/parameters/enabled ]]; then
+        aa_kernel="$(tr -d '[:space:]' < /sys/module/apparmor/parameters/enabled)"
+    fi
+    if [[ "$aa_kernel" == "Y" ]] && systemctl is-active --quiet apparmor 2>/dev/null; then
+        result_pass "AppArmor LSM is active in kernel and apparmor.service is active"
+    elif systemctl is-enabled --quiet apparmor 2>/dev/null; then
+        result_warn "apparmor.service is enabled, but AppArmor kernel LSM is not active yet" \
+            "run hardening/apparmor/apparmor.sh and reboot"
+    else
+        result_warn "AppArmor MAC is not enabled (opt-in via hardening/apparmor/apparmor.sh)" \
+            "kernel=${aa_kernel}"
+    fi
+
+    if systemctl is-enabled --quiet clamav-freshclam 2>/dev/null || systemctl is-enabled --quiet clamav-freshclam-once.timer 2>/dev/null; then
+        result_pass "ClamAV signature updater is enabled"
     else
         result_fail "ClamAV freshclam is not enabled" "$(systemctl is-enabled clamav-freshclam 2>/dev/null || echo 'not found')"
     fi
 
-    # Package update or security-audit timers (various common names)
     local auto_update=false
     for timer in pacman-autoupdate.timer pacman-auto-update.timer arch-audit.timer unattended-upgrades.timer auto-update.timer; do
         if systemctl is-active --quiet "$timer" 2>/dev/null; then
@@ -724,10 +721,9 @@ check_service_security() {
         fi
     done
     if [[ "$auto_update" == false ]]; then
-        result_fail "No package update/security audit timer found" "checked: pacman-autoupdate, pacman-auto-update, arch-audit, unattended-upgrades, auto-update"
+        result_fail "No package update/security audit timer found" "checked: pacman-autoupdate, arch-audit"
     fi
 
-    # rkhunter timer
     local rkhunter_timer=""
     for timer in rkhunter-check.timer rkhunter.timer; do
         if systemctl is-active --quiet "$timer" 2>/dev/null; then
@@ -752,12 +748,10 @@ check_service_security() {
 check_boot_security() {
     category_header "Boot Security"
 
-    # Bootloader console protection. The two supported profiles achieve this
-    # differently, so detect which one is installed rather than assuming GRUB:
-    #   GRUB profile  -> password_pbkdf2 superuser
-    #   UKI profile   -> "editor no" in loader.conf, which stops an attacker at
-    #                    the console appending init=/bin/sh to the kernel cmdline
-    local boot_protected=false boot_evidence=""
+    local boot_protected=false boot_evidence="" is_uki=false
+    if [[ -f /efi/EFI/Linux/arch-linux.efi ]]; then
+        is_uki=true
+    fi
 
     for f in /etc/grub.d/40_custom /boot/grub/grub.cfg; do
         if [[ -f "$f" ]] && grep -q "password_pbkdf2" "$f" 2>/dev/null; then
@@ -769,7 +763,7 @@ check_boot_security() {
 
     if [[ "$boot_protected" == false ]]; then
         for f in /efi/loader/loader.conf /boot/loader/loader.conf; do
-            if [[ -f "$f" ]] && grep -qE '^[[:space:]]*editor[[:space:]]+no([[:space:]]|$)' "$f" 2>/dev/null; then
+            if [[ -f "$f" ]] && grep -qE '^[[:space:]]*editor[[:space:]]+(no|0|false)([[:space:]]|$)' "$f" 2>/dev/null; then
                 boot_protected=true
                 boot_evidence="systemd-boot editor disabled (editor no in $f)"
                 break
@@ -779,19 +773,42 @@ check_boot_security() {
 
     if [[ "$boot_protected" == true ]]; then
         result_pass "Bootloader console access is restricted — $boot_evidence"
+    elif is_vps_profile; then
+        result_warn "Bootloader console password not set (expected on headless VPS profile)" "VPS profile"
     else
         result_fail "Bootloader console access is unrestricted" \
             "neither password_pbkdf2 (GRUB) nor 'editor no' (systemd-boot) found"
     fi
 
-    # Kernel boot parameters
+    if [[ "$is_uki" == true ]] && command -v sbctl >/dev/null 2>&1; then
+        local sb_status
+        sb_status="$(sbctl status 2>/dev/null || true)"
+        if grep -qE 'Secure Boot:[[:space:]]*.*[Ee]nabled' <<<"$sb_status" && \
+           grep -qE 'Setup Mode:[[:space:]]*.*[Dd]isabled' <<<"$sb_status"; then
+            result_pass "UEFI Secure Boot is enabled and enforcing (Setup Mode disabled)"
+        else
+            result_warn "UKI profile detected, but Secure Boot is not yet enforcing" \
+                "run 'awesome-secureboot status' / 'enroll-keys'"
+        fi
+    fi
+
     local cmdline
     cmdline=$(cat /proc/cmdline 2>/dev/null || echo "")
 
-    local params=("slab_nomerge" "init_on_alloc=1" "pti=on")
+    local params=(
+        "slab_nomerge"
+        "init_on_alloc=1"
+        "init_on_free=1"
+        "page_alloc.shuffle=1"
+        "pti=on"
+        "randomize_kstack_offset=on"
+        "vsyscall=none"
+    )
     for param in "${params[@]}"; do
-        if echo "$cmdline" | grep -q "$param"; then
+        if [[ " $cmdline " == *" $param "* ]]; then
             result_pass "Kernel boot param: $param present"
+        elif [[ -r /root/.install-env ]] && grep -q 'INSTALL_TYPE=.*vps-harden' /root/.install-env 2>/dev/null; then
+            result_warn "Kernel boot param: $param missing (live VPS hardening preserves provider bootloader)" "$cmdline"
         else
             result_fail "Kernel boot param: $param missing from /proc/cmdline" "$cmdline"
         fi
@@ -807,10 +824,8 @@ check_disabled_modules() {
     local modules=("dccp" "sctp" "rds" "tipc")
     for mod in "${modules[@]}"; do
         local blacklisted=false
-        if grep -rq "^\s*blacklist\s\+${mod}\b" /etc/modprobe.d/ 2>/dev/null; then
-            blacklisted=true
-        fi
-        if grep -rq "^\s*install\s\+${mod}\s\+/bin/true\b\|^\s*install\s\+${mod}\s\+/bin/false\b" /etc/modprobe.d/ 2>/dev/null; then
+        if grep -rq "^[[:space:]]*blacklist[[:space:]]\+${mod}\b" /etc/modprobe.d/ 2>/dev/null ||
+           grep -rq "^[[:space:]]*install[[:space:]]\+${mod}[[:space:]]\+/bin/\(true\|false\)\b" /etc/modprobe.d/ 2>/dev/null; then
             blacklisted=true
         fi
 
@@ -824,7 +839,6 @@ check_disabled_modules() {
 
 # =============================================================================
 # 9. OPTIONAL WORKSTATION / DESKTOP HARDENING
-#     These modules are opt-in. Missing them is a WARN, not a FAIL.
 # =============================================================================
 check_optional_hardening() {
     category_header "Optional Workstation Hardening"
@@ -844,7 +858,7 @@ check_optional_hardening() {
 
     local scan_rand=""
     scan_rand=$(grep -hR '^[[:space:]]*wifi.scan-rand-mac-address=' /etc/NetworkManager/conf.d/ 2>/dev/null | tail -1 || true)
-    if echo "$scan_rand" | grep -q '=yes'; then
+    if [[ "$scan_rand" == *=yes* ]]; then
         result_pass "NetworkManager randomizes Wi-Fi scan MAC addresses"
     elif [[ ! -d /etc/NetworkManager ]]; then
         result_warn "NetworkManager is not installed — skipping Wi-Fi privacy checks" "no NM"
@@ -854,13 +868,15 @@ check_optional_hardening() {
 
     if [[ -f /etc/firefox/policies/policies.json ]]; then
         result_pass "Firefox enterprise policies are present"
-    else
-        result_warn "No Firefox enterprise policies" "run hardening/browser/browser.sh"
+    elif command -v firefox >/dev/null 2>&1; then
+        result_warn "Firefox installed without enterprise policies" "run hardening/browser/browser.sh --firefox"
     fi
-    if [[ -f /etc/chromium/policies/managed/awesome-hardening.json ]]; then
-        result_pass "Chromium managed policies are present"
-    else
-        result_warn "No Chromium managed policies" "run hardening/browser/browser.sh"
+
+    if compgen -G '/etc/chromium/policies/managed/*.json' >/dev/null ||
+       compgen -G '/etc/brave/policies/managed/*.json' >/dev/null; then
+        result_pass "Chromium/Brave managed enterprise policies are present"
+    elif command -v chromium >/dev/null 2>&1 || command -v brave >/dev/null 2>&1; then
+        result_warn "Chromium/Brave installed without managed policies" "run hardening/browser/browser.sh or utils/brave.sh --policy"
     fi
 
     if grep -qw sme /proc/cpuinfo 2>/dev/null && grep -qw 'mem_encrypt=on' /proc/cmdline 2>/dev/null; then
@@ -885,62 +901,60 @@ check_optional_hardening() {
 
     if [[ -f /etc/environment.d/20-vaapi.conf ]]; then
         result_pass "VA-API environment drop-in is present"
-    else
-        result_warn "No VA-API environment drop-in" "run utils/vaapi.sh"
+    elif ! is_vps_profile; then
+        local gpu_lines gpu_vendors=0
+        gpu_lines=$(lspci 2>/dev/null | grep -Ei 'VGA|3D|Display' || true)
+        grep -qi intel <<<"$gpu_lines" && (( ++gpu_vendors ))
+        grep -qiE 'amd|radeon' <<<"$gpu_lines" && (( ++gpu_vendors ))
+        grep -qi nvidia <<<"$gpu_lines" && (( ++gpu_vendors ))
+        if (( gpu_vendors == 1 )); then
+            result_warn "No VA-API environment drop-in" "run utils/vaapi.sh"
+        fi
     fi
 
     local userns
     userns=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo "")
     if [[ "$userns" == "0" ]]; then
-        result_warn "unprivileged user namespaces disabled — Chromium/Firejail sandboxes will degrade" \
+        result_warn "unprivileged user namespaces disabled — Chromium/Brave/Podman userns sandboxes degrade" \
             "kernel.unprivileged_userns_clone=0"
     elif [[ "$userns" == "1" ]]; then
-        result_pass "unprivileged user namespaces enabled (browser sandbox can work)"
+        result_pass "unprivileged user namespaces enabled (browser/Podman sandboxes supported)"
     fi
 }
 
 # =============================================================================
-# OUTPUT: JSON
+# OUTPUT
 # =============================================================================
 print_json() {
-    local results_json=""
-    local first=true
-    for entry in "${JSON_RESULTS[@]}"; do
-        if [[ "$first" == true ]]; then
-            results_json="$entry"
-            first=false
-        else
-            results_json="${results_json},${entry}"
-        fi
-    done
-
     local pct=0
-    if [[ "$TOTAL_COUNT" -gt 0 ]]; then
+    if (( TOTAL_COUNT > 0 )); then
         pct=$(( (PASS_COUNT * 100) / TOTAL_COUNT ))
     fi
 
-    cat <<EOF
-{
-  "summary": {
-    "total": ${TOTAL_COUNT},
-    "pass": ${PASS_COUNT},
-    "fail": ${FAIL_COUNT},
-    "warn": ${WARN_COUNT},
-    "score_percent": ${pct}
-  },
-  "results": [
-    $(echo "$results_json" | sed 's/},{/},\n    {/g')
-  ]
-}
-EOF
+    printf '{\n'
+    printf '  "summary": {\n'
+    printf '    "total": %d,\n' "$TOTAL_COUNT"
+    printf '    "pass": %d,\n' "$PASS_COUNT"
+    printf '    "fail": %d,\n' "$FAIL_COUNT"
+    printf '    "warn": %d,\n' "$WARN_COUNT"
+    printf '    "score_percent": %d\n' "$pct"
+    printf '  },\n'
+    printf '  "results": [\n'
+    local idx last=$(( ${#JSON_RESULTS[@]} - 1 ))
+    for idx in "${!JSON_RESULTS[@]}"; do
+        if (( idx < last )); then
+            printf '    %s,\n' "${JSON_RESULTS[idx]}"
+        else
+            printf '    %s\n' "${JSON_RESULTS[idx]}"
+        fi
+    done
+    printf '  ]\n'
+    printf '}\n'
 }
 
-# =============================================================================
-# OUTPUT: TEXT SUMMARY
-# =============================================================================
 print_summary() {
     local pct=0
-    if [[ "$TOTAL_COUNT" -gt 0 ]]; then
+    if (( TOTAL_COUNT > 0 )); then
         pct=$(( (PASS_COUNT * 100) / TOTAL_COUNT ))
     fi
 
@@ -954,14 +968,18 @@ print_summary() {
     printf "  %bFailed:        %d%b\n" "$C_RED"    "$FAIL_COUNT" "$C_NC"
     printf "  %bWarnings:      %d%b\n" "$C_YELLOW" "$WARN_COUNT" "$C_NC"
     echo ""
-    printf "  Score: %b%d/%d (%d%%)%b\n" \
-        "$(if [[ $pct -ge 90 ]]; then echo "$C_GREEN"; elif [[ $pct -ge 70 ]]; then echo "$C_YELLOW"; else echo "$C_RED"; fi)" \
-        "$PASS_COUNT" "$TOTAL_COUNT" "$pct" "$C_NC"
+    local score_color="$C_RED"
+    if (( pct >= 90 )); then
+        score_color="$C_GREEN"
+    elif (( pct >= 70 )); then
+        score_color="$C_YELLOW"
+    fi
+    printf "  Score: %b%d/%d (%d%%)%b\n" "$score_color" "$PASS_COUNT" "$TOTAL_COUNT" "$pct" "$C_NC"
     echo ""
 
-    if [[ "$FAIL_COUNT" -eq 0 && "$WARN_COUNT" -eq 0 ]]; then
+    if (( FAIL_COUNT == 0 && WARN_COUNT == 0 )); then
         printf "  %bAll checks passed. System is fully hardened.%b\n" "$C_GREEN" "$C_NC"
-    elif [[ "$FAIL_COUNT" -eq 0 ]]; then
+    elif (( FAIL_COUNT == 0 )); then
         printf "  %bNo failures, but %d warning(s) to review.%b\n" "$C_YELLOW" "$WARN_COUNT" "$C_NC"
     else
         printf "  %b%d check(s) failed. Review and remediate.%b\n" "$C_RED" "$FAIL_COUNT" "$C_NC"
@@ -972,17 +990,14 @@ print_summary() {
     echo ""
 }
 
-# =============================================================================
-# MAIN
-# =============================================================================
 main() {
     if [[ "$JSON_OUTPUT" == false ]]; then
         echo ""
         printf "%b=======================================%b\n" "$C_BLUE" "$C_NC"
         printf "%b  AwesomeArchLinux Hardening Audit     %b\n" "$C_BLUE" "$C_NC"
         printf "%b=======================================%b\n" "$C_BLUE" "$C_NC"
-        printf "  Date: %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
-        printf "  Host: %s\n" "$(hostname)"
+        printf "  Date:   %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf "  Host:   %s\n" "$(resolve_hostname)"
         printf "  Kernel: %s\n" "$(uname -r)"
     fi
 
@@ -1002,8 +1017,7 @@ main() {
         print_summary
     fi
 
-    # Exit code: 0 if all pass, 1 if any fail
-    if [[ "$FAIL_COUNT" -gt 0 ]]; then
+    if (( FAIL_COUNT > 0 )); then
         exit 1
     fi
     exit 0

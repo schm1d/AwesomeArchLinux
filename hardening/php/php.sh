@@ -33,6 +33,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -53,6 +54,7 @@ POOL_USER="http"
 VERSION=""
 PHP_INI="/etc/php/php.ini"
 FPM_POOL="/etc/php/php-fpm.d/www.conf"
+OPEN_BASEDIR="/var/www:/srv/http:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php"
 LOGFILE="/var/log/php-hardening-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Usage ---
@@ -78,13 +80,14 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --with-fpm)     WITH_FPM=true; shift ;;
         --no-fpm)       WITH_FPM=false; shift ;;
         --with-nginx)   WITH_NGINX=true; shift ;;
-        --pool-user)    POOL_USER="$2"; shift 2 ;;
-        -v)             VERSION="$2"; shift 2 ;;
+        --pool-user)    need_arg "$@"; POOL_USER="$2"; shift 2 ;;
+        -v)             need_arg "$@"; VERSION="$2"; shift 2 ;;
         -h|--help)      usage ;;
         *)              err "Unknown option: $1" ;;
     esac
@@ -92,8 +95,12 @@ done
 
 # --- Validate ---
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
+[[ "$POOL_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || err "Invalid pool user: $POOL_USER"
 
 # Redirect output to logfile as well
+install -d -m 0755 /var/log
+( umask 077 && : > "$LOGFILE" )
+chmod 0600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "PHP-FPM:    $WITH_FPM"
@@ -110,8 +117,11 @@ fi
 
 msg "Installing PHP and security-related extensions..."
 
-# Core packages to install
-PACKAGES=(php php-fpm php-gd php-intl php-sodium)
+# Core packages to install (intl is bundled inside Arch's php package and enabled via php.ini)
+PACKAGES=(php php-gd php-sodium)
+if [[ "$WITH_FPM" == true ]]; then
+    PACKAGES+=(php-fpm)
+fi
 
 # Install only what's available, skip gracefully if a package isn't found
 INSTALL_PACKAGES=()
@@ -129,7 +139,16 @@ else
     err "No PHP packages could be found. Check your pacman configuration."
 fi
 
-PHP_VER=$(php -v 2>/dev/null | head -1 || echo "unknown")
+id "$POOL_USER" &>/dev/null || err "Pool user '$POOL_USER' does not exist"
+POOL_GROUP=$(id -gn "$POOL_USER")
+LISTEN_OWNER="http"
+LISTEN_GROUP="http"
+if ! id http &>/dev/null; then
+    LISTEN_OWNER="$POOL_USER"
+    LISTEN_GROUP="$POOL_GROUP"
+fi
+
+PHP_VER=$(php -v 2>/dev/null | head -n 1 || echo "unknown")
 info "Installed: $PHP_VER"
 
 # =============================================================================
@@ -147,52 +166,182 @@ BACKUP="${PHP_INI}.bak.$(date +%Y%m%d-%H%M%S)"
 cp "$PHP_INI" "$BACKUP"
 info "Backup created: $BACKUP"
 
-# Helper: set a php.ini directive using sed
-# Handles both commented and uncommented directives
+# Helper: set a php.ini directive literally via awk + ENVIRON (KEY, VAL).
+# Avoids sed replacement metacharacter corruption (&, \) and regex wildcard
+# bugs, replaces the first active (or first commented) matching directive, and
+# strips duplicate active occurrences while leaving extra commented examples intact.
 set_ini() {
     local key="$1"
     local value="$2"
     local file="$3"
+    local tmp_file
 
-    # If the directive exists (commented or not), replace it
-    if grep -qE "^\s*;?\s*${key}\s*=" "$file"; then
-        sed -i "s|^\s*;*\s*${key}\s*=.*|${key} = ${value}|" "$file"
-    else
-        # Append if not found at all
-        echo "${key} = ${value}" >> "$file"
-    fi
+    tmp_file=$(mktemp "${file}.tmp.XXXXXX")
+    chmod --reference="$file" "$tmp_file" 2>/dev/null || chmod 0644 "$tmp_file"
+    chown --reference="$file" "$tmp_file" 2>/dev/null || chown root:root "$tmp_file"
+
+    KEY="$key" VAL="$value" awk '
+        function classify(line, k,    s, is_comment) {
+            s = line
+            sub(/^[[:space:]]+/, "", s)
+            is_comment = 0
+            if (substr(s, 1, 1) == ";") {
+                is_comment = 1
+                sub(/^;+[[:space:]]*/, "", s)
+            }
+            if (substr(s, 1, length(k)) != k) {
+                return 0
+            }
+            s = substr(s, length(k) + 1)
+            sub(/^[[:space:]]+/, "", s)
+            if (substr(s, 1, 1) != "=") {
+                return 0
+            }
+            return is_comment ? 2 : 1
+        }
+        NR == FNR {
+            if (classify($0, ENVIRON["KEY"]) == 1) {
+                has_active = 1
+            }
+            next
+        }
+        {
+            kind = classify($0, ENVIRON["KEY"])
+            if (has_active) {
+                if (kind == 1) {
+                    if (!replaced) {
+                        print ENVIRON["KEY"] " = " ENVIRON["VAL"]
+                        replaced = 1
+                    }
+                    next
+                }
+                print
+            } else {
+                if (kind == 2 && !replaced) {
+                    print ENVIRON["KEY"] " = " ENVIRON["VAL"]
+                    replaced = 1
+                    next
+                }
+                print
+            }
+        }
+        END {
+            if (!replaced) {
+                print ENVIRON["KEY"] " = " ENVIRON["VAL"]
+            }
+        }
+    ' "$file" "$file" > "$tmp_file"
+
+    mv -f "$tmp_file" "$file"
 }
 
-# --- Error handling (production) ---
+enable_extension() {
+    local ext="$1"
+    local file="$2"
+    local tmp_file
+
+    [[ -f "/usr/lib/php/modules/${ext}.so" ]] || return 0
+
+    tmp_file=$(mktemp "${file}.tmp.XXXXXX")
+    chmod --reference="$file" "$tmp_file" 2>/dev/null || chmod 0644 "$tmp_file"
+    chown --reference="$file" "$tmp_file" 2>/dev/null || chown root:root "$tmp_file"
+
+    KEY="$ext" VAL="extension=${ext}" awk '
+        function classify_ext(line, ext,    s, is_comment, rhs) {
+            s = line
+            sub(/^[[:space:]]+/, "", s)
+            is_comment = 0
+            if (substr(s, 1, 1) == ";") {
+                is_comment = 1
+                sub(/^;+[[:space:]]*/, "", s)
+            }
+            if (substr(s, 1, 9) != "extension") {
+                return 0
+            }
+            s = substr(s, 10)
+            sub(/^[[:space:]]+/, "", s)
+            if (substr(s, 1, 1) != "=") {
+                return 0
+            }
+            rhs = substr(s, 2)
+            sub(/[[:space:]]*;.*$/, "", rhs)
+            gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "", rhs)
+            if (rhs == ext || rhs == ext ".so") {
+                return is_comment ? 2 : 1
+            }
+            return 0
+        }
+        NR == FNR {
+            if (classify_ext($0, ENVIRON["KEY"]) == 1) {
+                has_active = 1
+            }
+            next
+        }
+        {
+            kind = classify_ext($0, ENVIRON["KEY"])
+            if (has_active) {
+                if (kind == 1) {
+                    if (!replaced) {
+                        print ENVIRON["VAL"]
+                        replaced = 1
+                    }
+                    next
+                }
+                print
+            } else {
+                if (kind == 2 && !replaced) {
+                    print ENVIRON["VAL"]
+                    replaced = 1
+                    next
+                }
+                print
+            }
+        }
+        END {
+            if (!replaced) {
+                print ENVIRON["VAL"]
+            }
+        }
+    ' "$file" "$file" > "$tmp_file"
+
+    mv -f "$tmp_file" "$file"
+}
+
+# --- Bundled/installed extensions ---
+info "Enabling PHP extensions (intl, gd, sodium)..."
+enable_extension "intl"   "$PHP_INI"
+enable_extension "gd"     "$PHP_INI"
+enable_extension "sodium" "$PHP_INI"
+
+# --- Error handling (production, PHP 8.4+ clean — E_STRICT removed) ---
 info "Setting error handling directives..."
-set_ini "expose_php"            "Off"                                    "$PHP_INI"
-set_ini "display_errors"        "Off"                                    "$PHP_INI"
-set_ini "display_startup_errors" "Off"                                   "$PHP_INI"
-set_ini "log_errors"            "On"                                     "$PHP_INI"
-set_ini "error_log"             "/var/log/php/error.log"                 "$PHP_INI"
-set_ini "error_reporting"       "E_ALL & ~E_DEPRECATED & ~E_STRICT"     "$PHP_INI"
+set_ini "expose_php"             "Off"                                    "$PHP_INI"
+set_ini "display_errors"         "Off"                                    "$PHP_INI"
+set_ini "display_startup_errors" "Off"                                    "$PHP_INI"
+set_ini "log_errors"             "On"                                     "$PHP_INI"
+set_ini "error_log"              "/var/log/php/error.log"                 "$PHP_INI"
+set_ini "error_reporting"        "E_ALL & ~E_DEPRECATED"                  "$PHP_INI"
 
 # --- Security ---
 info "Setting security directives..."
 
 DISABLE_FUNCTIONS="exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source,highlight_file,phpinfo"
-set_ini "disable_functions"     "$DISABLE_FUNCTIONS"                     "$PHP_INI"
+set_ini "disable_functions"     "$DISABLE_FUNCTIONS"                      "$PHP_INI"
 
-set_ini "allow_url_fopen"       "Off"                                    "$PHP_INI"
-set_ini "allow_url_include"     "Off"                                    "$PHP_INI"
-set_ini "open_basedir"          "/var/www:/tmp:/usr/share/php"           "$PHP_INI"
-set_ini "cgi.fix_pathinfo"      "0"                                      "$PHP_INI"
+set_ini "allow_url_fopen"       "Off"                                     "$PHP_INI"
+set_ini "allow_url_include"     "Off"                                     "$PHP_INI"
+set_ini "open_basedir"          "$OPEN_BASEDIR"                           "$PHP_INI"
+set_ini "cgi.fix_pathinfo"      "0"                                       "$PHP_INI"
 
-# --- Session security ---
+# --- Session security (PHP 8.4+ deprecated sid_length/sid_bits_per_character omitted) ---
 info "Setting session security directives..."
-set_ini "session.cookie_httponly"       "1"                              "$PHP_INI"
-set_ini "session.cookie_secure"        "1"                              "$PHP_INI"
-set_ini "session.use_strict_mode"      "1"                              "$PHP_INI"
-set_ini "session.cookie_samesite"      "Strict"                         "$PHP_INI"
-set_ini "session.use_only_cookies"     "1"                              "$PHP_INI"
-set_ini "session.name"                 "__Secure-PHPSESSID"             "$PHP_INI"
-set_ini "session.sid_length"           "48"                             "$PHP_INI"
-set_ini "session.sid_bits_per_character" "6"                            "$PHP_INI"
+set_ini "session.cookie_httponly"       "1"                               "$PHP_INI"
+set_ini "session.cookie_secure"         "1"                               "$PHP_INI"
+set_ini "session.use_strict_mode"       "1"                               "$PHP_INI"
+set_ini "session.cookie_samesite"       "Strict"                          "$PHP_INI"
+set_ini "session.use_only_cookies"      "1"                               "$PHP_INI"
+set_ini "session.name"                  "__Secure-PHPSESSID"              "$PHP_INI"
+sed -i -E 's/^[[:space:]]*(session\.sid_length|session\.sid_bits_per_character)[[:space:]]*=/;\1 =/' "$PHP_INI"
 
 # --- Resource limits ---
 info "Setting resource limit directives..."
@@ -211,6 +360,7 @@ set_ini "session.save_handler"     "files"                              "$PHP_IN
 set_ini "session.save_path"        "/var/lib/php/sessions"              "$PHP_INI"
 set_ini "session.gc_maxlifetime"   "1440"                               "$PHP_INI"
 
+chmod 0644 "$PHP_INI"
 msg "php.ini hardened successfully"
 
 # =============================================================================
@@ -221,8 +371,7 @@ if [[ "$WITH_FPM" == true ]]; then
     msg "Hardening PHP-FPM pool configuration..."
 
     if [[ ! -f "$FPM_POOL" ]]; then
-        # Create the pool directory and file if it doesn't exist
-        mkdir -p "$(dirname "$FPM_POOL")"
+        install -d -m 0755 "$(dirname "$FPM_POOL")"
         warn "Pool config not found at $FPM_POOL, creating from scratch"
         touch "$FPM_POOL"
     else
@@ -242,12 +391,12 @@ if [[ "$WITH_FPM" == true ]]; then
 
 ; --- User and Group ---
 user = $POOL_USER
-group = $POOL_USER
+group = $POOL_GROUP
 
 ; --- Listen (Unix socket, not TCP — avoids network exposure) ---
 listen = /run/php-fpm/php-fpm.sock
-listen.owner = http
-listen.group = http
+listen.owner = $LISTEN_OWNER
+listen.group = $LISTEN_GROUP
 listen.mode = 0660
 
 ; --- Process Management ---
@@ -270,7 +419,7 @@ rlimit_files = 1024
 rlimit_core = 0
 
 ; --- Security: PHP admin overrides (cannot be changed by application code) ---
-php_admin_value[open_basedir] = /var/www:/tmp
+php_admin_value[open_basedir] = $OPEN_BASEDIR
 php_admin_flag[allow_url_fopen] = off
 
 ; --- Logging ---
@@ -284,6 +433,7 @@ security.limit_extensions = .php
 ; --- Environment ---
 clear_env = yes
 EOF
+    chmod 0644 "$FPM_POOL"
 
     msg "PHP-FPM pool hardened: $FPM_POOL"
 fi
@@ -294,20 +444,20 @@ fi
 
 msg "Creating log and session directories..."
 
+# Webroot base directory (ensures /var/www exists for systemd ReadWritePaths)
+install -d -m 0755 /var/www
+
 # PHP error and FPM log directory
-mkdir -p /var/log/php
-chown http:http /var/log/php
-chmod 750 /var/log/php
+install -d -o "$POOL_USER" -g "$POOL_GROUP" -m 0750 /var/log/php
 
 # PHP session directory
-mkdir -p /var/lib/php/sessions
-chown http:http /var/lib/php/sessions
-chmod 750 /var/lib/php/sessions
+install -d -m 0755 /var/lib/php
+install -d -o "$POOL_USER" -g "$POOL_GROUP" -m 0750 /var/lib/php/sessions
 
-# PHP-FPM socket directory
-mkdir -p /run/php-fpm
-chown http:http /run/php-fpm
-chmod 750 /run/php-fpm
+# PHP-FPM socket directory (0755 so both nginx and pool workers can traverse)
+if [[ "$WITH_FPM" == true ]]; then
+    install -d -o "$POOL_USER" -g "$LISTEN_GROUP" -m 0755 /run/php-fpm
+fi
 
 msg "Directories created with secure permissions"
 
@@ -318,20 +468,23 @@ msg "Directories created with secure permissions"
 if [[ "$WITH_NGINX" == true ]]; then
     msg "Creating nginx FastCGI configuration..."
 
-    NGINX_PHP_CONF="/etc/nginx/conf.d/php-fpm.conf"
-    mkdir -p /etc/nginx/conf.d
+    # Remove legacy /etc/nginx/conf.d/php-fpm.conf: conf.d/*.conf is included at
+    # http {} scope, where fastcgi_pass is invalid and breaks nginx -t.
+    rm -f /etc/nginx/conf.d/php-fpm.conf
+
+    NGINX_PHP_CONF="/etc/nginx/snippets/php-fpm.conf"
+    install -d -m 0755 /etc/nginx/snippets /etc/nginx/conf.d
 
     cat > "$NGINX_PHP_CONF" <<'EOF'
 # =============================================================================
-# nginx FastCGI configuration for PHP-FPM
+# nginx FastCGI location snippet for PHP-FPM
 # Generated by AwesomeArchLinux/hardening/php/php.sh
 #
-# Include this in your server block:
+# Include this inside a location block in your server block:
 #   location ~ \.php$ {
-#       include conf.d/php-fpm.conf;
+#       try_files $uri =404;
+#       include snippets/php-fpm.conf;
 #   }
-#
-# Or use the full configuration below as a reference.
 # =============================================================================
 
 # --- FastCGI pass to PHP-FPM Unix socket ---
@@ -345,9 +498,6 @@ include fastcgi_params;
 # --- Security: hide PHP version header ---
 fastcgi_hide_header X-Powered-By;
 
-# --- Security: restrict open_basedir per vhost ---
-fastcgi_param PHP_VALUE "open_basedir=/var/www:/tmp";
-
 # --- FastCGI performance ---
 fastcgi_buffering on;
 fastcgi_buffer_size 16k;
@@ -357,18 +507,19 @@ fastcgi_read_timeout 60;
 fastcgi_send_timeout 60;
 fastcgi_connect_timeout 30;
 EOF
+    chmod 0644 "$NGINX_PHP_CONF"
 
-    msg "nginx FastCGI config created: $NGINX_PHP_CONF"
+    msg "nginx FastCGI snippet created: $NGINX_PHP_CONF"
 
     # Create a sample server block with PHP and upload security
     NGINX_PHP_SAMPLE="/etc/nginx/conf.d/php-security.conf.sample"
 
     cat > "$NGINX_PHP_SAMPLE" <<'EOF'
 # =============================================================================
-# Sample nginx server block with PHP security rules
+# Sample nginx server block rules with PHP security
 # Generated by AwesomeArchLinux/hardening/php/php.sh
 #
-# Rename this to .conf and customize for your application.
+# Copy these location rules into your site's server {} block.
 # =============================================================================
 
 # --- Deny PHP execution in uploads directories ---
@@ -396,22 +547,23 @@ location ~* (?:xmlrpc|wp-config|config|install|setup)\.php$ {
 #     # Prevent execution of non-existent PHP files
 #     try_files $uri =404;
 #
-#     include conf.d/php-fpm.conf;
+#     include snippets/php-fpm.conf;
 # }
 EOF
+    chmod 0644 "$NGINX_PHP_SAMPLE"
 
     msg "nginx PHP security sample created: $NGINX_PHP_SAMPLE"
-    info "Rename $NGINX_PHP_SAMPLE to .conf and customize for your application"
+    info "Include snippets/php-fpm.conf inside your server {} PHP location block"
 
     # Verify nginx can parse the config (non-fatal)
     if command -v nginx &>/dev/null; then
         if nginx -t 2>/dev/null; then
             msg "nginx configuration test passed"
         else
-            warn "nginx configuration test failed (the sample .conf.sample is not loaded by default)"
+            warn "nginx configuration test failed; check existing /etc/nginx/nginx.conf"
         fi
     else
-        info "nginx is not installed; FastCGI config written for later use"
+        info "nginx is not installed; FastCGI snippet written for later use"
     fi
 fi
 
@@ -422,7 +574,7 @@ fi
 if [[ "$WITH_FPM" == true ]]; then
     msg "Hardening PHP-FPM systemd service..."
 
-    mkdir -p /etc/systemd/system/php-fpm.service.d/
+    install -d -m 0755 /etc/systemd/system/php-fpm.service.d
 
     cat > /etc/systemd/system/php-fpm.service.d/hardening.conf <<'EOF'
 # =============================================================================
@@ -436,11 +588,14 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ReadWritePaths=/var/log/php /var/lib/php /run/php-fpm /var/www
+RuntimeDirectory=php-fpm
+RuntimeDirectoryMode=0755
+ReadWritePaths=-/var/log/php -/var/lib/php/sessions -/run/php-fpm /var/www -/srv/http
 
 # --- Privilege restrictions ---
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL
 
 # --- Kernel protection ---
 ProtectKernelTunables=yes
@@ -450,6 +605,7 @@ ProtectControlGroups=yes
 
 # --- System call filtering ---
 SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 # --- Network restrictions ---
@@ -470,6 +626,7 @@ LockPersonality=yes
 LimitNOFILE=65536
 LimitNPROC=4096
 EOF
+    chmod 0644 /etc/systemd/system/php-fpm.service.d/hardening.conf
 
     systemctl daemon-reload
     msg "systemd hardening override created"
@@ -481,7 +638,9 @@ fi
 
 msg "Creating logrotate configuration..."
 
-cat > /etc/logrotate.d/php <<'EOF'
+install -d -m 0755 /etc/logrotate.d
+if [[ "$WITH_FPM" == true ]]; then
+    cat > /etc/logrotate.d/php <<EOF
 # Log rotation for PHP and PHP-FPM
 # Generated by AwesomeArchLinux/hardening/php/php.sh
 
@@ -492,13 +651,34 @@ cat > /etc/logrotate.d/php <<'EOF'
     compress
     delaycompress
     notifempty
-    create 640 http http
+    su $POOL_USER $POOL_GROUP
+    create 640 $POOL_USER $POOL_GROUP
     sharedscripts
     postrotate
-        /usr/bin/systemctl reload php-fpm 2>/dev/null || true
+        if /usr/bin/systemctl is-active --quiet php-fpm.service; then
+            /usr/bin/systemctl reload php-fpm.service 2>/dev/null || true
+        fi
     endscript
 }
 EOF
+else
+    cat > /etc/logrotate.d/php <<EOF
+# Log rotation for PHP
+# Generated by AwesomeArchLinux/hardening/php/php.sh
+
+/var/log/php/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    su $POOL_USER $POOL_GROUP
+    create 640 $POOL_USER $POOL_GROUP
+}
+EOF
+fi
+chmod 0644 /etc/logrotate.d/php
 
 msg "Logrotate config created: /etc/logrotate.d/php"
 
@@ -516,7 +696,7 @@ if [[ "$WITH_FPM" == true ]]; then
     if systemctl is-active --quiet php-fpm.service; then
         msg "PHP-FPM is running"
     else
-        warn "PHP-FPM failed to start. Check: journalctl -u php-fpm"
+        err "PHP-FPM failed to start. Check: journalctl -u php-fpm -e"
     fi
 fi
 
@@ -543,7 +723,7 @@ if [[ "$WITH_FPM" == true ]]; then
     echo "  systemd override:     /etc/systemd/system/php-fpm.service.d/hardening.conf"
 fi
 if [[ "$WITH_NGINX" == true ]]; then
-    echo "  nginx FastCGI:        /etc/nginx/conf.d/php-fpm.conf"
+    echo "  nginx FastCGI:        /etc/nginx/snippets/php-fpm.conf"
     echo "  nginx PHP security:   /etc/nginx/conf.d/php-security.conf.sample"
 fi
 echo "  Logrotate:            /etc/logrotate.d/php"
@@ -556,10 +736,10 @@ echo "  - expose_php = Off (hide version from HTTP headers)"
 echo "  - display_errors = Off, log_errors = On"
 echo "  - error_log = /var/log/php/error.log"
 echo "  - allow_url_fopen = Off, allow_url_include = Off"
-echo "  - open_basedir = /var/www:/tmp:/usr/share/php"
+echo "  - open_basedir = $OPEN_BASEDIR"
 echo "  - cgi.fix_pathinfo = 0 (prevent path traversal)"
 echo "  - Session: httponly, secure, strict mode, SameSite=Strict"
-echo "  - Session name: __Secure-PHPSESSID (48-char, 6 bits/char)"
+echo "  - Session name: __Secure-PHPSESSID"
 echo "  - Resource limits: 256M memory, 10M upload, 30s execution"
 echo
 
@@ -586,9 +766,9 @@ if [[ "$WITH_FPM" == true ]]; then
     echo "  - Kernel tunable/module/log/cgroup protection"
     echo "  - RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
     echo "  - RestrictNamespaces=yes, RestrictRealtime=yes"
-    echo "  - SystemCallFilter=@system-service @network-io"
+    echo "  - SystemCallFilter=@system-service @network-io (EPERM)"
     echo "  - MemoryDenyWriteExecute=no (required for OPcache JIT)"
-    echo "  - CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE"
+    echo "  - CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL"
     echo
 fi
 
@@ -598,12 +778,12 @@ echo "     - Laravel needs: proc_open (for artisan)"
 echo "     - WordPress needs: exec (for some plugins)"
 echo "     Edit: $PHP_INI"
 echo "  2. Adjust open_basedir for your application document root:"
-echo "     open_basedir = /var/www/myapp:/tmp:/usr/share/php"
+echo "     open_basedir = /var/www/myapp:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php"
 echo "  3. Configure OPcache for production performance:"
 echo "     opcache.enable=1, opcache.memory_consumption=128,"
 echo "     opcache.validate_timestamps=0 (restart FPM to pick up changes)"
-echo "  4. If using --with-nginx, customize the FastCGI config:"
-echo "     /etc/nginx/conf.d/php-fpm.conf"
+echo "  4. If using --with-nginx, customize the FastCGI snippet:"
+echo "     /etc/nginx/snippets/php-fpm.conf"
 echo "  5. Verify PHP-FPM is running:"
 echo "     systemctl status php-fpm"
 echo "     journalctl -u php-fpm -f"

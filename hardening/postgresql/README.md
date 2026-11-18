@@ -33,7 +33,7 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 | `--ssl-key PATH` | Unencrypted PEM private key; required with `--ssl` | none |
 | `--local-only` | Listen only on localhost | on (default) |
 | `--no-local` | Listen on all interfaces; requires TLS and an allowed CIDR | off |
-| `--allow-cidr CIDR` | IPv4 client network allowed by `pg_hba.conf` and nftables (`/0` is rejected) | none |
+| `--allow-cidr CIDR` | IPv4 or IPv6 client network allowed by `pg_hba.conf` and nftables (`/0` is rejected) | none |
 | `-h` | Show help | |
 
 ## What It Does
@@ -46,7 +46,8 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 
 | Setting | Value |
 |---------|-------|
-| Locale | `en_US.UTF-8` |
+| Locale | Verified host locale (`${LANG}` if in `locale -a`, else `C.UTF-8`, else `C`) |
+| Encoding | `UTF8` (`--encoding=UTF8`, prevents `SQL_ASCII` fallback under `C` locale) |
 | Data checksums | Enabled (`--data-checksums`) |
 | Local auth | `peer` |
 | Host auth | `scram-sha-256` |
@@ -123,7 +124,7 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 | `local` | all | all | | `scram-sha-256` |
 | `host` | all | all | `127.0.0.1/32` | `scram-sha-256` |
 | `host` | all | all | `::1/128` | `scram-sha-256` |
-| `hostssl` | all | all | operator-supplied IPv4 CIDR | `scram-sha-256` (remote+SSL only) |
+| `hostssl` | all | all | operator-supplied IPv4 or IPv6 CIDR | `scram-sha-256` (remote+SSL only) |
 
 **No `trust` authentication anywhere.**
 
@@ -137,8 +138,9 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 | `NoNewPrivileges` | `yes` | Cannot gain new privileges |
 | `ProtectKernelTunables` | `yes` | No sysctl modification |
 | `ProtectKernelModules` | `yes` | No module loading |
-| `ReadWritePaths` | `/var/lib/postgres`, `/run/postgresql` | Only necessary write paths |
-| `CapabilityBoundingSet` | *(empty)* | Drop all capabilities |
+| `RuntimeDirectory` | `postgresql` | Creates `/run/postgresql` before unit start |
+| `ReadWritePaths` | `/var/lib/postgres`, `-/run/postgresql` | Only necessary write paths |
+| `CapabilityBoundingSet` | *(empty, or `CAP_NET_BIND_SERVICE` if port < 1024)* | Drop unnecessary capabilities |
 | `MemoryDenyWriteExecute` | `no` | Required for PostgreSQL JIT |
 | `RestrictAddressFamilies` | `AF_UNIX AF_INET AF_INET6` | Only Unix and IP sockets |
 | `SystemCallFilter` | `@system-service @network-io` | Restrict system calls |
@@ -147,6 +149,7 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 
 | Path | Mode | Owner |
 |------|------|-------|
+| `/var/lib/postgres` | `700` | `postgres:postgres` |
 | `/var/lib/postgres/data` | `700` | `postgres:postgres` |
 | `postgresql.conf` | `600` | `postgres:postgres` |
 | `pg_hba.conf` | `600` | `postgres:postgres` |
@@ -194,8 +197,8 @@ hostssl all    all    10.20.30.0/24    cert    clientcert=verify-full
 
 The script refuses `--ssl` without a valid, matching certificate and unencrypted
 private key. It installs them as postgres-owned mode-0600 files under
-`/var/lib/postgres/tls/`; remote mode additionally requires an explicit IPv4
-client CIDR and installs the matching rule in the project-owned nftables ruleset.
+`/var/lib/postgres/tls/`; remote mode additionally requires an explicit IPv4 or IPv6
+client CIDR and installs the matching `ip saddr` / `ip6 saddr` rule in the project-owned nftables ruleset.
 
 ### Option 1: Let's Encrypt (with certbot)
 
@@ -243,7 +246,7 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 ### Verify SSL Connections
 
 ```bash
-# Check if SSL is active
+# Check if SSL is active (add -p <PORT> when using a non-default port)
 sudo -u postgres psql -c "SHOW ssl;"
 
 # Check connection encryption
@@ -305,7 +308,7 @@ archive_timeout = 300   # Archive at least every 5 minutes
 
 ```bash
 # Automated backup script
-#!/bin/bash
+#!/usr/bin/env bash
 BACKUP_DIR="/backups/base/$(date +%Y%m%d)"
 sudo -u postgres pg_basebackup -D "$BACKUP_DIR" -Ft -z -P --checkpoint=fast
 

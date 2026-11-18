@@ -22,9 +22,11 @@ This installs MariaDB, initializes the database, runs security hardening, writes
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-p PORT` | MariaDB listen port | `3306` |
-| `--ssl` | Enable TLS with self-signed certificates | off |
+| `--ssl` | Enable TLS (preserves existing certs; generates self-signed if absent) | off |
+| `--rotate-ssl` | Enable TLS and regenerate self-signed certificates even if present | off |
 | `--local-only` | Bind to 127.0.0.1 only | on |
 | `--no-local` | Bind to 0.0.0.0 (accept remote connections) | off |
+| `--rotate-root-password` | Generate a new root password even if `/root/.mariadb-root-pass` exists | off |
 | `-h` | Show help | |
 
 ### Examples
@@ -44,7 +46,7 @@ sudo ./mariadb.sh --ssl --no-local
 
 ### 1. Package Installation
 
-Installs `mariadb` from the official Arch Linux repositories and initializes the data directory with `mariadb-install-db` if not already done.
+Synchronizes package databases and installs `mariadb` and `logrotate` (`pacman -Syu --noconfirm --needed mariadb logrotate`), then initializes the data directory with `mariadb-install-db` if not already done.
 
 ### 2. Security Hardening (mysql_secure_installation equivalent)
 
@@ -77,7 +79,7 @@ Installs `mariadb` from the official Arch Linux repositories and initializes the
 | `local-infile` | `0` | Prevent LOAD DATA LOCAL attacks |
 | `skip-symbolic-links` | enabled | Prevent symlink-based attacks |
 | `secure-file-priv` | `/var/lib/mysql-files` | Restrict LOAD DATA / SELECT INTO OUTFILE |
-| `sql-mode` | `STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION` | Strict data validation |
+| `sql-mode` | `STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION` | Strict data validation |
 | `log-raw` | `OFF` | Never log passwords in plaintext |
 
 #### SSL/TLS Settings (with `--ssl`)
@@ -130,8 +132,10 @@ Installs `mariadb` from the official Arch Linux repositories and initializes the
 | `ProtectKernelModules` | `yes` | Prevent kernel module loading |
 | `RestrictAddressFamilies` | `AF_UNIX AF_INET AF_INET6` | Only Unix and IP sockets |
 | `MemoryDenyWriteExecute` | `no` | Required for MariaDB memory-mapped operations |
-| `CapabilityBoundingSet` | empty (or `CAP_NET_BIND_SERVICE` for ports < 1024) | Minimal capabilities |
-| `ReadWritePaths` | `/var/lib/mysql`, `/var/log/mysql`, `/run/mysqld`, `/var/lib/mysql-files` | Required writable paths |
+| `CapabilityBoundingSet` | reset (`CapabilityBoundingSet=`), then `CAP_NET_BIND_SERVICE` for ports < 1024 | Replaces upstream capabilities with minimal set |
+| `AmbientCapabilities` | empty (or `CAP_NET_BIND_SERVICE` for ports < 1024) | Allows non-root `mysql` user to bind privileged ports |
+| `RuntimeDirectory` | `mysqld` | Recreate `/run/mysqld` across reboots |
+| `ReadWritePaths` | `/var/lib/mysql`, `/var/log/mysql`, `-/run/mysqld`, `/var/lib/mysql-files` | Required writable paths |
 
 ### 5. Log Rotation
 
@@ -175,7 +179,7 @@ SHOW GRANTS FOR 'myapp'@'localhost';
 
 ## SSL Setup with Real Certificates
 
-The `--ssl` flag generates self-signed certificates for testing. For production, replace them with certificates from a trusted CA:
+The `--ssl` flag generates self-signed certificates when none exist, and preserves existing `ca-cert.pem`, `server-cert.pem`, and `server-key.pem` on re-runs unless `--rotate-ssl` is passed. For production, replace them with certificates from a trusted CA:
 
 ```bash
 # 1. Obtain certificates from your CA (e.g., Let's Encrypt, DigiCert)
@@ -441,7 +445,7 @@ Relaxed SQL mode silently truncates data, converts invalid values, and hides bug
 
 ```ini
 # This is enforced by the hardening config
-sql-mode = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION
+sql-mode = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
 ```
 
 ## Connection Pooling
@@ -466,8 +470,8 @@ Most database drivers and frameworks include connection pool support:
 For multiple application servers connecting to one MariaDB instance, use [ProxySQL](https://proxysql.com/):
 
 ```bash
-# Install from AUR
-yay -S proxysql
+# Review and build from AUR using the project's review gate (never run unreviewed AUR helpers)
+sudo bash -c 'source ./hardening/lib/aur-review.sh && aal_aur_install_reviewed proxysql'
 
 # ProxySQL sits between your app and MariaDB:
 # App -> ProxySQL (port 6033) -> MariaDB (port 3306)

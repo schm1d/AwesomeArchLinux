@@ -65,8 +65,8 @@ The script configures CrowdSec to monitor these log sources:
 | systemd-logind | journalctl | Authentication anomalies |
 | /var/log/auth.log | File (if exists) | PAM authentication events |
 | Kernel messages | journalctl | Firewall drops, audit events |
-| nginx access log | File (`--with-nginx`) | Web attacks, scanners, bots |
-| nginx error log | File (`--with-nginx`) | Application errors, exploit attempts |
+| `/var/log/nginx/*access*.log` | File glob (`--with-nginx`) | Web attacks, scanners, bots (safe even before first nginx log exists) |
+| `/var/log/nginx/*error*.log` | File glob (`--with-nginx`) | Application errors, exploit attempts |
 
 ### 3. Detection Collections
 
@@ -84,17 +84,17 @@ When `--with-nftables` is used, the bouncer creates nftables sets and chains to 
 
 - **Table**: `crowdsec` (IPv4) / `crowdsec6` (IPv6)
 - **Chain**: `crowdsec-chain` / `crowdsec6-chain`
-- **Action**: DROP (banned IPs are silently dropped)
+- **Action**: DROP on `ban` decisions only (L7 `captcha`/`throttle` decisions are left to HTTP bouncers rather than L3-dropped)
 - **Update frequency**: Every 10 seconds
 
 ### 5. systemd Service Hardening
 
-The CrowdSec unit gets a security override with:
+The CrowdSec unit gets a security override (with explicit list resets) and automatic LAPI/CAPI credential bootstrap (`cscli machines add -a` and `cscli capi register` when credentials are not yet populated):
 
-- `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`
+- `ProtectSystem=strict`, `StateDirectory=crowdsec`, `ReadWritePaths=-/var/lib/crowdsec /etc/crowdsec /var/log -/run`, `ProtectHome=yes`, `PrivateTmp=yes`
 - Kernel module/tunable/log/clock protection
-- Capability bounding to `CAP_NET_BIND_SERVICE`
-- Native-only syscall filtering
+- Capability bounding to `CAP_NET_BIND_SERVICE`, `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE`, and `CAP_SYSLOG`
+- Native-only syscall filtering and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`
 - `NoNewPrivileges`, namespace restrictions, `PrivateDevices`
 
 ## Generated Files

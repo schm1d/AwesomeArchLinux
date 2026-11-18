@@ -35,9 +35,10 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
 
 # --- Colors ---
@@ -81,8 +82,8 @@ Options:
   --local-only     Listen only on localhost (default: enabled)
   --no-local       Listen on all interfaces; requires --ssl and --allow-cidr
   --allow-cidr CIDR
-                   IPv4 client network allowed in remote mode (for example,
-                   10.20.30.0/24)
+                   IPv4 or IPv6 client network allowed in remote mode (for
+                   example, 10.20.30.0/24 or fd00:10:20::/48)
   -h, --help       Show this help
 
 Examples:
@@ -114,7 +115,7 @@ while [[ $# -gt 0 ]]; do
         --no-local)  LOCAL_ONLY=false; shift ;;
         --allow-cidr)
             [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || \
-                err "--allow-cidr requires an IPv4 CIDR"
+                err "--allow-cidr requires an IPv4 or IPv6 CIDR"
             REMOTE_CIDR="$2"; shift 2
             ;;
         -h|--help)   usage ;;
@@ -145,6 +146,56 @@ validate_ipv4_cidr() {
     [[ "$prefix" =~ ^[0-9]+$ ]]
 }
 
+validate_ipv6_cidr() {
+    local cidr="$1" address prefix left right group
+    local -a left_groups=() right_groups=()
+    local total=0
+
+    [[ "$cidr" == */* ]] || return 1
+    address=${cidr%/*}
+    prefix=${cidr#*/}
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$prefix >= 1 && 10#$prefix <= 128 )) || return 1
+    [[ -n "$address" && "$address" == *:* && "$address" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+    [[ "$address" != *:::* && "$address" != :[^:]* && "$address" != *[^:]: ]] || return 1
+
+    if [[ "$address" == *::* ]]; then
+        left=${address%%::*}
+        right=${address#*::}
+        [[ "$right" != *::* ]] || return 1
+        if [[ -n "$left" ]]; then
+            IFS=: read -r -a left_groups <<< "$left"
+            for group in "${left_groups[@]}"; do
+                [[ "$group" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+            done
+            total=$(( total + ${#left_groups[@]} ))
+        fi
+        if [[ -n "$right" ]]; then
+            IFS=: read -r -a right_groups <<< "$right"
+            for group in "${right_groups[@]}"; do
+                [[ "$group" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+            done
+            total=$(( total + ${#right_groups[@]} ))
+        fi
+        (( total <= 7 )) || return 1
+    else
+        IFS=: read -r -a left_groups <<< "$address"
+        (( ${#left_groups[@]} == 8 )) || return 1
+        for group in "${left_groups[@]}"; do
+            [[ "$group" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        done
+    fi
+}
+
+validate_cidr() {
+    local cidr="$1"
+    if [[ "$cidr" == *:* ]]; then
+        validate_ipv6_cidr "$cidr"
+    else
+        validate_ipv4_cidr "$cidr"
+    fi
+}
+
 if [[ "$ENABLE_SSL" == true ]]; then
     [[ -n "$SSL_CERT_SOURCE" && -n "$SSL_KEY_SOURCE" ]] || \
         err "--ssl requires both --ssl-cert and --ssl-key"
@@ -168,7 +219,7 @@ fi
 if [[ "$LOCAL_ONLY" == false ]]; then
     [[ "$ENABLE_SSL" == true ]] || err "--no-local requires --ssl"
     [[ -n "$REMOTE_CIDR" ]] || err "--no-local requires --allow-cidr"
-    validate_ipv4_cidr "$REMOTE_CIDR" || err "Invalid IPv4 CIDR: $REMOTE_CIDR"
+    validate_cidr "$REMOTE_CIDR" || err "Invalid IPv4 or IPv6 CIDR: $REMOTE_CIDR"
     command -v nft &>/dev/null || err "Remote mode requires nftables"
     [[ -f "$NFT_CONFIG" ]] || err "Remote mode requires the installer-owned $NFT_CONFIG"
     nft list chain inet filter input &>/dev/null || \
@@ -181,6 +232,9 @@ elif [[ -n "$REMOTE_CIDR" ]]; then
 fi
 
 # Redirect output to logfile as well
+install -d -m 0755 /var/log
+( umask 077 && : > "$LOGFILE" )
+chmod 0600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
 info "Port: $PORT"
@@ -200,30 +254,56 @@ msg "Installing PostgreSQL..."
 pacman -Syu --noconfirm --needed postgresql
 
 # Verify installation
-PG_VER=$(postgres --version 2>&1 | grep -oP '[\d.]+')
+PG_VER=$(postgres --version 2>&1 | awk '{print $NF; exit}' || echo "unknown")
 info "PostgreSQL version: $PG_VER"
 
 # =============================================================================
 # 2. INITIALIZE DATABASE
 # =============================================================================
 
+resolve_pg_locale() {
+    local avail candidate cand_norm
+    avail=$(locale -a 2>/dev/null || true)
+    for candidate in "${LANG:-C.UTF-8}" "C.UTF-8" "C"; do
+        [[ -n "$candidate" ]] || continue
+        cand_norm=$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+        if awk -v raw="$candidate" -v norm="$cand_norm" '
+            {
+                low = tolower($0)
+                gsub(/-/, "", low)
+                if ($0 == raw || low == norm) { found = 1; exit }
+            }
+            END { exit !found }
+        ' <<< "$avail"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    printf 'C\n'
+}
+
+# Ensure the postgres user home directory exists with Arch tmpfiles mode 0700
+install -d -o postgres -g postgres -m 0700 /var/lib/postgres
+
 if [[ -f "$PG_DATA/PG_VERSION" ]]; then
     info "Database cluster already initialized at $PG_DATA"
 else
     msg "Initializing database cluster..."
 
-    # Ensure the postgres user home directory exists
-    mkdir -p /var/lib/postgres
-    chown postgres:postgres /var/lib/postgres
+    PG_LOCALE=$(resolve_pg_locale)
+    info "Using verified locale for initdb: $PG_LOCALE"
 
-    su - postgres -c "initdb \
-        --locale=en_US.UTF-8 \
-        -D '$PG_DATA' \
-        --data-checksums \
-        --auth-local=peer \
-        --auth-host=scram-sha-256"
+    (
+        cd /var/lib/postgres && runuser -u postgres -- initdb \
+            --locale="$PG_LOCALE" \
+            --encoding=UTF8 \
+            -D "$PG_DATA" \
+            --data-checksums \
+            --auth-local=peer \
+            --auth-host=scram-sha-256
+    )
 
-    msg "Database cluster initialized with data checksums and scram-sha-256"
+    msg "Database cluster initialized with UTF8, data checksums, and scram-sha-256"
 fi
 
 # Install operator-supplied TLS material under PostgreSQL's writable state
@@ -402,17 +482,22 @@ msg "pg_hba.conf written (no 'trust' authentication anywhere)"
 # 5. CREATE RESTRICTED APPLICATION USER TEMPLATE
 # =============================================================================
 
+PSQL_PORT_ARG=""
+if (( 10#$PORT != 5432 )); then
+    PSQL_PORT_ARG=" -p $PORT"
+fi
+
 msg "Application user template:"
 echo
 echo -e "${C_BLUE}--- Run these commands as the postgres superuser: ---${C_NC}"
 echo -e "${C_YELLOW}"
-cat <<'SQL'
+cat <<SQL
 -- Connect as superuser
-sudo -u postgres psql
+sudo -u postgres psql${PSQL_PORT_ARG}
 
 -- Create a restricted application user
 CREATE USER appuser CONNECTION LIMIT 10;
-\password appuser
+\\password appuser
 
 -- Create application database owned by the user
 CREATE DATABASE appdb OWNER appuser;
@@ -424,7 +509,7 @@ REVOKE ALL ON DATABASE appdb FROM PUBLIC;
 GRANT CONNECT ON DATABASE appdb TO appuser;
 
 -- Inside appdb, restrict schema access:
--- \c appdb
+-- \\c appdb
 -- REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 -- GRANT USAGE ON SCHEMA public TO appuser;
 SQL
@@ -436,7 +521,9 @@ echo -e "${C_NC}"
 
 msg "Hardening file permissions..."
 
-# Data directory — only postgres user
+# Postgres home and data directory — only postgres user
+chown postgres:postgres /var/lib/postgres
+chmod 0700 /var/lib/postgres
 chown -R postgres:postgres "$PG_DATA"
 chmod 700 "$PG_DATA"
 
@@ -457,14 +544,24 @@ msg "Permissions set: data=700, configs=600"
 
 msg "Hardening PostgreSQL systemd service..."
 
-mkdir -p /etc/systemd/system/postgresql.service.d/
-cat > /etc/systemd/system/postgresql.service.d/hardening.conf <<'EOF'
+PG_CAP_SETTINGS="CapabilityBoundingSet="
+if (( 10#$PORT < 1024 )); then
+    warn "Port $PORT < 1024: granting CAP_NET_BIND_SERVICE capability"
+    PG_CAP_SETTINGS="CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE"
+fi
+
+install -d -m 0755 /etc/systemd/system/postgresql.service.d
+cat > /etc/systemd/system/postgresql.service.d/hardening.conf <<EOF
 [Service]
 # --- Filesystem protection ---
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/postgres /run/postgresql
+RuntimeDirectory=postgresql
+RuntimeDirectoryMode=0755
+ReadWritePaths=/var/lib/postgres -/run/postgresql
 
 # --- Privilege escalation ---
 NoNewPrivileges=yes
@@ -477,8 +574,8 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 
-# --- Capability bounding (empty = drop all) ---
-CapabilityBoundingSet=
+# --- Capability bounding ---
+$PG_CAP_SETTINGS
 
 # --- Memory ---
 # PostgreSQL JIT compilation requires executable memory
@@ -500,6 +597,7 @@ RestrictNamespaces=yes
 PrivateDevices=yes
 DevicePolicy=closed
 EOF
+chmod 0644 /etc/systemd/system/postgresql.service.d/hardening.conf
 
 systemctl daemon-reload
 msg "systemd hardening override installed"
@@ -510,11 +608,15 @@ msg "systemd hardening override installed"
 
 if [[ "$LOCAL_ONLY" == false ]]; then
     msg "Installing restricted nftables access rule for PostgreSQL..."
+    NFT_FAMILY_KEY="ip"
+    if [[ "$REMOTE_CIDR" == *:* ]]; then
+        NFT_FAMILY_KEY="ip6"
+    fi
     aal_nft_persist_block postgresql-remote-access <<EOF
-insert rule inet filter input ip saddr $REMOTE_CIDR tcp dport $PORT ct state new accept comment "awesome-postgresql-remote"
+insert rule inet filter input $NFT_FAMILY_KEY saddr $REMOTE_CIDR tcp dport $PORT ct state new accept comment "awesome-postgresql-remote"
 EOF
     aal_nft_remove_live_rules inet filter input awesome-postgresql-remote
-    nft insert rule inet filter input ip saddr "$REMOTE_CIDR" tcp dport "$PORT" \
+    nft insert rule inet filter input "$NFT_FAMILY_KEY" saddr "$REMOTE_CIDR" tcp dport "$PORT" \
         ct state new accept comment "awesome-postgresql-remote"
     info "nftables permits PostgreSQL only from $REMOTE_CIDR"
 else
@@ -537,8 +639,7 @@ fi
 msg "Enabling and starting PostgreSQL..."
 
 # Ensure the run directory exists
-mkdir -p /run/postgresql
-chown postgres:postgres /run/postgresql
+install -d -o postgres -g postgres -m 0755 /run/postgresql
 
 systemctl enable postgresql
 systemctl restart postgresql
@@ -552,7 +653,7 @@ fi
 
 # Enable pg_stat_statements extension in the default database
 info "Enabling pg_stat_statements extension..."
-su - postgres -c "psql -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'" 2>/dev/null || \
+( cd /var/lib/postgres && runuser -u postgres -- psql -p "$PORT" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;' ) || \
     warn "Could not enable pg_stat_statements — enable it manually after first login"
 
 # =============================================================================
@@ -599,7 +700,7 @@ fi
 echo
 echo -e "${C_YELLOW}IMPORTANT next steps:${C_NC}"
 echo "  1. Change the default postgres superuser password:"
-echo "     sudo -u postgres psql -c \"ALTER USER postgres PASSWORD 'your-strong-password';\""
+echo "     sudo -u postgres psql${PSQL_PORT_ARG} -c \"ALTER USER postgres PASSWORD 'your-strong-password';\""
 echo "  2. Create application-specific users (see template above)"
 echo "  3. Never use the postgres superuser for application connections"
 echo "  4. Set up regular backups:"

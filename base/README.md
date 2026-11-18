@@ -1,6 +1,6 @@
 # Base Installation Scripts
 
-Core scripts for installing and configuring a security-hardened Arch Linux system. Two installation paths are provided: **bare-metal** (full disk encryption) and **VPS/cloud** (simplified partitioning).
+Core scripts for installing and configuring a security-hardened Arch Linux system. Two installation paths are provided: **bare-metal** (full disk encryption with `grub` or signed `uki` boot profiles) and **VPS/cloud** (simplified partitioning with BIOS or UEFI GRUB).
 
 ---
 
@@ -8,33 +8,24 @@ Core scripts for installing and configuring a security-hardened Arch Linux syste
 
 | Script | Purpose |
 |--------|---------|
-| `archinstall.sh` | Bare-metal installer — LVM on LUKS2, UEFI, optional TPM2 |
-| `chroot.sh` | Bare-metal post-install — system hardening inside chroot |
-| `vps-install.sh` | VPS/cloud installer — single partition, swap file, BIOS/UEFI |
-| `vps-chroot.sh` | VPS post-install — same hardening adapted for VPS |
-| `vps-harden.sh` | VPS live hardening — filesystem mounts on a running system |
-| `recovery-mount.sh` | Recovery tool — unmount/remount encrypted installations |
-| `secureBoot.sh` | UEFI Secure Boot key generation and enrollment |
-| `install-aur-packages.sh` | Staged post-install security packages and AIDE setup |
+| `archinstall.sh` | Bare-metal installer — LVM on LUKS2, UEFI, `grub` or `uki` boot profile, optional TPM2 |
+| `bootloader.sh` | Shared bootloader, initramfs, `sbctl`, and `awesome-secureboot` helper library sourced by `chroot.sh` |
+| `chroot.sh` | Bare-metal post-install — system hardening, GPU drivers, and bootloader setup inside chroot |
+| `vps-install.sh` | VPS/cloud installer — EFI or BIOS boot partition + ext4 root, swap file, BIOS/UEFI GRUB |
+| `vps-chroot.sh` | VPS post-install — software and service hardening adapted for cloud/VPS environments |
+| `vps-harden.sh` | VPS live hardening — filesystem mounts and optional software hardening on a running Arch VPS |
+| `lib/chroot-security.sh` | Shared PAM password policy, MITRE ATT&CK audit rule renderer/loader, `arch-audit`, and journal sealing library |
+| `install-aur-packages.sh` | Staged post-install security packages (`aide`, `acct`) and AIDE baseline setup |
+| `recovery-mount.sh` | Recovery tool — status, clean unmount/remount, chroot continuation, and interactive `arch-chroot` |
+| `secureBoot.sh` | Manual UEFI Secure Boot `PK`/`KEK`/`db` key generation, atomic binary signing, and enrollment |
 
-Both installers stage `install-aur-packages.sh`, `aur-review.sh`, and
-`aide-config.sh` under `/root`. After reboot, run
-`sudo /root/install-aur-packages.sh` in a terminal. AUR recipes require review
-before a disposable unprivileged account builds them; root installs the
-resulting packages and configures services. Builds use `/var/cache` with a
-private temporary directory so `/tmp` can remain `noexec`, and receive compiler
-group access when that restriction is enabled. Existing AIDE baselines are
-preserved on reruns.
+All three workflows (`archinstall.sh`, `vps-install.sh`, and `vps-harden.sh`) stage `install-aur-packages.sh`, `aur-review.sh`, and `aide-config.sh` under `/root`. After reboot, run `sudo /root/install-aur-packages.sh` in a terminal. AUR recipes require operator review before a disposable unprivileged account builds them; root installs the resulting packages, enables `acct.service` (or `psacct.service` if provided), and initializes AIDE. Existing AIDE baselines are preserved on reruns.
 
-Both chroot scripts configure password quality before asking for the initial
-user and root passwords. A required quality check precedes the password writers;
-local `pam_unix` uses the checked token. Existing Arch authentication control
-flow is retained, with lockout thresholds in `faillock.conf`. Original PAM and
-policy files are saved once with a `.before-awesome` suffix.
+Both chroot scripts configure password quality before prompting for the initial user and root passwords. A `requisite` `pam_pwquality` check precedes the password writer, and local `pam_unix` uses the checked token (`use_authtok`). Existing Arch `pam_faillock` authentication control flow is retained, with lockout thresholds managed in `/etc/security/faillock.conf`. Original PAM and policy files are backed up once with a `.before-awesome` suffix.
 
 ---
 
-## Bare-Metal Installation
+## Bare-Metal Installation (`archinstall.sh`)
 
 ### Prerequisites
 
@@ -43,7 +34,7 @@ policy files are saved once with a `.before-awesome` suffix.
 - Internet connection
 - Target disk (entire disk will be erased)
 
-### Disk Layout (archinstall.sh)
+### Disk Layout (`archinstall.sh`)
 
 ```
 +------------+-------------+---------------------------------------------+
@@ -55,6 +46,8 @@ policy files are saved once with a `.before-awesome` suffix.
 +------------+-------------+---------------------------------------------+
 ```
 
+Note: `/boot` resides inside the encrypted `root` logical volume (there is no separate unencrypted `/boot` partition).
+
 ### Steps
 
 1. Boot from the Arch Linux live USB.
@@ -62,122 +55,107 @@ policy files are saved once with a `.before-awesome` suffix.
 2. Connect to the internet:
    ```bash
    iwctl station wlan0 connect <SSID>   # Wi-Fi
-   # or just plug in ethernet
+   # or plug in Ethernet
    ```
 
-3. Download and run the installer:
+3. Clone the repository and run the installer (`archinstall.sh` requires sibling files from `base/`, `hardening/`, and `utils/` and cannot be run as a standalone single-file download):
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/archinstall.sh
-   chmod +x archinstall.sh
-   sudo ./archinstall.sh
+   pacman -Sy --needed --noconfirm git
+   git clone https://github.com/schm1d/AwesomeArchLinux.git
+   cd AwesomeArchLinux/base
+   ./archinstall.sh
    ```
 
-4. The script will prompt for:
-   - Target disk (e.g., `sda`, `nvme0n1`)
-   - Partition sizes (swap, root, var — remainder goes to home)
+4. The script prompts for:
+   - **Boot profile** (explicit choice, no default):
+     - `grub` — encrypted `/boot`, LUKS2 with PBKDF2, embedded initramfs keyfile (`/etc/luksKeys/boot.key`), GRUB PBKDF2 superuser password (`--unrestricted` normal boot; password required to edit kernel parameters or open the GRUB shell)
+     - `uki` — `systemd-boot` + `sbctl`-signed Unified Kernel Images on `/efi/EFI/Linux/`, LUKS2 with Argon2id, no embedded keyfile in the UKI, and the `awesome-secureboot` management CLI
+   - Optional TPM2 PCR binding (if TPM 2.0 hardware is detected)
+   - Target disk (e.g., `sda`, `nvme0n1`) and optional pre-encryption disk wipe
+   - Logical volume sizes (`swap`, `root`, optional `var` — remaining space goes to `home`)
    - Username and hostname
-   - Timezone, locale, and console keymap (common presets with live preview via `loadkeys`)
-   - LUKS encryption passphrase
-   - TPM2 binding (if hardware is detected)
+   - Timezone, locale, and console keymap (with live preview via `loadkeys`)
+   - SSH public key (password SSH authentication is disabled)
    - Sysctl profile (`workstation`, `strict`, or `performance`) and IPv6 policy
+   - Optional NVIDIA tensor-core unlock ([`Zagitta/gpu-unlock`](https://github.com/Zagitta/gpu-unlock), disabled by default; supports `gpu_unlock.targets=all` or specific PCI BDFs on GeForce RTX 20/30/40)
+   - LUKS2 passphrase — **copy `recovery.key` and `luks-header-backup.img` to external off-machine storage when prompted** (live-ISO copies are shredded during final cleanup)
 
-5. After partitioning and pacstrap, the script copies `chroot.sh` plus the composable sysctl bundle into the new system and enters chroot automatically.
+5. After partitioning and `pacstrap`, the installer stages `chroot.sh`, `bootloader.sh`, `lib/chroot-security.sh`, `board-health.sh`, `gpu-unlock.sh` (`/usr/local/sbin/awesome-gpu-unlock`), `ssh.sh`, `nftables.sh`, the composable sysctl bundle, and the `/root` post-install bundle, then enters `arch-chroot`.
 
 6. Inside chroot you will be prompted for:
-   - User password
-   - Root password
-   - GRUB bootloader password
+   - User password (enforced by `pam_pwquality`)
+   - Root password (enforced by `pam_pwquality`)
+   - GRUB superuser password (`grub` boot profile only)
 
-7. Reboot when complete. The system boots encrypted — enter the LUKS passphrase (or TPM unlocks automatically if enrolled).
+7. Reboot when complete:
+   - **`grub` profile**: enter your LUKS passphrase at the GRUB prompt; the initramfs unlocks root automatically via `/etc/luksKeys/boot.key`.
+   - **`uki` profile**: enter your LUKS passphrase at the `sd-encrypt` prompt. To enable Secure Boot and optional TPM2 auto-unlock, put firmware in Setup Mode, run `sudo awesome-secureboot enroll-keys`, reboot with Secure Boot enabled, and (if using TPM2) run `sudo awesome-secureboot bind-tpm`.
 
-### What archinstall.sh Does
+### What `chroot.sh` Configures
 
-- Validates UEFI support, network, and disk space
-- Detects TPM2 hardware and version
-- Creates GPT partition table (BIOS boot compatibility slot + EFI system partition + LUKS)
-- Encrypts the third partition with LUKS2 (AES-XTS, 512-bit)
-- Creates LVM volumes (swap, root, optional var, dedicated tmp, home)
-- Allocates a disk-backed `/tmp` LV of 10 GiB, increased to 25 GiB when the target disk is at least 1 TB
-- Generates a LUKS keyfile for unattended boot unlocking
-- Runs pacstrap with base, linux, linux-firmware
-- Detects CPU vendor and installs microcode (intel-ucode / amd-ucode)
-- Copies chroot.sh plus the selected sysctl helper/profile, then enters arch-chroot
-
-### What chroot.sh Does
-
-- Timezone, locale, hostname, /etc/hosts
-- DNS-over-TLS via systemd-resolved native DoT (Stubby is optional, not default)
-- nftables firewall (default deny, SSH rate limiting)
-- rng-tools for entropy
-- fwupd firmware discovery with automatic metadata refresh (and a signed capsule updater in the UKI profile)
-- ModemManager for NetworkManager mobile-broadband support (D-Bus activated on demand)
-- ClamAV antivirus with scheduled definition updates
-- rkhunter rootkit detection (daily timer)
-- auditd with bundled MITRE ATT&CK-mapped rules, checked during boot loading
-- fail2ban with SSH jail
-- journald hardening (persistent, compressed, sealing keys initialized at boot)
-- Sudoers hardening (I/O logging, env_reset, secure_path)
-- PAM faillock (5 attempts, 15-minute lockout)
-- Password quality enforcement (pam_pwquality, 12-char minimum)
-- User creation with sudo/wheel group membership
-- SSH key generation and client configuration
-- SSH server hardening via the standalone `ssh.sh` script
-- Nano syntax highlighting and configuration
-- GRUB installation with encryption support and PBKDF2 password
-- GPU driver detection and installation (NVIDIA/AMD/fallback)
-- UEFI Secure Boot preparation
-- mkinitcpio with encrypt + lvm2 hooks (or sd-encrypt for TPM)
-- Compiler hardening flags (FORTIFY_SOURCE, stack protector, RELRO, PIE)
-- Compiler access restricted to `compilers` group
-- AppArmor kernel boot parameters
-- Disabled protocols (DCCP, SCTP, RDS, TIPC)
-- Core dump disabled
-- Chrony NTP with network time synchronization
-- 15+ systemd service hardening overrides
-- Installs the selected composable sysctl profile (`workstation`, `strict`, or `performance`) and IPv6 policy for first boot
-- Secure cleanup of install artifacts on exit
+- Timezone, locale, X11 keyboard mapping, hostname, `/etc/hosts`
+- DNS-over-TLS via native `systemd-resolved` (with `iwd` + NetworkManager integration)
+- `nftables` firewall (default-drop input, ICMPv4/ICMPv6 allowances, SSH rate limiting)
+- `rng-tools`, `fwupd` metadata refresh (plus signed `fwupdx64.efi` in the `uki` profile), `smartmontools` + `nvme-cli` alerting, and pure-Bash EC thermal monitoring (`board-health.sh`) on supported boards
+- `usbguard` with safe first-boot initial policy generation (`usbguard-initial-policy`)
+- ClamAV (`clamd` + `freshclam`), `rkhunter` daily timer (with `--propupd` finalized after all package and permission changes), `arch-audit` daily vulnerability timer, `lynis`, and `arpwatch`
+- `auditd` with MITRE ATT&CK rules rendered and locked (`-e 2`) at boot via `audit-rules.service`
+- `fail2ban` SSH journal jail
+- `journald` persistent compressed logs with Forward Secure Sealing (`awesome-journal-sealing.service`)
+- Hardened `/etc/sudoers` validated via `visudo -c` before atomic installation
+- User creation with private home (`0700`), default home ACLs (with `~/.cache/{yay,paru}` excluded so AUR `makepkg` `$pkgdir` permissions stay clean), `.nanorc`, and Ed25519 SSH client key/config
+- OpenSSH server hardening via `ssh.sh`
+- Multi-line-safe `makepkg.conf` compiler flags, `compilers` group restriction (`0750 root:compilers`), and `/etc/pacman.d/hooks/90-awesome-compilers.hook` to preserve compiler permissions across upgrades
+- GPU detection supporting standalone and hybrid iGPU + dGPU systems:
+  - **NVIDIA**: official `nvidia-open` on Turing+ (`RTX 20/30/40/50`, `GTX 16`, etc.); safe fallback to open-source `mesa` (`nouveau`) on pre-Turing/legacy GPUs with AUR guidance (`nvidia-580xx-dkms` / `nvidia-470xx-dkms`); optional [`Zagitta/gpu-unlock`](https://github.com/Zagitta/gpu-unlock) (`gpu-unlock-dkms` + `gpu-unlock-firmware`) built unprivileged before UKI/GRUB image generation when opted in (or later via `sudo awesome-gpu-unlock --install`)
+  - **AMD**: `mesa`, `vulkan-radeon`, `libva-utils` (+ `xf86-video-amdgpu` on discrete Radeon GPUs)
+  - **Intel**: `mesa`, `vulkan-intel`, `intel-media-driver`, `libva-intel-driver`, `libva-utils`, `intel-gpu-tools`
+- Daily read-only update check (`pacman-autoupdate.timer` using `checkupdates`)
+- Systemd service sandboxing drop-ins verified offline via `systemd-analyze verify`
+- Composable `sysctl` profile (`workstation`, `strict`, or `performance`) and IPv6 policy
 
 ---
 
-## VPS / Cloud Installation
+## VPS / Cloud Installation (`vps-install.sh`)
 
 ### Prerequisites
 
-- VPS with Arch Linux ISO mounted (or rescue mode with arch-chroot)
-- Root/console access from the VPS provider
+- VPS booted into an Arch Linux ISO or rescue environment with `arch-chroot`
+- Out-of-band console access from your VPS provider
 
 ### Steps
 
 1. Boot into the Arch Linux ISO or rescue environment.
 
-2. Download and run:
+2. Clone the repository and run the VPS installer (`vps-install.sh` requires sibling files from the repository):
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-install.sh
-   chmod +x vps-install.sh
-   sudo ./vps-install.sh
+   pacman -Sy --needed --noconfirm git
+   git clone https://github.com/schm1d/AwesomeArchLinux.git
+   cd AwesomeArchLinux/base
+   ./vps-install.sh
    ```
 
-3. The script auto-detects BIOS vs UEFI and adjusts accordingly, then prompts for the sysctl profile and IPv6 policy to install during chroot.
+3. The script auto-detects UEFI vs BIOS, validates your SSH public key (requiring an SSH public key unless you explicitly confirm out-of-band console access), and configures the selected sysctl profile and IPv6 policy inside chroot.
 
 ### Differences from Bare-Metal
 
-| Feature | Bare-metal | VPS |
-|---------|-----------|-----|
-| Disk encryption | LUKS2 + LVM | None (provider handles it) |
-| TPM2 | Optional auto-enrollment | Not available |
-| Boot | GRUB + encrypted /boot | GRUB (UEFI) or syslinux (BIOS) |
-| Partitioning | EFI + boot + LUKS(LVM) | Single root + swap file |
-| GPU drivers | NVIDIA/AMD auto-detect | Skipped |
-| Serial console | No | Yes (ttyS0 for provider access) |
-| USBGuard | Yes | Skipped |
-| Bluetooth | Auto-detected | Skipped |
-| Software hardening | Full | Full (identical) |
+| Feature | Bare-Metal (`archinstall.sh`) | VPS (`vps-install.sh`) |
+|---------|-------------------------------|------------------------|
+| Disk encryption | LUKS2 + LVM | None (provider storage layer) |
+| TPM2 | Optional PCR binding | Not applicable |
+| Bootloader | GRUB (encrypted `/boot`) or signed UKI (`systemd-boot` + `sbctl`) | GRUB (`x86_64-efi` on UEFI, `i386-pc` on BIOS) |
+| Partitioning | `BIOS_Boot` (1 MiB) + `EFI` (1 GiB `/efi`) + `LUKS2` (`swap`, `root`, `var*`, `tmp`, `home`) | `EFI` (1 GiB) or `BIOS_Boot` (1 MiB) + `ext4` root + `/swapfile` + `tmpfs` `/tmp` |
+| GPU drivers | NVIDIA / AMD / Intel (including hybrid GPUs) | Skipped |
+| Serial console | Not enabled by default | Enabled (`ttyS0` in GRUB and `serial-getty@ttyS0`) |
+| USBGuard / Bluetooth | Enabled / auto-detected | Skipped |
+| Firewall | `nftables` | `nftables` (with automatic legacy `iptables` fallback) |
+| Software hardening | Full | Full |
 
 ---
 
 ## VPS Live Hardening (`vps-harden.sh`)
 
-For VPS providers that pre-install Arch Linux (Hostinger, Linode, etc.), where you cannot boot from a live ISO to run `vps-install.sh`:
+For VPS providers that pre-install Arch Linux where booting a custom ISO is impractical, `vps-harden.sh` hardens a running Arch Linux system in place. Unlike `archinstall.sh` and `vps-install.sh`, `vps-harden.sh` works either from a full git clone or as a standalone download (fetching required repository components over HTTPS and validating them before execution):
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/base/vps-harden.sh
@@ -185,111 +163,78 @@ chmod +x vps-harden.sh
 sudo ./vps-harden.sh
 ```
 
-Preview changes without executing:
+Preview planned changes without modifying the system:
 
 ```bash
 sudo ./vps-harden.sh --dry-run
 ```
 
-Filesystem hardening only (no software hardening, no /var separation):
+Filesystem mount hardening only (skip `/var` storage preparation and software hardening):
 
 ```bash
 sudo ./vps-harden.sh --skip-var --skip-sw
 ```
 
-### What it Does
-
-- Mounts `/tmp` as tmpfs with `noexec,nosuid,nodev` (10 GiB minimum; automatic 25 GiB ceiling when the root disk is at least 1 TB)
-- The VPS tmpfs size is a maximum, not reserved space; pages consume RAM and swap only as `/tmp` fills
-- Remounts `/dev/shm` with `noexec,nosuid,nodev`
-- Remounts `/proc` with `hidepid=2,gid=proc`
-- Bind-mounts `/var/tmp` to `/tmp` (inherits hardened options)
-- Optionally prepares an empty `/var` destination (partition, attached volume, or loop image); the copy and cutover require a rescue environment
-- Hardens existing fstab entries (adds `nosuid,nodev` to `/home`, etc.)
-- Generates `/root/undo-vps-harden.sh` for rollback
-- Optionally runs `vps-chroot.sh` for full software hardening (SSH, nftables, sysctl, PAM, etc.)
-
 ### CLI Options
 
 ```
-  -t SIZE     tmpfs size for /tmp in GB (minimum/default: 10; automatic: 25 on >=1 TB root disks)
-  -v SIZE     /var loop image size in GB (default: 10)
-  -u USER     Username for vps-chroot.sh integration (auto-detected)
-  -p PORT     SSH port (default: 22)
+  -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
+              or 25 when the root disk is at least 1 TB)
+  -v SIZE     /var loop image size in GB, if using loop device (default: 10)
+  -u USER     Non-root username for vps-chroot.sh (prompted if not given)
+  -H HOST     Hostname to set (prompted if not given)
+  -p PORT     SSH port for vps-chroot.sh (default: 22)
+  --ssh-key KEY
+              SSH public key to install for USER
+  -k, --allow-no-ssh-key
+              Allow disabling SSH password auth without an authorized_keys entry
+              (ONLY if you have verified out-of-band VPS console access)
   --skip-var  Skip storage preparation for offline /var migration
   --skip-sw   Skip software hardening (only do filesystem mounts)
+  --sysctl-profile PROFILE
+              Select workstation, strict, or performance (default: workstation)
+  --disable-ipv6
+              Install the explicit IPv6-disable sysctl overlay
   --dry-run   Show planned changes without executing
-  -h          Show help
+  -h, --help  Show help
 ```
 
 ### Safety Mechanisms
 
-- `--dry-run` shows all planned changes without executing
-- `mount -a --fake` validation after every fstab change; reverts on failure
-- Auto-generated rollback script (`/root/undo-vps-harden.sh`)
-- SSH stays up throughout the entire process
-- `/var` is never copied or replaced while the installed OS is running
-- fstab, mount state, and lsblk state backed up before changes
-
-### Completing /var Migration Offline
-
-Preparing a destination formats the selected storage. It does not change the
-live `/var` or add its new mount to fstab. The script writes device-specific
-commands to `/root/MIGRATE_VAR_OFFLINE.txt`; copy those notes externally before
-shutting down the VPS. If your provider offers no rescue environment or way to
-attach the stopped VPS disk to another machine, use `--skip-var`.
-
-Boot rescue media with the installed OS stopped, and follow the generated
-commands outside a chroot. They mount the root and empty destination filesystems,
-copy `/var` with ownership, ACLs, extended attributes and hard links preserved,
-verify the copy using checksums, then update the installed fstab and retain the
-original directory as `/var.old`. Reboot and verify the mount and applications.
-
-Rollback of a migrated `/var` also requires rescue downtime. Preserve any newer
-data in the destination before restoring the old directory and fstab;
-`/var.old` becomes stale once applications resume writing. The live rollback
-script refuses to proceed when `/var.old` exists.
-
-### Differences from vps-install.sh
-
-| Feature          | vps-install.sh     | vps-harden.sh       |
-|------------------|--------------------|----------------------|
-| Runs from        | Live ISO           | Running system       |
-| Disk reformat    | Yes                | Optional destination storage only |
-| Base install     | Yes (pacstrap)     | No                   |
-| Mount hardening  | fstab generation   | Live remount + fstab |
-| Rollback         | No (fresh install) | Yes                  |
+- `--dry-run` previews all planned actions without modifying the system
+- `mount -a --fake` validates `/etc/fstab` after every edit and automatically restores the backup on failure
+- Auto-generated rollback script at `/root/undo-vps-harden.sh`
+- Refuses to disable SSH password authentication unless `authorized_keys` is non-empty, `--ssh-key` / interactive key is supplied, or `-k` / console confirmation is explicitly given
+- `/var` is never copied or cut over while the OS is running; device-specific rescue commands are written to `/root/MIGRATE_VAR_OFFLINE.txt`
 
 ---
 
-## Recovery Tool
+## Recovery Tool (`recovery-mount.sh`)
 
-If you need to access your encrypted bare-metal installation from a live USB:
+To inspect, resume, or repair an encrypted bare-metal or VPS Arch installation from a live USB:
 
 ```bash
 sudo ./recovery-mount.sh
 ```
 
-Provides an interactive menu to:
-- Open LUKS and activate LVM
-- Mount all partitions (root, boot, efi, home, var)
-- Enter arch-chroot for repairs
-- Cleanly unmount and close LUKS when done
+Interactive menu options:
+1. Show current `/mnt` mounts, active LVM logical volumes, and open `/dev/mapper` containers
+2. Safely deactivate swap (`swapoff`), recursively unmount `/mnt` (`umount -R /mnt`), deactivate LVM, and close LUKS
+3. Unlock LUKS + activate LVM + mount `root`, `home`, optional `var`, optional `tmp`, and `/efi` (or mount an unencrypted 2-partition VPS root + swapfile)
+4. Resume an interrupted `chroot.sh` or `vps-chroot.sh` run
+5. Enter an interactive `arch-chroot` shell at `/mnt` for manual repair
+6. Exit
 
 ---
 
-## Secure Boot
+## UEFI Secure Boot (`awesome-secureboot` vs `secureBoot.sh`)
 
-After installation, optionally enable UEFI Secure Boot:
-
-```bash
-sudo ./secureBoot.sh
-```
-
-- Generates PK, KEK, db, and dbx keys
-- Signs EFI binaries (GRUB, kernel, etc.)
-- Enrolls keys into UEFI firmware
-- Supports `-d` (key directory), `-p` (EFI mount), `-k` (key size), `-v` (validity days)
+- **`uki` boot profile (recommended for Secure Boot)**: Secure Boot keys and signing hooks are already provisioned with `sbctl` during installation. Use `sudo awesome-secureboot status`, `sudo awesome-secureboot enroll-keys`, `sudo awesome-secureboot bind-tpm`, and `sudo awesome-secureboot refresh`.
+- **Manual `PK`/`KEK`/`db` provisioning (`secureBoot.sh`)**: For custom non-`sbctl` UEFI setups (refuses to run if `sbctl` already manages Secure Boot):
+  ```bash
+  sudo ./secureBoot.sh [-d KEY_DIR] [-p EFI_MOUNT] [-k KEY_SIZE] [-v VALID_DAYS] [-o] [-h]
+  ```
+  Generates `PK`, `KEK`, and `db` keys (leaving vendor `dbx` revocations intact), backs up existing efivars, signs candidate bootloaders/kernels/UKIs atomically via temporary files first, and enrolls keys in strict `db` -> `KEK` -> `PK` order.
 
 ---
 
@@ -297,19 +242,14 @@ sudo ./secureBoot.sh
 
 After rebooting into your new system:
 
-1. Verify DNS-over-TLS is working: `resolvectl status`
-2. Check firewall rules: `sudo nft list ruleset`
-3. Verify SSH is listening on the correct port: `ss -tlnp | grep ssh`
-4. Confirm both audit collection and rule loading: `systemctl status auditd audit-rules.service`; inspect `journalctl -b -u audit-rules.service` for omitted optional watches or errors, and `sudo auditctl -s` for `enabled 2` and dropped events (`lost`). The loader requires core account/PAM/package watches, includes optional paths present at each boot, and locks the policy only after every rule loads. Failures leave the unit failed and the policy unlocked for repair. Edit `/usr/local/share/awesomearchlinux/auditd-attack.rules` or add local `.rules` files, then reboot to apply changes to an immutable policy. Audit failures are reported (`-f 1`), rather than panicking the machine on a full backlog.
-5. Run a security audit: `sudo lynis audit system`
-6. Check for vulnerable packages: `sudo systemctl start arch-audit.service`, then inspect `systemctl status arch-audit.service` and `/var/log/arch-audit.log`. The timer runs after boot and daily. Findings and scan failures mark the service failed and notify logged-in terminals; fetch failures retain the last completed report. Review unfixed advisories as well as available upgrades. These local notifications do not provide off-host monitoring.
-7. Update ClamAV definitions: `sudo freshclam`
-8. Review fail2ban status: `sudo fail2ban-client status sshd`
-9. Verify AppArmor profiles: `sudo aa-status`
-10. Copy your SSH public key to `~/.ssh/authorized_keys` before relying on key-only auth
-11. Check `systemctl status awesome-journal-sealing.service` after the first boot. Move `/root/journal-sealing/verification-<machine-id>.txt` to trusted off-machine storage, verify the copy, then remove the local verification file. Keeping this key on the machine undermines tamper detection if the machine is compromised. Keep the evolving `/var/log/journal/<machine-id>/fss` sealing state on the installed machine; never use `journalctl --setup-keys --force` as a routine repair.
-
-Journal key setup runs before the persistent journal flush using the installed machine ID. A rotation after the flush starts new files with sealing; old logs are not retroactively sealed. Later boots preserve existing keys. If setup fails, logging continues and `awesome-journal-sealing.service` stays failed; inspect its journal and the private files in `/root/journal-sealing/` before attempting recovery. To verify archived journals on a trusted machine, use `journalctl --directory=<copied-journal-directory> --verify --verify-key=<saved-verification-key>` and inspect the reported authenticated time ranges. See the [journalctl FSS documentation](https://man.archlinux.org/man/journalctl.1.en) for key handling and verification.
+1. Run staged security package setup: `sudo /root/install-aur-packages.sh`
+2. Verify DNS-over-TLS: `resolvectl status`
+3. Check firewall rules: `sudo nft list ruleset`
+4. Verify SSH listener: `ss -tlnp | grep ssh`
+5. Confirm audit daemon and immutable rules: `systemctl status auditd audit-rules.service` and `sudo auditctl -s` (`enabled 2`)
+6. Run vulnerability scan: `sudo systemctl start arch-audit.service` and review `/var/log/arch-audit.log`
+7. Check `systemctl status awesome-journal-sealing.service`, move `/root/journal-sealing/verification-<machine-id>.txt` to trusted off-machine storage, verify the copy, and remove the local verification file (never move `/var/log/journal/<machine-id>/fss`)
+8. Run a full system audit: `sudo lynis audit system`
 
 ---
 

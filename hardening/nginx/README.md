@@ -18,7 +18,7 @@ sudo ./nginx.sh -d example.com -d www.example.com -e admin@example.com
 | `-d DOMAIN` | Domain name (repeat for multiple) | *required* |
 | `-e EMAIL` | Let's Encrypt notification email | `webmaster@DOMAIN` |
 | `-w PATH` | Web root directory | `/var/www/html` |
-| `-p PORT` | HTTPS port | `443` |
+| `-p PORT` | HTTPS port (must not be `80`) | `443` |
 | `--dry-run` | Use Let's Encrypt staging server | off |
 | `--skip-certbot` | Skip certificate issuance | off |
 | `-h` | Show help | |
@@ -54,17 +54,17 @@ sudo ./nginx.sh -d example.com --dry-run
 
 ### 3. Security Headers (securityheaders.com A+)
 
-All six graded headers are set, plus OWASP-recommended Cross-Origin headers:
+All six graded headers are set, plus OWASP-recommended Cross-Origin headers (included via `/etc/nginx/snippets/security-headers.conf` inside the HTTPS `server {}` block so HSTS is never sent over plain HTTP port 80):
 
 | Header | Value | Purpose |
 |--------|-------|---------|
 | `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Force HTTPS for 2 years, preload-ready |
-| `Content-Security-Policy` | Strict `self`-only baseline | Prevent XSS, code injection |
-| `Permissions-Policy` | All browser APIs denied by default | Block camera, mic, geolocation, etc. |
+| `Content-Security-Policy` | Practical baseline (`'self'`, Google Fonts/Analytics, `frame-ancestors 'none'`) | Mitigate XSS and framing |
+| `Permissions-Policy` | Powerful browser APIs denied by default (`fullscreen=(self)`) | Block camera, mic, geolocation, etc. |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` | Limit referrer leakage |
 | `X-Content-Type-Options` | `nosniff` | Prevent MIME-type sniffing |
-| `X-Frame-Options` | `DENY` | Prevent clickjacking |
-| `Cross-Origin-Embedder-Policy` | `require-corp` | Require cross-origin opt-in |
+| `X-Frame-Options` | `SAMEORIGIN` | Prevent cross-origin clickjacking |
+| `Cross-Origin-Embedder-Policy` | `unsafe-none` | Compatible with cross-origin fonts/CDNs out of the box |
 | `Cross-Origin-Opener-Policy` | `same-origin` | Isolate browsing context (XS-Leak defense) |
 | `Cross-Origin-Resource-Policy` | `same-origin` | Prevent cross-origin resource loading |
 | `X-Permitted-Cross-Domain-Policies` | `none` | Block Flash/Acrobat cross-domain |
@@ -83,7 +83,7 @@ All six graded headers are set, plus OWASP-recommended Cross-Origin headers:
 The nginx unit gets a security override with:
 - `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`
 - Kernel module/tunable/log protection
-- Capability bounding to `CAP_NET_BIND_SERVICE` only
+- Capability bounding reset (`CapabilityBoundingSet=`) then restricted to `CAP_NET_BIND_SERVICE`, `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID`, and `CAP_KILL` (so the root master process can signal `http` workers on `systemctl reload nginx`, with no `AmbientCapabilities` inherited by workers)
 - Native-only syscall filtering
 - `MemoryDenyWriteExecute`, `NoNewPrivileges`, namespace restrictions
 
@@ -105,7 +105,7 @@ certbot renew --dry-run
 |------|-------------|
 | `/etc/nginx/nginx.conf` | Main nginx config (core, buffers, timeouts) |
 | `/etc/nginx/conf.d/ssl-hardening.conf` | TLS protocols, ECDHE ciphers, curves, and session config |
-| `/etc/nginx/conf.d/security-headers.conf` | All security response headers |
+| `/etc/nginx/snippets/security-headers.conf` | All security response headers (included in HTTPS `server {}` block) |
 | `/etc/nginx/sites-enabled/default.conf` | HTTP redirect + HTTPS server block |
 | `/etc/letsencrypt/live/<domain>/` | Let's Encrypt certificates |
 | `/etc/systemd/system/certbot-renew.timer` | Auto-renewal timer |
@@ -116,23 +116,23 @@ certbot renew --dry-run
 
 ### Content-Security-Policy
 
-The default CSP is strict (`self`-only). You will likely need to adjust it for your application:
+The default CSP provides a practical baseline (allowing `'self'`, inline styles/scripts, and Google Fonts/Analytics) so common sites render cleanly out of the box. Tighten it to strict `'self'`-only or tailor it to your specific CDNs:
 
 ```nginx
-# Example: allow scripts from a CDN and inline styles
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.example.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.example.com; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests;" always;
+# Example: tighten CSP to strict same-origin + explicit CDN without 'unsafe-inline' scripts
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.example.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.example.com; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; upgrade-insecure-requests" always;
 ```
 
 ### Cross-Origin Headers
 
-If your site loads third-party resources (images, scripts, fonts from CDNs):
+`Cross-Origin-Embedder-Policy` defaults to `"unsafe-none"` for compatibility with third-party fonts/CDNs. If your site serves only same-origin or CORP/CORS-enabled assets and needs `SharedArrayBuffer` / cross-origin isolation:
 
 ```nginx
-# Relax COEP to allow credentialless cross-origin loads
-add_header Cross-Origin-Embedder-Policy "credentialless" always;
+# Enable full cross-origin isolation when all subresources opt in via CORP/CORS
+add_header Cross-Origin-Embedder-Policy "require-corp" always;
 
-# Or disable COEP entirely if third-party resources don't support CORS/CORP
-add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
+# Or allow credentialless cross-origin loads
+add_header Cross-Origin-Embedder-Policy "credentialless" always;
 ```
 
 ### Adding Application Ports to the Firewall

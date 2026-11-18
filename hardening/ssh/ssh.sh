@@ -15,9 +15,10 @@
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 if [[ -f "$SCRIPT_DIR/../lib/nftables.sh" ]]; then
     source "$SCRIPT_DIR/../lib/nftables.sh"
 elif [[ -f "$SCRIPT_DIR/nftables.sh" ]]; then
@@ -84,6 +85,10 @@ if [ -z "$ALLOWED_USERS" ] || [ "$ALLOWED_USERS" = "root" ]; then
     echo "Or run via: sudo -u root ./ssh.sh (SUDO_USER will be detected)" >&2
     exit 1
 fi
+if [[ ! "$ALLOWED_USERS" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || (( ${#ALLOWED_USERS} > 32 )); then
+    echo -e "${BRed}ERROR: Invalid username format for ALLOWED_USERS: '${ALLOWED_USERS}'.${NC}" >&2
+    exit 1
+fi
 echo -e "${BGreen}SSH access will be granted to: ${ALLOWED_USERS}${NC}"
 
 # SAFETY: refuse to disable password auth unless the allowed user already has
@@ -93,13 +98,22 @@ if [[ -z "${ALLOWED_HOME:-}" || ! -d "$ALLOWED_HOME" ]]; then
     echo -e "${BRed}ERROR: Could not resolve home directory for ${ALLOWED_USERS}.${NC}" >&2
     exit 1
 fi
+ALLOWED_GROUP="$(id -gn "$ALLOWED_USERS")"
+
+in_chroot() {
+    if command -v systemd-detect-virt &>/dev/null && systemd-detect-virt --chroot --quiet 2>/dev/null; then
+        return 0
+    fi
+    [[ "$(stat -c %d:%i /)" != "$(stat -c %d:%i /proc/1/root/. 2>/dev/null || echo chroot)" ]]
+}
+
 if [[ ! -s "${ALLOWED_HOME}/.ssh/authorized_keys" ]]; then
     if [[ "$SKIP_KEY_CHECK" -eq 1 ]]; then
         echo -e "${BYellow}WARNING: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
         echo -e "${BYellow}Proceeding anyway because -k was passed. Password auth will be disabled.${NC}" >&2
         echo -e "${BYellow}You MUST add a key via console login before remote SSH will work.${NC}" >&2
-        install -d -m 700 -o "$ALLOWED_USERS" -g "$ALLOWED_USERS" "${ALLOWED_HOME}/.ssh"
-        install -m 600 -o "$ALLOWED_USERS" -g "$ALLOWED_USERS" /dev/null "${ALLOWED_HOME}/.ssh/authorized_keys"
+        install -d -m 700 -o "$ALLOWED_USERS" -g "$ALLOWED_GROUP" "${ALLOWED_HOME}/.ssh"
+        install -m 600 -o "$ALLOWED_USERS" -g "$ALLOWED_GROUP" /dev/null "${ALLOWED_HOME}/.ssh/authorized_keys"
     else
         echo -e "${BRed}ERROR: ${ALLOWED_HOME}/.ssh/authorized_keys is missing or empty.${NC}" >&2
         echo -e "${BYellow}Refusing to apply PasswordAuthentication=no / AllowUsers / restart sshd (lockout prevention).${NC}" >&2
@@ -129,6 +143,7 @@ echo -e "${BBlue}Hardening \"/etc/ssh/sshd_config\"...${NC}"
 # Back up original config
 BACKUP_SUFFIX="bak.$(date +%Y%m%d%H%M%S)"
 cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.${BACKUP_SUFFIX}"
+chmod 0600 "/etc/ssh/sshd_config.${BACKUP_SUFFIX}"
 
 touch "$REVOKED_KEYS_FILE"
 
@@ -231,16 +246,14 @@ Host *
 SSH_CLIENT_EOF
 
 # Create ControlPath socket directory for SSH multiplexing
-ALLOWED_HOME=$(getent passwd "$ALLOWED_USERS" | cut -d: -f6)
 if [ -n "$ALLOWED_HOME" ]; then
-    mkdir -p "$ALLOWED_HOME/.ssh/sockets"
-    chown "$ALLOWED_USERS:$ALLOWED_USERS" "$ALLOWED_HOME/.ssh/sockets"
-    chmod 700 "$ALLOWED_HOME/.ssh/sockets"
+    install -d -m 700 -o "$ALLOWED_USERS" -g "$ALLOWED_GROUP" "$ALLOWED_HOME/.ssh" "$ALLOWED_HOME/.ssh/sockets"
 fi
 
 echo -e "${BBlue}Hardening permissions...${NC}"
-chown root:root /etc/ssh/sshd_config
-chmod 600 /etc/ssh/sshd_config
+chown root:root /etc/ssh/sshd_config /etc/ssh/ssh_config "$REVOKED_KEYS_FILE"
+chmod 0600 /etc/ssh/sshd_config
+chmod 0644 /etc/ssh/ssh_config "$REVOKED_KEYS_FILE"
 
 echo -e "${BBlue}Creating Banner (/etc/issue.net).${NC}"
 
@@ -299,42 +312,112 @@ if sshd -t; then
     echo -e "${BGreen}Configuration valid.${NC}"
     echo -e "${BBlue}Enabling and reloading SSHD...${NC}"
     systemctl enable sshd.service
-    if systemctl is-active --quiet sshd.service; then
-        # Reload preserves existing sessions; restart kills them via cgroup teardown
-        systemctl reload sshd.service || systemctl reload-or-restart sshd.service
+    if in_chroot; then
+        echo -e "${BBlue}Chroot environment detected — sshd.service enabled for first boot.${NC}"
     else
-        systemctl start sshd.service
+        if systemctl is-active --quiet sshd.service; then
+            # Reload preserves existing sessions; restart kills them via cgroup teardown
+            systemctl reload sshd.service || systemctl reload-or-restart sshd.service
+        else
+            systemctl start sshd.service
+        fi
+        systemctl status sshd.service --no-pager
     fi
-    systemctl status sshd.service --no-pager
 else
     echo -e "${BRed}ERROR: sshd_config validation failed! NOT restarting.${NC}" >&2
     echo -e "${BYellow}Rolling back to previous configuration...${NC}"
     cp "/etc/ssh/sshd_config.${BACKUP_SUFFIX}" /etc/ssh/sshd_config
+    chmod 0600 /etc/ssh/sshd_config
     echo "Review /etc/ssh/sshd_config and fix errors before restarting manually." >&2
     exit 1
 fi
 
 # Rate limiting — prefer the installer-owned nftables ruleset
 echo -e "${BBlue}Rate Limiting to avoid brute-forcing...${NC}"
-if command -v nft &>/dev/null && { nft list chain inet filter input &>/dev/null || [[ -f /etc/nftables.conf ]]; }; then
-    # insert places each rule at the head, so persist/apply the drop first and
-    # the limited accept second. The final live order is accept-then-drop,
-    # before the installer's terminal drop rule.
-    aal_nft_persist_block ssh-rate-limit <<EOF
-insert rule inet filter input tcp dport $SSH_PORT ct state new drop comment "awesome-ssh-rate-drop"
-insert rule inet filter input tcp dport $SSH_PORT ct state new limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
+NFT_CONF_PATH="${AAL_NFT_CONFIG:-/etc/nftables.conf}"
+if command -v nft &>/dev/null && { [[ -f "$NFT_CONF_PATH" ]] || { ! in_chroot && nft list chain inet filter input &>/dev/null; }; }; then
+    # If SSH moved off port 22, strip any hardcoded port-22 baseline accept rule
+    # from /etc/nftables.conf so port 22 does not remain exposed alongside $SSH_PORT.
+    if (( 10#$SSH_PORT != 22 )) && [[ -f "$NFT_CONF_PATH" ]]; then
+        if grep -Eq '^[[:space:]]*tcp[[:space:]]+dport[[:space:]]+22[[:space:]]+ct[[:space:]]+state[[:space:]]+new[[:space:]]+limit[[:space:]]+rate[[:space:]].*accept' "$NFT_CONF_PATH"; then
+            nft_strip_tmp=$(umask 077; mktemp "$(dirname "$NFT_CONF_PATH")/.nftables.ssh22.XXXXXX")
+            awk '
+                /^[[:space:]]*#[[:space:]]*Allow SSH with rate limiting/ {
+                    pending_comment = $0
+                    has_comment = 1
+                    next
+                }
+                /^[[:space:]]*tcp[[:space:]]+dport[[:space:]]+22[[:space:]]+ct[[:space:]]+state[[:space:]]+new[[:space:]]+limit[[:space:]]+rate[[:space:]].*accept([[:space:]]|$)/ && $0 !~ /comment "awesome-ssh-/ {
+                    has_comment = 0
+                    next
+                }
+                {
+                    if (has_comment) {
+                        print pending_comment
+                        has_comment = 0
+                    }
+                    print
+                }
+                END {
+                    if (has_comment) print pending_comment
+                }
+            ' "$NFT_CONF_PATH" > "$nft_strip_tmp"
+            if nft -c -f "$nft_strip_tmp" 2>/dev/null; then
+                install -o root -g root -m 0644 "$nft_strip_tmp" "$NFT_CONF_PATH"
+            fi
+            rm -f -- "$nft_strip_tmp"
+        fi
+    fi
+
+    # Persist the managed block when /etc/nftables.conf exists. Scoping rules to
+    # iifname != "lo" guarantees loopback SSH is never rate-limited.
+    if [[ -f "$NFT_CONF_PATH" ]]; then
+        aal_nft_persist_block ssh-rate-limit <<EOF
+insert rule inet filter input iifname != "lo" tcp dport $SSH_PORT ct state new drop comment "awesome-ssh-rate-drop"
+insert rule inet filter input iifname != "lo" tcp dport $SSH_PORT ct state new limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept"
 EOF
-    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-accept 2>/dev/null || true
-    aal_nft_remove_live_rules inet filter input awesome-ssh-rate-drop 2>/dev/null || true
-    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop" 2>/dev/null || true
-    nft insert rule inet filter input tcp dport "$SSH_PORT" ct state new \
-        limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept" 2>/dev/null || true
-    echo -e "${BGreen}nftables SSH rate limit applied and persisted without replacing unrelated rules.${NC}"
-elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
+    fi
+
+    if ! in_chroot && nft list chain inet filter input &>/dev/null; then
+        aal_nft_remove_live_rules inet filter input awesome-ssh-rate-accept 2>/dev/null || true
+        aal_nft_remove_live_rules inet filter input awesome-ssh-rate-drop 2>/dev/null || true
+
+        if (( 10#$SSH_PORT != 22 )); then
+            while IFS= read -r ssh22_handle; do
+                [[ "$ssh22_handle" =~ ^[0-9]+$ ]] || continue
+                nft delete rule inet filter input handle "$ssh22_handle" 2>/dev/null || true
+            done < <(
+                nft -a list chain inet filter input 2>/dev/null | awk '
+                    /tcp dport 22 ct state new limit rate/ && $0 !~ /comment "awesome-ssh-/ {
+                        for (i = 1; i <= NF; i++) if ($i == "handle") print $(i + 1)
+                    }
+                '
+            )
+        fi
+
+        lo_handle=$(nft -a list chain inet filter input 2>/dev/null | awk '
+            /iif(name)? "?(lo)"? accept/ {
+                for (i = 1; i <= NF; i++) if ($i == "handle") { print $(i + 1); exit }
+            }
+        ')
+        if [[ -n "$lo_handle" ]]; then
+            # add ... position <lo_handle> places rules immediately AFTER iif lo accept
+            nft add rule inet filter input position "$lo_handle" iifname != "lo" tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop" 2>/dev/null || true
+            nft add rule inet filter input position "$lo_handle" iifname != "lo" tcp dport "$SSH_PORT" ct state new \
+                limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept" 2>/dev/null || true
+        else
+            nft insert rule inet filter input iifname != "lo" tcp dport "$SSH_PORT" ct state new drop comment "awesome-ssh-rate-drop" 2>/dev/null || true
+            nft insert rule inet filter input iifname != "lo" tcp dport "$SSH_PORT" ct state new \
+                limit rate 4/minute burst 4 packets accept comment "awesome-ssh-rate-accept" 2>/dev/null || true
+        fi
+    fi
+    echo -e "${BGreen}nftables SSH rate limit configured without replacing unrelated rules.${NC}"
+elif ! in_chroot && command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
     # Persist only the owned rules through an idempotent oneshot unit. Saving
     # the whole live table here would also capture transient Docker rules.
-    install -d -o root -g root -m 0755 /usr/local/libexec
-    cat > /usr/local/libexec/awesome-ssh-rate-limit <<EOF
+    rm -f /usr/local/libexec/awesome-ssh-rate-limit
+    install -d -o root -g root -m 0755 /usr/local/lib/awesomearchlinux /etc/systemd/system
+    cat > /usr/local/lib/awesomearchlinux/ssh-rate-limit.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 SSH_PORT=$SSH_PORT
@@ -348,13 +431,13 @@ delete_rules_by_comment() {
 }
 delete_rules_by_comment awesome-ssh-rate-accept
 delete_rules_by_comment awesome-ssh-rate-drop
-iptables -I INPUT 1 -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
+iptables -I INPUT 1 ! -i lo -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
     -m comment --comment awesome-ssh-rate-drop -j DROP
-iptables -I INPUT 1 -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
+iptables -I INPUT 1 ! -i lo -p tcp --dport "\$SSH_PORT" -m conntrack --ctstate NEW \
     -m limit --limit 4/min --limit-burst 4 \
     -m comment --comment awesome-ssh-rate-accept -j ACCEPT
 EOF
-    chmod 0755 /usr/local/libexec/awesome-ssh-rate-limit
+    chmod 0755 /usr/local/lib/awesomearchlinux/ssh-rate-limit.sh
     cat > /etc/systemd/system/awesome-ssh-rate-limit.service <<'EOF'
 [Unit]
 Description=Install AwesomeArchLinux SSH rate-limit rules
@@ -363,12 +446,13 @@ Before=sshd.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/libexec/awesome-ssh-rate-limit
+ExecStart=/usr/local/lib/awesomearchlinux/ssh-rate-limit.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    chmod 0644 /etc/systemd/system/awesome-ssh-rate-limit.service
     systemctl daemon-reload
     systemctl enable awesome-ssh-rate-limit.service
     systemctl restart awesome-ssh-rate-limit.service

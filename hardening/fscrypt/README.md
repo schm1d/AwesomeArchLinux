@@ -109,9 +109,9 @@ One-time system-wide setup:
 4. Creates `/etc/fscrypt.conf` and prepares fscrypt metadata on both filesystems
    (once if `/home` shares the root filesystem). Metadata setup failures stop
    the script before PAM is changed.
-5. Wires `pam_fscrypt.so` into `/etc/pam.d/system-login` (auth + session)
-   and `/etc/pam.d/passwd` (password). Each file is backed up first to
-   `<file>.bak.<epoch>`; lines are only appended if not already present.
+5. Wires `pam_fscrypt.so` into `/etc/pam.d/system-login` (`auth`, `session`,
+   and `password`) and `/etc/pam.d/passwd` (`password`). Each file is backed up
+   first to `<file>.bak.<epoch>`; lines are only appended if not already present.
 
 ```bash
 sudo ./fscrypt.sh --setup
@@ -119,15 +119,20 @@ sudo ./fscrypt.sh --setup
 
 ### `--encrypt-user USER`
 
-Encrypt an **existing** user's home:
+Encrypt an **existing** user's home (must be run from a direct root TTY login or
+another admin account — **never** via `sudo` from `USER`'s own login session,
+because `loginctl terminate-user USER` kills all processes in `USER`'s session):
 
 ```bash
-sudo ./fscrypt.sh --encrypt-user alice
+# From a local root console (or a separate admin session):
+./fscrypt.sh --encrypt-user alice
 ```
 
 What happens:
 
-1. The actual home filesystem and root filesystem are checked and their
+1. `root`, system accounts (`UID < 1000`), and invocations from `alice`'s own
+   `sudo` / `logind` session are refused up front before anything is touched.
+   The actual home filesystem and root filesystem are checked and their
    metadata prepared before any sessions are terminated or data moved.
    Symlink homes and homes that are themselves mount points are refused.
 2. An empty sibling directory is created (mode 700, owner `alice`) and
@@ -159,9 +164,9 @@ rollback path if anything goes wrong.
 
 ### `--status`
 
-Prints the current state: root device, FS type, encrypt feature, whether
-the `fscrypt` package is installed, `/etc/fscrypt.conf` presence, PAM
-wiring status, and `fscrypt status` output (lists all relevant filesystems).
+Prints the current state for both `/` and `/home` (device, filesystem type, and
+ext4 `encrypt` feature), whether the `fscrypt` package is installed,
+`/etc/fscrypt.conf` presence, PAM wiring status, and `fscrypt status` output.
 
 ```bash
 sudo ./fscrypt.sh --status
@@ -202,11 +207,14 @@ incantation into the script, we take the conservative approach:
 As root, with the user logged in (so the policy is unlocked):
 
 ```bash
-# 1. Create a new protector backed by a custom passphrase. fscrypt will
-#    prompt you for that passphrase — choose a long random one and store
-#    it in a password manager.
+# Resolve the mountpoint containing /home/alice (/home if separate LV, or / if shared)
+HOME_MOUNT=$(findmnt -n -o TARGET -T /home/alice)
+
+# 1. Create a new protector backed by a custom passphrase on that mountpoint.
+#    fscrypt will prompt you for that passphrase — choose a long random one
+#    and store it in a password manager.
 fscrypt metadata create protector --source=custom_passphrase \
-    --name=alice-recovery /
+    --name=alice-recovery "$HOME_MOUNT"
 
 # fscrypt prints a protector descriptor, e.g. a 16-char hex string.
 # Note it down as PROTECTOR_ID.
@@ -217,8 +225,8 @@ fscrypt status /home/alice
 
 # 3. Attach the new protector to that policy:
 fscrypt metadata add-protector-to-policy \
-    --protector=/:PROTECTOR_ID \
-    --policy=/:POLICY_ID
+    --protector="${HOME_MOUNT}:PROTECTOR_ID" \
+    --policy="${HOME_MOUNT}:POLICY_ID"
 ```
 
 After this, either the login password **or** the recovery passphrase can

@@ -14,7 +14,7 @@ sudo ./openclaw.sh -u myuser --with-sandbox --with-firewall --with-apparmor
 |------|-------------|---------|
 | `-u USERNAME` | Linux user running OpenClaw | *required* |
 | `-p PORT` | Gateway WebSocket port | `18789` |
-| `--with-sandbox` | Enable Docker sandbox for all tool execution | |
+| `--with-sandbox` | Enable verified rootless Docker sandbox for tool execution | |
 | `--with-firewall` | Create nftables rules for OpenClaw | |
 | `--with-apparmor` | Write and load AppArmor profile | |
 | `-h` | Show help | |
@@ -56,19 +56,34 @@ This script sets the bind mode to `loopback` and configures the gateway to liste
 
 #### Token Authentication
 
-The gateway supports token-based authentication. This script generates a cryptographically random 64-character token and stores it in `~/.openclaw/credentials/gateway-token.json` with mode 600.
+The gateway supports token-based authentication. This script generates a cryptographically random 64-character hex token (256-bit entropy), stores it as `OPENCLAW_GATEWAY_TOKEN` in `~/.openclaw/.env` (mode `600`, loaded via systemd `EnvironmentFile`), and references `${OPENCLAW_GATEWAY_TOKEN}` in `~/.openclaw/openclaw.json` so plaintext secrets never sit in the JSON config:
 
 ```jsonc
 // ~/.openclaw/openclaw.json (gateway section)
 {
   "gateway": {
-    "host": "127.0.0.1",
+    "mode": "local",
+    "bind": "loopback",
     "port": 18789,
     "auth": {
-      "type": "token",
-      "tokenFile": "~/.openclaw/credentials/gateway-token.json"
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}",
+      "rateLimit": {
+        "maxAttempts": 5,
+        "windowMs": 60000,
+        "lockoutMs": 300000,
+        "exemptLoopback": false
+      }
     },
-    "trustedProxies": []
+    "controlUi": {
+      "allowInsecureAuth": false,
+      "dangerouslyDisableDeviceAuth": false
+    },
+    "trustedProxies": [],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": true
+    }
   }
 }
 ```
@@ -94,7 +109,7 @@ OpenClaw can receive messages from direct messages and group channels across all
 
 **Why "open" is catastrophic:** With an `open` DM policy, any Telegram user, any Discord member of a shared server, or any WhatsApp contact can send instructions to your agent. The agent will execute tool calls (file reads, shell commands, web requests) on behalf of a completely untrusted party. Combined with insufficient tool restrictions, this is full RCE from a chat message.
 
-This script sets the DM policy to `allowlist` with an empty list. You must explicitly add trusted user IDs.
+This script omits placeholder channel blocks so OpenClaw's built-in `pairing` default applies until you explicitly configure a channel. When onboarding a channel, keep `dmPolicy` at `pairing` or tighten it to `allowlist` with exact trusted user IDs.
 
 #### Per-Channel Configuration
 
@@ -141,7 +156,7 @@ Sessions control the memory boundary of agent conversations. A wider scope means
 | `per-channel-peer` | One session per user per channel | Multi-channel setups |
 | `per-account-channel-peer` | One session per user per channel per platform account | Maximum isolation for multi-platform |
 
-This script sets the scope to `per-channel-peer` to prevent cross-channel context leakage.
+This script sets `tools.message.crossContext` (`allowWithinProvider: false`, `allowAcrossProviders: false`, `marker.enabled: true`) to prevent cross-channel context leakage.
 
 ### 3. Tool Policy & Execution Security
 
@@ -156,17 +171,17 @@ OpenClaw's power comes from its tools -- shell execution, file operations, web b
 | `coding` | Messaging + shell (sandboxed), file write, git | Medium | Development assistant |
 | `full` | All tools including host shell, browser, admin | **High** | Full autonomous agent |
 
-This script sets the default profile to `coding` with sandbox enforcement.
+This script sets the default profile to `messaging` and explicitly denies `["exec", "process", "apply_patch", "browser"]`.
 
 #### Execution Security Model
 
-| Setting | Options | Recommendation |
+| Setting | Options | Hardened Value |
 |---------|---------|----------------|
-| `execMode` | `host`, `sandbox` | `sandbox` -- all commands run in Docker container |
-| `execPolicy` | `allowlist`, `denylist`, `ask` | `denylist` with comprehensive deny rules |
-| `askMode` | `always`, `new-only`, `never` | `new-only` -- ask for commands not seen before |
-| `timeout` | Seconds | `120` -- kill long-running commands |
-| `maxConcurrent` | Number | `3` -- limit parallel command execution |
+| `tools.exec.host` | `gateway`, `sandbox`, `node` | `sandbox` -- never direct host execution |
+| `tools.exec.security` | `deny`, `allowlist`, `full` | `allowlist` with empty `safeBins: []` |
+| `tools.exec.ask` | `always`, `on-miss`, `off` | `always` -- require explicit approval |
+| `tools.exec.strictInlineEval` | `true`, `false` | `true` |
+| `tools.exec.timeoutSec` | Seconds | `300` -- terminate runaway commands |
 
 #### SafeBins
 
@@ -194,17 +209,27 @@ SafeBins is a curated list of binaries the agent is allowed to execute directly 
 {
   "tools": {
     "web": {
-      "enabled": true,
-      "allowedDomains": [],         // Empty = allow all (restrict if possible)
-      "blockedDomains": [
-        "*.onion", "localhost", "127.0.0.1", "169.254.169.254",
-        "metadata.google.internal"
-      ],
-      "maxResponseSize": "5MB",
-      "timeout": 30
-    },
-    "browser": {
-      "enabled": false              // Disable headless browser unless needed
+      "search": {
+        "enabled": true,
+        "maxResults": 10,
+        "timeoutSeconds": 15
+      },
+      "fetch": {
+        "enabled": true,
+        "maxChars": 100000,
+        "maxRedirects": 3,
+        "timeoutSeconds": 20,
+        "useTrustedEnvProxy": false
+      }
+    }
+  },
+  "browser": {
+    "enabled": false,
+    "evaluateEnabled": false,
+    "noSandbox": false,
+    "ssrfPolicy": {
+      "dangerouslyAllowPrivateNetwork": false,
+      "allowedHostnames": []
     }
   }
 }
@@ -287,7 +312,7 @@ If elevated mode is required:
 grep -A3 '"elevated"' ~/.openclaw/openclaw.json
 
 # Via the CLI
-openclaw config get elevated.enabled
+openclaw config get tools.elevated.enabled
 # Should output: false
 
 # In a chat session, the /elevated command should return:
@@ -300,7 +325,7 @@ Users can toggle elevated mode within a chat session using `/elevated on` and `/
 
 ### 5. Docker Sandbox Configuration
 
-The Docker sandbox executes all agent tool calls inside an isolated container, preventing direct host access.
+The Docker sandbox executes agent tool calls inside an isolated container, preventing direct host access. **Important:** `openclaw.sh --with-sandbox` requires **rootless Docker** (`/run/user/<UID>/docker.sock`) and explicitly refuses to run if the OpenClaw user belongs to the system `docker` group (because membership in `docker` is equivalent to host `root`).
 
 #### Sandbox Modes
 
@@ -352,23 +377,29 @@ docker run --rm openclaw-sandbox:local cat /etc/os-release
 
 ```jsonc
 {
-  "sandbox": {
-    "mode": "all",
-    "image": "ghcr.io/openclaw/sandbox:latest",
-    "workspace": {
-      "mount": "rw",
-      "path": "~/.openclaw/workspace"
-    },
-    "docker": {
-      "network": "none",
-      "readOnlyRoot": true,
-      "capDrop": ["ALL"],
-      "securityOpt": ["no-new-privileges"],
-      "pidsLimit": 256,
-      "memory": "512m",
-      "cpus": "1.0",
-      "tmpfs": {
-        "/tmp": "rw,noexec,nosuid,size=64m"
+  "agents": {
+    "defaults": {
+      "workspace": "/home/<USER>/.openclaw/workspace",
+      "sandbox": {
+        "mode": "all",
+        "backend": "docker",
+        "scope": "session",
+        "workspaceAccess": "ro",
+        "docker": {
+          "network": "none",
+          "readOnlyRoot": true,
+          "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m"],
+          "capDrop": ["ALL"],
+          "pidsLimit": 256,
+          "memory": "512m",
+          "memorySwap": "512m",
+          "cpus": 0.5,
+          "user": "1000:1000"
+        },
+        "browser": {
+          "enabled": false,
+          "allowHostControl": false
+        }
       }
     }
   }
@@ -525,49 +556,35 @@ OpenClaw supports plugins (server-side extensions) and skills (agent-side capabi
 | High | Code execution plugins, deployment tools | Write access, shell execution |
 | Critical | Admin plugins, credential managers | Full system access, secret handling |
 
-#### Deny-by-Default Plugin Policy
+#### Deny-by-Default Plugin & Skill Policy
 
 ```jsonc
 {
   "plugins": {
-    "policy": "deny",
-    "allowed": [],
-    "autoUpdate": false,
-    "hooks": {
-      "enabled": false
-    }
-  }
-}
-```
-
-- `policy: "deny"` -- no plugins load unless explicitly listed in `allowed`
-- `autoUpdate: false` -- plugins do not update without manual review
-- `hooks.enabled: false` -- lifecycle hooks (onStart, onMessage, onCommand) are disabled
-
-#### ClawHub Auto-Pull Risk
-
-ClawHub is the community skill marketplace. When enabled, the agent can download and install skills at runtime. This is equivalent to `npm install <arbitrary-package>` from a chat message.
-
-**Risks of auto-pull:**
-- Malicious skills can execute arbitrary code
-- Supply chain attacks via typosquatting skill names
-- Skills can modify agent behavior and bypass tool restrictions
-- No code review before execution
-
-This script disables ClawHub auto-pull:
-
-```jsonc
-{
+    "enabled": true,
+    "allow": [],
+    "deny": [],
+    "bundledDiscovery": "allowlist"
+  },
   "skills": {
-    "clawhub": {
-      "autoPull": false,
-      "autoUpdate": false,
-      "trustLevel": "none"
-    },
-    "installed": []
+    "allowBundled": [],
+    "install": {
+      "nodeManager": "pnpm",
+      "allowUploadedArchives": false
+    }
+  },
+  "hooks": {
+    "enabled": false,
+    "allowRequestSessionKey": false,
+    "allowedSessionKeyPrefixes": [],
+    "allowedAgentIds": []
   }
 }
 ```
+
+- `plugins.allow: []` + `bundledDiscovery: "allowlist"` -- no plugins load unless explicitly allowlisted
+- `skills.allowBundled: []` + `allowUploadedArchives: false` -- blocks untrusted archive skill installs
+- `hooks.enabled: false` -- disables workspace/request hooks to prevent prompt injection
 
 #### Auditing Installed Plugins
 
@@ -628,10 +645,13 @@ Add custom patterns for application-specific secrets:
 {
   "logging": {
     "level": "info",
-    "redactSensitive": "on",
-    "customRedactPatterns": [
-      { "pattern": "xoxb-[0-9A-Za-z-]+", "label": "SLACK_TOKEN" },
-      { "pattern": "SG\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "label": "SENDGRID_KEY" }
+    "consoleLevel": "info",
+    "consoleStyle": "compact",
+    "redactSensitive": "tools",
+    "redactPatterns": [
+      "sk-[a-zA-Z0-9_-]{20,}",
+      "sk-ant-[a-zA-Z0-9_-]{20,}",
+      "xox[bpors]-[a-zA-Z0-9-]+"
     ]
   }
 }
@@ -641,31 +661,20 @@ Add custom patterns for application-specific secrets:
 
 #### Log Rotation
 
-```jsonc
-{
-  "logging": {
-    "rotation": {
-      "maxSize": "50MB",
-      "maxFiles": 10,
-      "compress": true
-    },
-    "path": "~/.openclaw/logs/"
-  }
-}
-```
-
-This script also installs a logrotate configuration:
+This script installs a per-user logrotate configuration using `copytruncate` (**never** `SIGUSR1`, because Node.js interprets `SIGUSR1` as activating the V8 inspector debugger!):
 
 ```
-# /etc/logrotate.d/openclaw
-/home/<USER>/.openclaw/logs/*.log {
-    weekly
-    rotate 8
+# /etc/logrotate.d/openclaw-<USER>
+/home/<USER>/.openclaw/logs/*.log
+/home/<USER>/.openclaw/agents/*/sessions/*.log {
+    daily
+    missingok
+    rotate 14
     compress
     delaycompress
-    missingok
     notifempty
-    create 640 <USER> <USER>
+    copytruncate
+    su <USER> <GROUP>
 }
 ```
 
@@ -673,33 +682,29 @@ This script also installs a logrotate configuration:
 
 | Path | Mode | Owner | Purpose |
 |------|------|-------|---------|
-| `~/.openclaw/` | `700` | `USER:USER` | Root config directory; no other users should read agent data |
-| `~/.openclaw/openclaw.json` | `600` | `USER:USER` | Main config; may reference credential paths |
-| `~/.openclaw/credentials/` | `700` | `USER:USER` | Credential storage directory |
-| `~/.openclaw/credentials/*.json` | `600` | `USER:USER` | Gateway tokens, API keys, platform credentials |
-| `~/.openclaw/agents/` | `700` | `USER:USER` | Agent state and memory |
-| `~/.openclaw/agents/*/sessions/` | `700` | `USER:USER` | Session history; contains full conversation logs |
-| `~/.openclaw/exec-approvals.json` | `600` | `USER:USER` | Cached command approval decisions; could be tampered to auto-approve |
-| `~/.openclaw/workspace/` | `700` | `USER:USER` | Agent workspace; sandboxed mount point |
-| `~/.openclaw/logs/` | `700` | `USER:USER` | Log files; may contain redacted but still sensitive context |
-| `~/.openclaw/logs/*.log` | `640` | `USER:USER` | Individual log files |
-| `~/.openclaw/plugins/` | `700` | `USER:USER` | Installed plugins; executable code |
-| `~/.openclaw/skills/` | `700` | `USER:USER` | Installed skills from ClawHub |
-| `~/.openclaw/sandbox/` | `750` | `USER:docker` | Sandbox Dockerfile and config |
+| `~/.openclaw/` | `700` | `USER:GROUP` | Root config directory; no other users should read agent data |
+| `~/.openclaw/openclaw.json` | `600` | `USER:GROUP` | Main config (references `${OPENCLAW_GATEWAY_TOKEN}`) |
+| `~/.openclaw/.env` | `600` | `USER:GROUP` | Gateway token and AI provider API keys (`EnvironmentFile`) |
+| `~/.openclaw/credentials/` | `700` | `USER:GROUP` | Credential storage directory |
+| `~/.openclaw/credentials/*` | `600` | `USER:GROUP` | Stored platform credentials |
+| `~/.openclaw/agents/*/sessions/` | `700` | `USER:GROUP` | Session history; contains full conversation logs |
+| `~/.openclaw/exec-approvals.json` | `600` | `USER:GROUP` | Cached command approval decisions |
+| `~/.openclaw/workspace/` | `700` | `USER:GROUP` | Agent workspace; git-tracked for rollback |
+| `~/.openclaw/logs/` | `750` | `USER:GROUP` | Log files directory |
 
-This script sets all permissions as listed above and verifies them on each run.
+> **Security Note:** Never add `<USER>` to the `docker` or `proc` groups (`docker` grants host-root container control; `proc` bypasses `hidepid=2`). When `--with-sandbox` is enabled, rootless Docker (`/run/user/<UID>/docker.sock`) is used instead.
 
 ### 11. systemd Service Hardening
 
-OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-gateway.service`). For system-wide deployment, a system service at `/etc/systemd/system/openclaw-gateway.service` is also supported.
+OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-gateway.service`) with a security drop-in (`~/.config/systemd/user/openclaw-gateway.service.d/hardening.conf`), managed from root via `systemctl --machine=<USER>@ --user`.
 
 #### systemd Directive Reference
 
 | Directive | Value | Purpose |
 |-----------|-------|---------|
 | `ProtectSystem` | `strict` | Read-only filesystem except explicit `ReadWritePaths` |
-| `ProtectHome` | `no` | Must be `no` -- OpenClaw config lives in `~/.openclaw/` |
-| `ReadWritePaths` | `~/.openclaw/` | Explicit write access to OpenClaw data directory |
+| `ProtectHome` | `read-only` | Home hierarchy is read-only outside `~/.openclaw` |
+| `ReadWritePaths` | `~/.openclaw` | Explicit write access to OpenClaw data directory |
 | `PrivateTmp` | `yes` | Isolated `/tmp` namespace |
 | `PrivateDevices` | `yes` | No access to physical devices |
 | `NoNewPrivileges` | `yes` | Cannot escalate privileges via SUID/SGID |
@@ -707,39 +712,35 @@ OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-
 | `ProtectKernelModules` | `yes` | Cannot load kernel modules |
 | `ProtectKernelLogs` | `yes` | No access to kernel log buffer |
 | `ProtectControlGroups` | `yes` | Read-only cgroup filesystem |
-| `ProtectClock` | `yes` | Cannot set system clock |
-| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX AF_NETLINK` | TCP, UDP, Unix sockets, netlink (needed by Node.js) |
-| `RestrictNamespaces` | `no` | Must be `no` if Docker sandbox is enabled (needs namespace creation) |
+| `ProtectHostname` | `yes` | Cannot change hostname |
+| `ProtectProc` / `ProcSubset` | `invisible` / `pid` | Hide other processes in `/proc` |
+| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX AF_NETLINK` | TCP, UDP, Unix sockets, netlink |
+| `RestrictNamespaces` | `yes` (or `~cgroup ipc` with `--with-sandbox`) | Block namespace creation (except rootless Docker namespaces when sandboxed) |
 | `RestrictRealtime` | `yes` | No realtime scheduling |
 | `RestrictSUIDSGID` | `yes` | Cannot create SUID/SGID files |
 | `MemoryDenyWriteExecute` | `no` | **Required for V8 JIT compilation** -- Node.js will crash without this |
 | `LockPersonality` | `yes` | Cannot change execution domain |
-| `SystemCallFilter` | `@system-service @network-io @process` | Allowlist of permitted syscall groups |
+| `SystemCallFilter` | `@system-service @network-io` (+ deny dangerous groups) | Allowlist of permitted syscall groups |
+| `SystemCallErrorNumber` | `EPERM` | Return `EPERM` instead of `SIGSYS` on filtered syscalls |
 | `SystemCallArchitectures` | `native` | No 32-bit compat syscalls |
 | `CapabilityBoundingSet` | (empty) | No Linux capabilities |
 | `UMask` | `077` | Restrictive file creation mask |
-| `LimitNOFILE` | `65535` | File descriptor limit for WebSocket connections |
+| `LimitNOFILE` | `4096` | File descriptor limit for WebSocket connections |
 | `LimitNPROC` | `512` | Process limit |
-| `Environment` | `NODE_ENV=production` | Production mode for Node.js |
-| `IPAddressAllow` | `localhost` | Only allow connections from loopback |
-| `IPAddressDeny` | `any` | Deny all other inbound connections |
+| `AppArmorProfile` | `-openclaw-gateway` | Binds only OpenClaw to the unattached AppArmor profile (when `--with-apparmor`) |
 
 #### Why MemoryDenyWriteExecute=no
 
 V8 (the JavaScript engine in Node.js) uses Just-In-Time (JIT) compilation, which requires memory pages to be simultaneously writable and executable. Setting `MemoryDenyWriteExecute=yes` would cause Node.js to crash on startup with a `SIGABRT`. This is a known and accepted limitation of running any V8-based process under systemd hardening.
 
-#### User Service vs System Service
+#### Managing the User Service
 
-| Aspect | User Service | System Service |
-|--------|-------------|----------------|
-| Unit path | `~/.config/systemd/user/` | `/etc/systemd/system/` |
-| Management | `systemctl --user` | `systemctl` (root) |
-| Starts on | User login (with `loginctl enable-linger`) | System boot |
-| Runs as | The logged-in user | Specified `User=` |
-| Permissions | User's permissions | Can set `DynamicUser=` |
-| Recommended for | Single-user, personal use | Server deployment, multi-user |
+`openclaw.sh` enables `loginctl enable-linger <USER>` so the user manager starts at boot without requiring an interactive login session:
 
-This script creates a user service by default. Pass `--system-service` to create a system service instead.
+```bash
+systemctl --machine=<USER>@ --user enable --now openclaw-gateway.service
+systemctl --machine=<USER>@ --user status openclaw-gateway.service
+```
 
 ### 12. Network Security
 
@@ -828,12 +829,11 @@ When `--with-apparmor` is specified, this script installs an AppArmor profile at
 | Network: inet/inet6 dgram | Yes (UDP for DNS) | |
 | Network: unix stream | Yes (Docker socket if sandbox enabled) | |
 | Network: raw | | Yes (no raw sockets) |
-| File read: `/usr/bin/node` | Yes | |
+| File read: `/usr/bin/node` and `$OPENCLAW_BIN` | Yes | |
 | File read: `/usr/lib/node_modules/` | Yes | |
-| File read: `~/.openclaw/` | Yes | |
-| File write: `~/.openclaw/logs/` | Yes | |
-| File write: `~/.openclaw/workspace/` | Yes | |
-| File write: `~/.openclaw/agents/*/sessions/` | Yes | |
+| File read/write: `~/.openclaw/**` | Yes (other `$HOME` dirs like `~/.config`, `~/.mozilla`, `~/.netrc` are not readable) | |
+| File write: `~/.openclaw/.env` and `~/.openclaw/credentials/**` | | Explicitly denied (`w` blocked even to owner) |
+| Rootless Docker (`--with-sandbox`): `/usr/bin/docker` & `/run/user/*/docker.sock` | Yes (`rix` / `owner rw`) | |
 | File read: `/etc/ssl/certs/` | Yes (TLS certificate store) | |
 | File read: `/etc/resolv.conf` | Yes (DNS resolution) | |
 | File: `/proc/self/**` | Read-only | |
@@ -902,8 +902,9 @@ mv ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.disabled
 #### Step 3: Rotate All Secrets
 
 ```bash
-# Regenerate gateway token
-openclaw auth rotate-token
+# Regenerate gateway token in ~/.openclaw/.env
+NEW_TOKEN=$(openssl rand -hex 32)
+sed -i "s/^OPENCLAW_GATEWAY_TOKEN=.*/OPENCLAW_GATEWAY_TOKEN=${NEW_TOKEN}/" ~/.openclaw/.env
 
 # Rotate API keys (manually via provider dashboards)
 # - Anthropic: https://console.anthropic.com/settings/keys
@@ -976,7 +977,7 @@ openclaw agent info --agent default
 | Agent responding to unseen messages | Channel message history vs session logs |
 | New or modified plugins/skills | `openclaw plugin list`, `openclaw skill list`, check modification times |
 | Unusual outbound DNS queries | `journalctl -u systemd-resolved` or DNS query logs |
-| Gateway token file modified | `stat ~/.openclaw/credentials/gateway-token.json` |
+| Gateway `.env` file modified | `stat ~/.openclaw/.env` |
 | Exec-approvals modified | `stat ~/.openclaw/exec-approvals.json`, review contents |
 
 ### 15. Security Audit
@@ -1044,19 +1045,23 @@ This script creates a systemd timer that runs the deep audit weekly:
 ```ini
 # ~/.config/systemd/user/openclaw-audit.service
 [Unit]
-Description=OpenClaw Security Audit
+Description=OpenClaw Weekly Security Audit
+After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/openclaw security audit --deep --filesystem --json
-StandardOutput=append:/home/%u/.openclaw/logs/audit.log
+EnvironmentFile=/home/<USER>/.openclaw/.env
+UMask=0077
+ExecStart=/home/<USER>/.local/bin/openclaw-security-audit.sh
+PrivateTmp=true
 
 # ~/.config/systemd/user/openclaw-audit.timer
 [Unit]
-Description=Weekly OpenClaw Security Audit
+Description=Weekly OpenClaw Security Audit Timer
 
 [Timer]
-OnCalendar=Sun 03:00:00
+OnCalendar=weekly
+RandomizedDelaySec=3600
 Persistent=true
 
 [Install]
@@ -1073,209 +1078,154 @@ systemctl --user list-timers | grep openclaw
 
 ### 16. Secret Scanning
 
-#### detect-secrets Setup
+The script installs a pure-Bash `pre-commit` hook at `~/.openclaw/workspace/.git/hooks/pre-commit` (avoiding PEP 668 `pip install` conflicts on Arch Linux). Before every workspace commit, it scans `git diff --cached` for:
 
-[detect-secrets](https://github.com/Yelp/detect-secrets) scans files for accidentally committed secrets.
+- Staged credential filenames (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`)
+- Anthropic (`sk-ant-...`), OpenAI (`sk-...`), GitHub (`ghp_...`, `github_pat_...`), GitLab (`glpat-...`), Slack (`xox[baprs]-...`), AWS (`AKIA...`), and Google (`AIza...`) keys
+- PEM/SSH/PGP private key headers (`-----BEGIN ... PRIVATE KEY-----`) and gateway tokens
 
-```bash
-# Install
-pip install detect-secrets
-
-# Create a baseline of existing secrets (to avoid false positives)
-cd ~/.openclaw/workspace
-detect-secrets scan > .secrets.baseline
-
-# Audit the baseline (mark known false positives)
-detect-secrets audit .secrets.baseline
-
-# Scan for new secrets against the baseline
-detect-secrets scan --baseline .secrets.baseline
-```
-
-#### Pre-Commit Hook
-
-Prevent secrets from being committed to workspace repositories:
+For full git history scanning, install `gitleaks` from the official Arch repositories — the installed `pre-commit` hook automatically invokes `gitleaks protect --staged` when present:
 
 ```bash
-# Install pre-commit
-pip install pre-commit
-
-# Create .pre-commit-config.yaml in workspace
-cat > ~/.openclaw/workspace/.pre-commit-config.yaml << 'EOF'
-repos:
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
-    hooks:
-      - id: detect-secrets
-        args: ['--baseline', '.secrets.baseline']
-EOF
-
-# Install the hook
-cd ~/.openclaw/workspace
-pre-commit install
+sudo pacman -S gitleaks
+cd ~/.openclaw/workspace && gitleaks detect --redact
 ```
-
-#### The .secrets.baseline File
-
-The baseline file records known secret locations so they are not flagged on every scan. It should be:
-- Committed to the repository (it contains file paths and line numbers, not the secrets themselves)
-- Audited regularly to ensure false positives are correctly marked
-- Updated when legitimate secrets are added to non-committed config files
 
 ### 17. Complete Hardened Configuration Reference
 
 ```jsonc
-// ~/.openclaw/openclaw.json -- Complete hardened configuration
-// All security-relevant settings are annotated below.
+// ~/.openclaw/openclaw.json -- Complete hardened configuration written by openclaw.sh
+// Secrets live in ~/.openclaw/.env (OPENCLAW_GATEWAY_TOKEN, API keys), never in JSON.
 {
-  // --- Gateway ---
   "gateway": {
-    "host": "127.0.0.1",              // CRITICAL: Bind to loopback only. Never use "0.0.0.0".
-    "port": 18789,                     // Default port. Change if running multiple instances.
+    "mode": "local",
+    "bind": "loopback",                // CRITICAL: Loopback (127.0.0.1) only.
+    "port": 18789,
     "auth": {
-      "type": "token",                // Use token auth, not "password" or "none".
-      "tokenFile": "~/.openclaw/credentials/gateway-token.json"
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}",
+      "rateLimit": {
+        "maxAttempts": 5,
+        "windowMs": 60000,
+        "lockoutMs": 300000,
+        "exemptLoopback": false
+      }
     },
-    "trustedProxies": [],              // Empty = no proxies trusted. Add IPs if behind nginx/Caddy.
-    "tls": {
-      "enabled": false,               // Not needed for loopback. Enable for LAN/tailnet bind.
-      "cert": "",
-      "key": ""
+    "controlUi": {
+      "allowInsecureAuth": false,
+      "dangerouslyDisableDeviceAuth": false
+    },
+    "trustedProxies": [],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": true
     }
   },
-
-  // --- Channels ---
-  "channels": {
-    "telegram": {
-      "enabled": false,                // Enable only the platforms you use.
-      "dmPolicy": "allowlist",         // CRITICAL: Never use "open".
-      "allowedUsers": [],              // Add exact Telegram user IDs.
-      "groupMentionOnly": true,        // Only respond when @mentioned in groups.
-      "allowedGroups": []              // Restrict to specific group IDs.
-    },
-    "discord": {
-      "enabled": false,
-      "dmPolicy": "allowlist",
-      "allowedUsers": [],
-      "mentionGating": true,
-      "allowedChannels": []
-    },
-    "whatsapp": { "enabled": false },
-    "slack": { "enabled": false },
-    "signal": { "enabled": false },
-    "matrix": { "enabled": false },
-    "teams": { "enabled": false },
-    "imessage": { "enabled": false }
-  },
-
-  // --- Sessions ---
-  "sessions": {
-    "scope": "per-channel-peer",       // Isolate sessions per user per channel.
-    "maxAge": "24h",                   // Auto-expire sessions after 24 hours.
-    "maxPerUser": 5                    // Limit concurrent sessions per user.
-  },
-
-  // --- Tools ---
-  "tools": {
-    "profile": "coding",              // minimal | messaging | coding | full
-    "web": {
-      "enabled": true,
-      "blockedDomains": [
-        "*.onion", "localhost", "127.0.0.1", "169.254.169.254",
-        "metadata.google.internal", "metadata.internal"
-      ],
-      "maxResponseSize": "5MB",
-      "timeout": 30
-    },
-    "browser": {
-      "enabled": false                 // Disable headless browser unless explicitly needed.
-    }
-  },
-
-  // --- Execution ---
-  "exec": {
-    "mode": "sandbox",                 // CRITICAL: Use "sandbox", not "host".
-    "policy": "denylist",              // Block known-dangerous commands.
-    "askMode": "new-only",             // Ask for confirmation on new commands.
-    "timeout": 120,                    // Kill commands after 2 minutes.
-    "maxConcurrent": 3,                // Limit parallel execution.
-    "safeBins": [
-      "ls", "cat", "head", "tail", "grep", "find", "wc",
-      "git", "node", "npm", "npx", "tsc",
-      "python3", "pip", "jq", "curl", "sed", "awk",
-      "mkdir", "cp", "mv", "touch"
-    ],
-    "denyPatterns": [
-      "rm -rf /", "rm -rf /*", "rm -rf ~", "mkfs", "dd if=",
-      ":(){ :|:& };:", "> /dev/sd", "chmod -R 777",
-      "curl | sh", "curl | bash", "wget | sh", "wget | bash",
-      "curl -d @/etc", "scp ~/.ssh", "tar czf - ~ | nc",
-      "cat ~/.ssh/id_", "cat /etc/shadow", "printenv",
-      "git push --force", "git reset --hard", "git clean -fdx"
-    ]
-  },
-
-  // --- Elevated Mode ---
-  "elevated": {
-    "enabled": false,                  // CRITICAL: Disable unless absolutely required.
-    "allowFrom": [],                   // NEVER use wildcards. Exact user IDs only.
-    "allowChannels": [],
-    "requireConfirmation": true,
-    "sessionTimeout": 300,
-    "auditLog": true
-  },
-
-  // --- Sandbox ---
-  "sandbox": {
-    "mode": "all",                     // Sandbox all sessions, not just non-main.
-    "image": "ghcr.io/openclaw/sandbox:latest",
-    "workspace": {
-      "mount": "rw",                  // "none" for maximum isolation, "ro" for read-only.
-      "path": "~/.openclaw/workspace"
-    },
-    "docker": {
-      "network": "none",              // No network access from sandbox.
-      "readOnlyRoot": true,
-      "capDrop": ["ALL"],
-      "securityOpt": ["no-new-privileges"],
-      "pidsLimit": 256,
-      "memory": "512m",
-      "cpus": "1.0",
-      "tmpfs": {
-        "/tmp": "rw,noexec,nosuid,size=64m"
+  "agents": {
+    "defaults": {
+      "workspace": "/home/<USER>/.openclaw/workspace",
+      "sandbox": {
+        "mode": "all",                 // "off" when run without --with-sandbox
+        "backend": "docker",
+        "scope": "session",
+        "workspaceAccess": "ro",
+        "docker": {
+          "network": "none",
+          "readOnlyRoot": true,
+          "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m"],
+          "capDrop": ["ALL"],
+          "pidsLimit": 256,
+          "memory": "512m",
+          "memorySwap": "512m",
+          "cpus": 0.5,
+          "user": "1000:1000"
+        },
+        "browser": {
+          "enabled": false,
+          "allowHostControl": false
+        }
       }
     }
   },
-
-  // --- Plugins & Skills ---
-  "plugins": {
-    "policy": "deny",                 // Deny-by-default. Explicitly allow trusted plugins.
-    "allowed": [],
-    "autoUpdate": false,
-    "hooks": {
-      "enabled": false                 // Disable lifecycle hooks.
+  "tools": {
+    "profile": "messaging",
+    "deny": ["exec", "process", "apply_patch", "browser"],
+    "exec": {
+      "host": "sandbox",
+      "security": "allowlist",
+      "ask": "always",
+      "safeBins": [],
+      "strictInlineEval": true,
+      "timeoutSec": 300
+    },
+    "elevated": {
+      "enabled": false,
+      "allowFrom": {}
+    },
+    "web": {
+      "search": { "enabled": true, "maxResults": 10, "timeoutSeconds": 15 },
+      "fetch": {
+        "enabled": true,
+        "maxChars": 100000,
+        "maxRedirects": 3,
+        "timeoutSeconds": 20,
+        "useTrustedEnvProxy": false
+      }
+    },
+    "message": {
+      "crossContext": {
+        "allowWithinProvider": false,
+        "allowAcrossProviders": false,
+        "marker": { "enabled": true }
+      }
+    },
+    "sandbox": {
+      "tools": {
+        "deny": ["browser", "nodes", "cron", "gateway"]
+      }
     }
   },
-  "skills": {
-    "clawhub": {
-      "autoPull": false,               // Do not auto-download skills from ClawHub.
-      "autoUpdate": false,
-      "trustLevel": "none"
-    },
-    "installed": []
+  "browser": {
+    "enabled": false,
+    "evaluateEnabled": false,
+    "noSandbox": false,
+    "ssrfPolicy": {
+      "dangerouslyAllowPrivateNetwork": false,
+      "allowedHostnames": []
+    }
   },
-
-  // --- Logging ---
+  "plugins": {
+    "enabled": true,
+    "allow": [],
+    "deny": [],
+    "bundledDiscovery": "allowlist"
+  },
+  "skills": {
+    "allowBundled": [],
+    "install": {
+      "nodeManager": "pnpm",
+      "allowUploadedArchives": false
+    }
+  },
+  "hooks": {
+    "enabled": false,
+    "allowRequestSessionKey": false,
+    "allowedSessionKeyPrefixes": [],
+    "allowedAgentIds": []
+  },
   "logging": {
-    "level": "info",                   // "info" for production. Never "debug".
-    "redactSensitive": "on",           // CRITICAL: Never set to "off".
-    "customRedactPatterns": [],
-    "rotation": {
-      "maxSize": "50MB",
-      "maxFiles": 10,
-      "compress": true
-    },
-    "path": "~/.openclaw/logs/"
+    "level": "info",
+    "consoleLevel": "info",
+    "consoleStyle": "compact",
+    "redactSensitive": "tools",
+    "redactPatterns": [
+      "sk-[a-zA-Z0-9_-]{20,}",
+      "sk-ant-[a-zA-Z0-9_-]{20,}",
+      "Bearer\\s+[a-zA-Z0-9._-]+",
+      "ghp_[a-zA-Z0-9]{36,}",
+      "glpat-[a-zA-Z0-9_-]{20,}",
+      "xox[bpors]-[a-zA-Z0-9-]+"
+    ]
   }
 }
 ```
@@ -1337,25 +1287,21 @@ aa-status | grep openclaw
 nft list table inet openclaw
 
 # --- Configuration ---
-# Verify gateway bind address
-openclaw config get gateway.host
-# Expected: 127.0.0.1
-
-# Verify DM policy
-openclaw config get channels.telegram.dmPolicy
-# Expected: allowlist
+# Verify gateway bind mode
+openclaw config get gateway.bind
+# Expected: loopback
 
 # Verify elevated mode is disabled
-openclaw config get elevated.enabled
+openclaw config get tools.elevated.enabled
 # Expected: false
 
-# Verify sandbox mode
-openclaw config get sandbox.mode
+# Verify sandbox mode (when --with-sandbox was used)
+openclaw config get agents.defaults.sandbox.mode
 # Expected: all
 
 # Verify log redaction is enabled
 openclaw config get logging.redactSensitive
-# Expected: on
+# Expected: tools
 ```
 
 ### 19. CVEs and Known Vulnerabilities
@@ -1380,7 +1326,7 @@ openclaw config get logging.redactSensitive
 ```bash
 # Check for vulnerable dependencies
 cd /usr/lib/node_modules/openclaw
-npm audit --production
+npm audit --omit=dev
 
 # Update dependencies
 npm update
@@ -1409,13 +1355,17 @@ pacman -Syu nodejs
 | Path | Description |
 |------|-------------|
 | `~/.openclaw/openclaw.json` | Hardened main configuration |
-| `~/.openclaw/credentials/gateway-token.json` | Generated gateway authentication token |
+| `~/.openclaw/.env` | Gateway authentication token (`OPENCLAW_GATEWAY_TOKEN`) and API keys (`0600`) |
 | `~/.config/systemd/user/openclaw-gateway.service` | Hardened systemd user service |
-| `~/.config/systemd/user/openclaw-audit.service` | Security audit service |
+| `~/.config/systemd/user/openclaw-gateway.service.d/hardening.conf` | systemd sandboxing drop-in |
+| `~/.config/systemd/user/openclaw-audit.service` | Security audit service (`EnvironmentFile=~/.openclaw/.env`, `UMask=0077`) |
 | `~/.config/systemd/user/openclaw-audit.timer` | Weekly audit timer |
+| `~/.local/bin/openclaw-security-audit.sh` | Automated audit wrapper script |
+| `~/.openclaw/EXEC_DENYLIST.md` | Dangerous command denylist reference |
+| `~/.openclaw/workspace/.git/hooks/pre-commit` | Pure-Bash secret-scanning pre-commit hook |
 | `/etc/apparmor.d/openclaw-gateway` | AppArmor confinement profile (if `--with-apparmor`) |
 | `/etc/nftables.d/openclaw.conf` | nftables firewall rules (if `--with-firewall`) |
-| `/etc/logrotate.d/openclaw` | Log rotation configuration |
+| `/etc/logrotate.d/openclaw-<USER>` | Per-user log rotation configuration (`copytruncate`) |
 
 ## References
 

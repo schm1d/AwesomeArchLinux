@@ -17,9 +17,11 @@ CLAUDE.md
 *.bak
 *.bak.*
 
-# OS junk
+# OS / runtime junk
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
 
 # IDE settings
 .vscode/

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Description: This script configures a client machine to connect to a hardened SSH server.
 # It generates an SSH key pair, configures SSH client settings, and assists in copying
@@ -8,15 +8,16 @@
 
 
 set -euo pipefail
+umask 022
 
 # Set up the variables
 BBlue='\033[1;34m'
 NC='\033[0m'
 
 # Variables (adjust as needed)
-SSH_PORT=22                  # Replace with the SSH port of the server if different
-SERVER_IP="your_server_ip"   # Replace with your server's IP address or hostname
-USERNAME="$USER"             # Replace with your username on the server if different
+SSH_PORT=22                        # Replace with the SSH port of the server if different
+SERVER_IP="your_server_ip"         # Replace with your server's IP address or hostname
+USERNAME="${USER:-$(id -un)}"      # Replace with your username on the server if different
 CONFIG_FILE="$HOME/.ssh/config"
 KEY_TYPE="ed25519"
 KEY_FILE="$HOME/.ssh/id_$KEY_TYPE"
@@ -68,8 +69,8 @@ configure_ssh_client() {
     echo -e "${BBlue}Configuring SSH client settings in $CONFIG_FILE...${NC}"
 
     # Create the config file if it doesn't exist
-    mkdir -p "$HOME/.ssh"
-    touch "$CONFIG_FILE"
+    install -d -m 0700 "$HOME/.ssh"
+    [[ -f "$CONFIG_FILE" ]] || ( umask 077 && : > "$CONFIG_FILE" )
 
     # Backup existing config if not already backed up
     if [ ! -f "${CONFIG_FILE}.bak" ]; then
@@ -80,8 +81,8 @@ configure_ssh_client() {
     # Use awk to handle the last-block edge case (sed /^Host myserver$/,/^Host /d
     # deletes the last block if no subsequent Host block exists).
     awk '
-        /^Host myserver$/ { skip=1; next }
-        /^Host / && skip { skip=0 }
+        /^[[:space:]]*Host[[:space:]]+myserver([[:space:]]|$)/ { skip=1; next }
+        /^[[:space:]]*(Host|Match)[[:space:]]+/ && skip { skip=0 }
         !skip
     ' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
@@ -119,6 +120,10 @@ test_connection() {
 }
 
 # Main script execution
+if [[ "$(id -u)" -eq 0 && "${1:-}" != "--allow-root" ]]; then
+    echo "ERROR: Run ssh_client.sh as your normal user (without sudo), or pass --allow-root to configure /root/.ssh." >&2
+    exit 1
+fi
 
 # Prompt to adjust variables
 echo -e "${BBlue}Before proceeding, ensure you've updated the script variables with your server's information.${NC}"
@@ -144,12 +149,14 @@ read -r -p "Do you want to test the SSH connection now? (y/n): " TEST_CONN
 if [ "$TEST_CONN" == "y" ]; then
     test_connection
 else
-    echo -e "${BBlue}You can connect to the server using 'ssh <TARGET_SERVER>'${NC}"
+    echo -e "${BBlue}You can connect to the server using 'ssh myserver'${NC}"
 fi
 
 # Set correct permissions on the client SSH directory
+LOCAL_USER="${USER:-$(id -un)}"
+LOCAL_GROUP="$(id -gn "$LOCAL_USER")"
 chmod 700 "$HOME/.ssh"
 chmod 600 "$KEY_FILE" 2>/dev/null || true
 chmod 644 "$KEY_FILE.pub" 2>/dev/null || true
 chmod 600 "$CONFIG_FILE"
-chown -R "$USER:$USER" "$HOME/.ssh"
+chown -R "$LOCAL_USER:$LOCAL_GROUP" "$HOME/.ssh"

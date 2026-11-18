@@ -4,7 +4,9 @@
 # base ruleset; feature scripts may only add or replace their marked blocks.
 
 aal_nft_persist_block() (
-    local block_id="$1"
+    set -euo pipefail
+
+    local block_id="${1:-}"
     local config="${AAL_NFT_CONFIG:-/etc/nftables.conf}"
     local begin_marker end_marker body candidate backup begin_count end_count
 
@@ -30,16 +32,16 @@ aal_nft_persist_block() (
         return 1
     fi
     umask 077
+    body=""
+    candidate=""
+    trap 'rm -f -- "${body:-}" "${candidate:-}"' EXIT
     body=$(mktemp "$(dirname "$config")/.${block_id}.body.XXXXXX") || return 1
-    candidate=$(mktemp "$(dirname "$config")/.nftables.conf.XXXXXX") || {
-        rm -f -- "$body"
-        return 1
-    }
+    candidate=$(mktemp "$(dirname "$config")/.nftables.conf.XXXXXX") || return 1
     cat > "$body"
-    awk -v begin="$begin_marker" -v end="$end_marker" '
-        $0 == begin { managed = 1; next }
-        $0 == end   { managed = 0; next }
-        !managed    { print }
+    AAL_BEGIN="$begin_marker" AAL_END="$end_marker" awk '
+        $0 == ENVIRON["AAL_BEGIN"] { managed = 1; next }
+        $0 == ENVIRON["AAL_END"]   { managed = 0; next }
+        !managed                   { print }
     ' "$config" > "$candidate"
     {
         printf '\n%s\n' "$begin_marker"
@@ -58,6 +60,7 @@ aal_nft_persist_block() (
         return 1
     }
     cp -a -- "$config" "$backup"
+    chmod 0600 "$backup"
     install -o root -g root -m 0644 "$candidate" "$config"
     rm -f -- "$body" "$candidate"
     printf 'Persisted nftables block %s (backup: %s).\n' "$block_id" "$backup"
@@ -72,8 +75,8 @@ aal_nft_remove_live_rules() {
         nft delete rule "$family" "$table" "$chain" handle "$handle"
     done < <(
         nft -a list chain "$family" "$table" "$chain" 2>/dev/null |
-            awk -v marker="comment \"${rule_comment}\"" '
-                index($0, marker) {
+            AAL_MARKER="comment \"${rule_comment}\"" awk '
+                index($0, ENVIRON["AAL_MARKER"]) {
                     for (i = 1; i <= NF; i++) {
                         if ($i == "handle") print $(i + 1)
                     }

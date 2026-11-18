@@ -22,7 +22,7 @@
 #                - Workspace git initialization for rollback
 #                - Security audit automation via systemd timer
 #                - Dangerous command denylist documentation
-#                - Secret scanning with detect-secrets
+#                - Pure-Bash secret scanning pre-commit hook (optional gitleaks)
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
@@ -62,14 +62,15 @@
 #   23. Runs openclaw security audit if CLI is available
 #   24. Creates a weekly security audit systemd timer
 #   25. Documents dangerous commands that must never be allowlisted
-#   26. Installs and configures detect-secrets for secret scanning
+#   26. Installs a pure-Bash secret-scanning git pre-commit hook (and uses gitleaks if installed)
 #   27. Prints comprehensive security summary and next steps
 # =============================================================================
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
 
 # --- Colors ---
@@ -116,10 +117,11 @@ EOF
 }
 
 # --- Parse Arguments ---
+need_arg() { [[ $# -ge 2 && -n "${2:-}" ]] || err "Option $1 requires a value"; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -u)              OC_USER="$2"; shift 2 ;;
-        -p)              OC_PORT="$2"; shift 2 ;;
+        -u)              need_arg "$@"; OC_USER="$2"; shift 2 ;;
+        -p)              need_arg "$@"; OC_PORT="$2"; shift 2 ;;
         --with-sandbox)  WITH_SANDBOX=true; shift ;;
         --with-firewall) WITH_FIREWALL=true; shift ;;
         --with-apparmor) WITH_APPARMOR=true; shift ;;
@@ -132,6 +134,7 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$OC_USER" ]] || err "Username is required (-u USERNAME)"
 [[ "$OC_USER" != "root" ]] || err "OpenClaw must NOT run as root. Specify a non-root user."
+[[ "$OC_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || err "Invalid username: $OC_USER"
 
 # Validate port is numeric
 if ! [[ "$OC_PORT" =~ ^[0-9]+$ ]] || [[ "$OC_PORT" -lt 1 ]] || [[ "$OC_PORT" -gt 65535 ]]; then
@@ -139,10 +142,14 @@ if ! [[ "$OC_PORT" =~ ^[0-9]+$ ]] || [[ "$OC_PORT" -lt 1 ]] || [[ "$OC_PORT" -gt
 fi
 
 # Redirect output to logfile as well
+install -d -m 0755 /var/log
+( umask 077 && : > "$LOGFILE" )
+chmod 0600 "$LOGFILE"
 exec > >(tee -a "$LOGFILE") 2>&1
 
-# --- Derived paths ---
-OC_HOME="/home/$OC_USER"
+# --- Resolve home directory (refined via getent after user creation if needed) ---
+OC_HOME=$(getent passwd "$OC_USER" | cut -d: -f6 || true)
+OC_HOME="${OC_HOME:-/home/$OC_USER}"
 OC_DIR="$OC_HOME/.openclaw"
 OC_CONFIG="$OC_DIR/openclaw.json"
 OC_WORKSPACE="$OC_DIR/workspace"
@@ -192,8 +199,14 @@ NODE_VER_RAW=$(node --version 2>/dev/null)
 NODE_VER="${NODE_VER_RAW#v}"
 info "Detected Node.js version: $NODE_VER_RAW"
 
-# Parse major.minor.patch
-IFS='.' read -r NODE_MAJOR NODE_MINOR NODE_PATCH <<< "$NODE_VER"
+# Parse major.minor.patch (strip any pre-release/pkgrel suffix)
+IFS='.' read -r NODE_MAJOR NODE_MINOR NODE_PATCH _ <<< "$NODE_VER"
+NODE_MAJOR="${NODE_MAJOR%%[^0-9]*}"
+NODE_MINOR="${NODE_MINOR%%[^0-9]*}"
+NODE_PATCH="${NODE_PATCH%%[^0-9]*}"
+NODE_MAJOR="${NODE_MAJOR:-0}"
+NODE_MINOR="${NODE_MINOR:-0}"
+NODE_PATCH="${NODE_PATCH:-0}"
 
 if [[ "$NODE_MAJOR" -lt 22 ]]; then
     err "Node.js $NODE_VER_RAW is too old. OpenClaw requires >= 22.12.0 (CVE patches). Upgrade: pacman -Syu nodejs"
@@ -244,6 +257,17 @@ else
     msg "Created system user: $OC_USER"
 fi
 USER_UID=$(id -u "$OC_USER")
+OC_GROUP=$(id -gn "$OC_USER")
+OC_HOME=$(getent passwd "$OC_USER" | cut -d: -f6)
+[[ -n "$OC_HOME" && -d "$OC_HOME" ]] || err "Could not resolve home directory for user '$OC_USER'"
+OC_DIR="$OC_HOME/.openclaw"
+OC_CONFIG="$OC_DIR/openclaw.json"
+OC_WORKSPACE="$OC_DIR/workspace"
+OC_CREDENTIALS="$OC_DIR/credentials"
+OC_ENV_FILE="$OC_DIR/.env"
+# shellcheck disable=SC2034  # Available for session cleanup functions
+OC_SESSIONS_GLOB="$OC_DIR/agents/*/sessions"
+OC_EXEC_APPROVALS="$OC_DIR/exec-approvals.json"
 
 # Resolve the CLI before changing any OpenClaw state. The generated config is
 # validated with this exact binary before it replaces the live configuration.
@@ -281,8 +305,7 @@ if [[ "$WITH_SANDBOX" == true ]]; then
 fi
 
 # Ensure OpenClaw directories exist
-mkdir -p "$OC_DIR" "$OC_WORKSPACE" "$OC_CREDENTIALS"
-chown "$OC_USER:$OC_USER" "$OC_DIR" "$OC_WORKSPACE" "$OC_CREDENTIALS"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0700 "$OC_DIR" "$OC_WORKSPACE" "$OC_CREDENTIALS"
 
 echo
 
@@ -293,14 +316,28 @@ echo
 echo -e "${C_BLUE}--- Phase 2: Gateway Hardening ---${C_NC}"
 
 # -----------------------------------------------------------------------------
-# Step 3: Generate gateway authentication token
+# Step 3: Generate or preserve gateway authentication token
 # -----------------------------------------------------------------------------
 
-msg "Step 3: Generating gateway authentication token..."
+msg "Step 3: Configuring gateway authentication token..."
 
-GATEWAY_TOKEN=$(openssl rand -hex 32)
-info "Generated 256-bit cryptographic token for gateway authentication"
-info "Token will be stored in $OC_ENV_FILE (never in openclaw.json)"
+GATEWAY_TOKEN=""
+if [[ -f "$OC_ENV_FILE" ]]; then
+    GATEWAY_TOKEN=$(awk -F= '/^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/ {
+        sub(/^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/, "")
+        gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "")
+        print
+        exit
+    }' "$OC_ENV_FILE" 2>/dev/null || true)
+fi
+
+if [[ -n "$GATEWAY_TOKEN" && "$GATEWAY_TOKEN" != REPLACE_* ]]; then
+    info "Preserving existing gateway authentication token from $OC_ENV_FILE"
+else
+    GATEWAY_TOKEN=$(openssl rand -hex 32)
+    info "Generated 256-bit cryptographic token for gateway authentication"
+    info "Token will be stored in $OC_ENV_FILE (never in openclaw.json)"
+fi
 
 # -----------------------------------------------------------------------------
 # Step 4: Write hardened openclaw.json
@@ -309,7 +346,7 @@ info "Token will be stored in $OC_ENV_FILE (never in openclaw.json)"
 msg "Step 4: Writing hardened openclaw.json..."
 
 EXEC_HOST_MODE="sandbox"
-OC_CONFIG_TMP=$(mktemp "$OC_DIR/.openclaw.json.XXXXXX")
+OC_CONFIG_TMP=$(umask 077; mktemp "$OC_DIR/.openclaw.json.XXXXXX")
 chmod 600 "$OC_CONFIG_TMP"
 
 cat > "$OC_CONFIG_TMP" <<OPENCLAW_JSON_HEAD
@@ -471,7 +508,12 @@ cat >> "$OC_CONFIG_TMP" <<'OPENCLAW_JSON_TAIL'
 }
 OPENCLAW_JSON_TAIL
 
-if ! HOME="$OC_HOME" \
+# NEVER execute $OPENCLAW_BIN as root (it may reside under $OC_HOME/.local/bin).
+chown "$OC_USER:$OC_GROUP" "$OC_CONFIG_TMP"
+chmod 0600 "$OC_CONFIG_TMP"
+
+if ! runuser -u "$OC_USER" -- env \
+    HOME="$OC_HOME" \
     OPENCLAW_CONFIG_PATH="$OC_CONFIG_TMP" \
     OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
     "$OPENCLAW_BIN" config validate; then
@@ -483,12 +525,12 @@ fi
 if [[ -f "$OC_CONFIG" ]]; then
     BACKUP_NAME="$OC_CONFIG.backup.$(date +%Y%m%d-%H%M%S)"
     cp -a "$OC_CONFIG" "$BACKUP_NAME"
-    chown "$OC_USER:$OC_USER" "$BACKUP_NAME"
+    chown "$OC_USER:$OC_GROUP" "$BACKUP_NAME"
     chmod 600 "$BACKUP_NAME"
     msg "Backed up existing config to: $BACKUP_NAME"
 fi
 
-install -o "$OC_USER" -g "$OC_USER" -m 0600 "$OC_CONFIG_TMP" "$OC_CONFIG"
+install -o "$OC_USER" -g "$OC_GROUP" -m 0600 "$OC_CONFIG_TMP" "$OC_CONFIG"
 rm -f -- "$OC_CONFIG_TMP"
 msg "Validated hardened openclaw.json installed at: $OC_CONFIG (mode 600)"
 
@@ -523,7 +565,7 @@ echo -e "${C_BLUE}--- Phase 4: Tool Policy & Execution Security ---${C_NC}"
 # -----------------------------------------------------------------------------
 
 msg "Step 6: Tool profile set to 'messaging' (minimal)"
-info "The 'messaging' profile allows AI to read -r and reply to messages"
+info "The 'messaging' profile allows AI to read and reply to messages"
 info "Shell execution, file writes, and code execution are blocked by default"
 
 # -----------------------------------------------------------------------------
@@ -663,12 +705,26 @@ info "  - Telemetry, crash reports, and analytics: disabled"
 msg "Step 15: Setting up log rotation..."
 
 OC_LOG_DIR="$OC_DIR/logs"
-mkdir -p "$OC_LOG_DIR"
-chown "$OC_USER:$OC_USER" "$OC_LOG_DIR"
-chmod 750 "$OC_LOG_DIR"
+LOGROTATE_CONF="/etc/logrotate.d/openclaw-$OC_USER"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0750 "$OC_LOG_DIR"
+install -d -m 0755 /etc/logrotate.d
 
-cat > "/etc/logrotate.d/openclaw" <<EOF
-# Log rotation for OpenClaw
+# Clean up legacy shared /etc/logrotate.d/openclaw when upgrading this user
+# (or when no other user's .openclaw directory is referenced).
+if [[ -f /etc/logrotate.d/openclaw ]]; then
+    if grep -qF "$OC_DIR" /etc/logrotate.d/openclaw 2>/dev/null || \
+       ! grep -qE '/\.openclaw/' /etc/logrotate.d/openclaw 2>/dev/null; then
+        rm -f /etc/logrotate.d/openclaw
+        info "Removed legacy /etc/logrotate.d/openclaw"
+    else
+        warn "Legacy /etc/logrotate.d/openclaw references another user; re-run openclaw.sh for that user to migrate"
+    fi
+fi
+
+# NEVER send SIGUSR1 to a Node.js process: Node.js interprets SIGUSR1 as
+# "activate V8 inspector debugger", opening a remote debugging port!
+cat > "$LOGROTATE_CONF" <<EOF
+# Log rotation for OpenClaw ($OC_USER)
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 
 $OC_LOG_DIR/*.log
@@ -679,16 +735,13 @@ $OC_DIR/agents/*/sessions/*.log {
     compress
     delaycompress
     notifempty
-    create 640 $OC_USER $OC_USER
-    sharedscripts
-    postrotate
-        # Signal OpenClaw to reopen log files if running
-        /usr/bin/killall -USR1 openclaw 2>/dev/null || true
-    endscript
+    copytruncate
+    su $OC_USER $OC_GROUP
 }
 EOF
+chmod 0644 "$LOGROTATE_CONF"
 
-msg "Logrotate config created: /etc/logrotate.d/openclaw"
+msg "Logrotate config created: $LOGROTATE_CONF"
 
 echo
 
@@ -706,34 +759,34 @@ msg "Step 16: Locking down file permissions..."
 
 # Main OpenClaw directory — owner only
 chmod 700 "$OC_DIR"
-chown "$OC_USER:$OC_USER" "$OC_DIR"
+chown "$OC_USER:$OC_GROUP" "$OC_DIR"
 info "  $OC_DIR -> 700"
 
 # Config file — owner read/write only
 if [[ -f "$OC_CONFIG" ]]; then
     chmod 600 "$OC_CONFIG"
-    chown "$OC_USER:$OC_USER" "$OC_CONFIG"
+    chown "$OC_USER:$OC_GROUP" "$OC_CONFIG"
     info "  $OC_CONFIG -> 600"
 fi
 
 # Credentials directory — owner only
 mkdir -p "$OC_CREDENTIALS"
 chmod 700 "$OC_CREDENTIALS"
-chown "$OC_USER:$OC_USER" "$OC_CREDENTIALS"
+chown "$OC_USER:$OC_GROUP" "$OC_CREDENTIALS"
 info "  $OC_CREDENTIALS/ -> 700"
 
 # Lock down all files in credentials directory
 if [[ -d "$OC_CREDENTIALS" ]]; then
     find "$OC_CREDENTIALS" -type f -exec chmod 600 {} \;
-    find "$OC_CREDENTIALS" -type f -exec chown "$OC_USER:$OC_USER" {} \;
+    find "$OC_CREDENTIALS" -type f -exec chown "$OC_USER:$OC_GROUP" {} \;
     info "  $OC_CREDENTIALS/* -> 600"
 fi
 
 # Session directories — owner only (contain conversation transcripts)
-for sessions_dir in $OC_DIR/agents/*/sessions; do
+for sessions_dir in "$OC_DIR"/agents/*/sessions; do
     if [[ -d "$sessions_dir" ]]; then
         chmod 700 "$sessions_dir"
-        chown "$OC_USER:$OC_USER" "$sessions_dir"
+        chown "$OC_USER:$OC_GROUP" "$sessions_dir"
         info "  $sessions_dir -> 700"
     fi
 done
@@ -741,47 +794,58 @@ done
 # Exec approvals file
 if [[ -f "$OC_EXEC_APPROVALS" ]]; then
     chmod 600 "$OC_EXEC_APPROVALS"
-    chown "$OC_USER:$OC_USER" "$OC_EXEC_APPROVALS"
+    chown "$OC_USER:$OC_GROUP" "$OC_EXEC_APPROVALS"
     info "  $OC_EXEC_APPROVALS -> 600"
 fi
 
 # Workspace — owner rwx, group/other none
 chmod 700 "$OC_WORKSPACE"
-chown "$OC_USER:$OC_USER" "$OC_WORKSPACE"
+chown "$OC_USER:$OC_GROUP" "$OC_WORKSPACE"
 info "  $OC_WORKSPACE/ -> 700"
 
 # Log directory
 chmod 750 "$OC_LOG_DIR"
-chown "$OC_USER:$OC_USER" "$OC_LOG_DIR"
+chown "$OC_USER:$OC_GROUP" "$OC_LOG_DIR"
 info "  $OC_LOG_DIR/ -> 750"
 
 # Recursively fix ownership of entire .openclaw tree
-chown -R "$OC_USER:$OC_USER" "$OC_DIR"
+chown -R "$OC_USER:$OC_GROUP" "$OC_DIR"
 
 msg "File permissions locked down"
 
 # -----------------------------------------------------------------------------
-# Step 17: Create secure environment file
+# Step 17: Create or preserve secure environment file
 # -----------------------------------------------------------------------------
 
-msg "Step 17: Creating secure environment file..."
+msg "Step 17: Configuring secure environment file..."
 
-# Back up existing env file
 if [[ -f "$OC_ENV_FILE" ]]; then
-    BACKUP_ENV="$OC_ENV_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-    cp -a "$OC_ENV_FILE" "$BACKUP_ENV"
-    chown "$OC_USER:$OC_USER" "$BACKUP_ENV"
-    chmod 600 "$BACKUP_ENV"
-    msg "Backed up existing .env to: $BACKUP_ENV"
-fi
+    if grep -qE '^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=' "$OC_ENV_FILE"; then
+        sed -i "s|^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=.*|OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN|" "$OC_ENV_FILE"
+    else
+        printf '\nOPENCLAW_GATEWAY_TOKEN=%s\n' "$GATEWAY_TOKEN" >> "$OC_ENV_FILE"
+    fi
+    if [[ "$WITH_SANDBOX" == true ]] && ! grep -qE '^[[:space:]]*DOCKER_HOST=' "$OC_ENV_FILE"; then
+        cat >> "$OC_ENV_FILE" <<EOF
 
-cat > "$OC_ENV_FILE" <<EOF
+# --- Rootless Docker sandbox ---
+DOCKER_HOST=unix://$SANDBOX_DOCKER_SOCKET
+OPENCLAW_DOCKER_SOCKET=$SANDBOX_DOCKER_SOCKET
+EOF
+    fi
+    chown "$OC_USER:$OC_GROUP" "$OC_ENV_FILE"
+    chmod 600 "$OC_ENV_FILE"
+    msg "Preserved existing secure environment file: $OC_ENV_FILE (mode 600)"
+else
+    (
+        umask 077
+        cat > "$OC_ENV_FILE" <<EOF
 # =============================================================================
 # OpenClaw secure environment file
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 #
 # WARNING: This file contains sensitive credentials. It is chmod 600 and
-#          owned by $OC_USER:$OC_USER. NEVER commit this file to version control.
+#          owned by $OC_USER:$OC_GROUP. NEVER commit this file to version control.
 #          NEVER store secrets in openclaw.json — use this file instead.
 # =============================================================================
 
@@ -810,20 +874,20 @@ OPENCLAW_LOG_LEVEL=info
 OPENCLAW_TELEMETRY=false
 EOF
 
-if [[ "$WITH_SANDBOX" == true ]]; then
-    cat >> "$OC_ENV_FILE" <<EOF
+        if [[ "$WITH_SANDBOX" == true ]]; then
+            cat >> "$OC_ENV_FILE" <<EOF
 
 # --- Rootless Docker sandbox ---
 DOCKER_HOST=unix://$SANDBOX_DOCKER_SOCKET
 OPENCLAW_DOCKER_SOCKET=$SANDBOX_DOCKER_SOCKET
 EOF
+        fi
+    )
+    chown "$OC_USER:$OC_GROUP" "$OC_ENV_FILE"
+    chmod 600 "$OC_ENV_FILE"
+    msg "Secure environment file created: $OC_ENV_FILE (mode 600)"
+    warn "IMPORTANT: Edit $OC_ENV_FILE to add your actual API keys"
 fi
-
-# Set strict permissions using install for atomic creation
-chown "$OC_USER:$OC_USER" "$OC_ENV_FILE"
-chmod 600 "$OC_ENV_FILE"
-msg "Secure environment file created: $OC_ENV_FILE (mode 600)"
-warn "IMPORTANT: Edit $OC_ENV_FILE to add your actual API keys"
 
 echo
 
@@ -841,8 +905,7 @@ msg "Step 18: Creating hardened systemd user service..."
 
 # Create user systemd directory
 SYSTEMD_USER_DIR="$OC_HOME/.config/systemd/user"
-mkdir -p "$SYSTEMD_USER_DIR"
-chown -R "$OC_USER:$OC_USER" "$OC_HOME/.config"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$OC_HOME/.config" "$OC_HOME/.config/systemd" "$SYSTEMD_USER_DIR"
 
 cat > "$SYSTEMD_USER_DIR/openclaw-gateway.service" <<EOF
 # =============================================================================
@@ -887,7 +950,7 @@ SyslogIdentifier=openclaw-gateway
 WantedBy=default.target
 EOF
 
-chown "$OC_USER:$OC_USER" "$SYSTEMD_USER_DIR/openclaw-gateway.service"
+chown "$OC_USER:$OC_GROUP" "$SYSTEMD_USER_DIR/openclaw-gateway.service"
 chmod 644 "$SYSTEMD_USER_DIR/openclaw-gateway.service"
 msg "systemd user service created: $SYSTEMD_USER_DIR/openclaw-gateway.service"
 
@@ -898,7 +961,7 @@ msg "systemd user service created: $SYSTEMD_USER_DIR/openclaw-gateway.service"
 msg "Step 19: Creating systemd hardening drop-in..."
 
 DROPIN_DIR="$SYSTEMD_USER_DIR/openclaw-gateway.service.d"
-mkdir -p "$DROPIN_DIR"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$DROPIN_DIR"
 
 # Determine RestrictNamespaces based on sandbox
 if [[ "$WITH_SANDBOX" == true ]]; then
@@ -907,6 +970,11 @@ if [[ "$WITH_SANDBOX" == true ]]; then
 else
     NAMESPACE_RESTRICTION="RestrictNamespaces=yes"
     NAMESPACE_COMMENT="# All namespace creation restricted (no sandbox mode)"
+fi
+
+APPARMOR_DIRECTIVE=""
+if [[ "$WITH_APPARMOR" == true ]]; then
+    APPARMOR_DIRECTIVE="AppArmorProfile=-openclaw-gateway"
 fi
 
 cat > "$DROPIN_DIR/hardening.conf" <<EOF
@@ -939,15 +1007,16 @@ NoNewPrivileges=yes
 LockPersonality=yes
 RestrictSUIDSGID=yes
 CapabilityBoundingSet=
+$APPARMOR_DIRECTIVE
 
 # --- Memory ---
 # Node.js V8 JIT requires write+execute memory; cannot use MemoryDenyWriteExecute
 MemoryDenyWriteExecute=no
 
 # --- Network restrictions ---
+# Outbound HTTPS is permitted for AI provider and messaging APIs; inbound
+# exposure is restricted by openclaw.json loopback binding (and optional nftables).
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-IPAddressAllow=localhost
-IPAddressDeny=any
 
 # --- Namespace restrictions ---
 $NAMESPACE_COMMENT
@@ -957,6 +1026,7 @@ RestrictRealtime=yes
 # --- System call filtering ---
 SystemCallFilter=@system-service @network-io
 SystemCallFilter=~@mount @reboot @swap @clock @cpu-emulation @debug @obsolete @raw-io @privileged
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 # --- Protect proc/sys ---
@@ -965,9 +1035,17 @@ ProcSubset=pid
 ProtectHostname=yes
 EOF
 
-chown -R "$OC_USER:$OC_USER" "$DROPIN_DIR"
+chown -R "$OC_USER:$OC_GROUP" "$DROPIN_DIR"
 chmod 644 "$DROPIN_DIR/hardening.conf"
 msg "Hardening drop-in created: $DROPIN_DIR/hardening.conf"
+
+run_user_systemctl() {
+    systemctl --machine="${OC_USER}@" --user "$@" 2>/dev/null || \
+        runuser -u "$OC_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/${USER_UID}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${USER_UID}/bus" \
+            systemctl --user "$@" 2>/dev/null
+}
 
 # Reload systemd for the user
 # We need loginctl enable-linger for user services to persist
@@ -977,11 +1055,11 @@ if command -v loginctl &>/dev/null; then
 fi
 
 # Reload user daemon
-if su - "$OC_USER" -c "XDG_RUNTIME_DIR=/run/user/$(id -u "$OC_USER") systemctl --user daemon-reload" 2>/dev/null; then
+if run_user_systemctl daemon-reload; then
     msg "systemd user daemon reloaded for $OC_USER"
 else
     warn "Could not reload user daemon (user session may not be active)"
-    warn "Run manually: systemctl --user daemon-reload"
+    warn "Run manually: systemctl --machine=${OC_USER}@ --user daemon-reload"
 fi
 
 echo
@@ -1004,7 +1082,7 @@ if [[ "$WITH_FIREWALL" == true ]]; then
     fi
 
     # Create nftables include directory if it doesn't exist
-    mkdir -p /etc/nftables.d
+    install -d -m 0755 /etc/nftables.d
 
     cat > "/etc/nftables.d/openclaw.conf" <<EOF
 # =============================================================================
@@ -1072,9 +1150,18 @@ if [[ "$WITH_APPARMOR" == true ]]; then
     APPARMOR_DIR="/etc/apparmor.d"
 
     if [[ -d "$APPARMOR_DIR" ]]; then
-        # Resolve node binary path
+        # Resolve node and OpenClaw binary paths
         NODE_BIN=$(command -v node 2>/dev/null || echo "/usr/bin/node")
         NODE_BIN_REAL=$(realpath "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")
+        OPENCLAW_BIN_REAL=$(realpath "$OPENCLAW_BIN" 2>/dev/null || echo "$OPENCLAW_BIN")
+
+        SANDBOX_APPARMOR_RULES=""
+        if [[ "$WITH_SANDBOX" == true ]]; then
+            SANDBOX_APPARMOR_RULES="
+  # ---- Rootless Docker sandbox ----
+  /usr/bin/docker                             rix,
+  owner /run/user/*/docker.sock               rw,"
+        fi
 
         cat > "$APPARMOR_DIR/openclaw-gateway" <<EOF
 # =============================================================================
@@ -1082,17 +1169,19 @@ if [[ "$WITH_APPARMOR" == true ]]; then
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 #
 # This profile confines the OpenClaw Node.js process to:
-#   - Read access to Node.js binary and system libraries
-#   - Read/write access to ~/.openclaw/ only
+#   - Read access to Node.js binary, OpenClaw CLI, and system libraries
+#   - Read/write access to ~/.openclaw/ only (with .env and credentials read-only)
 #   - Network access for WebSocket (gateway) and HTTPS (API calls)
 #   - Deny mount, ptrace, raw network, and sensitive paths
+# This profile is unattached (applied via AppArmorProfile=-openclaw-gateway or
+# aa-exec -p openclaw-gateway) so host-wide /usr/bin/node and npm stay unconfined.
 # =============================================================================
 
 abi <abi/3.0>,
 
 #include <tunables/global>
 
-profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
+profile openclaw-gateway flags=(enforce) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
@@ -1118,19 +1207,20 @@ profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
   /usr/share/nodejs/**                        r,
 
   # ---- OpenClaw installation (pnpm global or local) ----
-  $OC_HOME/.local/share/pnpm/**              mr,
-  $OC_HOME/.local/bin/openclaw               mr,
+  $OPENCLAW_BIN                               mr,
+  $OPENCLAW_BIN_REAL                          mr,
+  $OC_HOME/.local/share/pnpm/**               mr,
+  $OC_HOME/.local/bin/openclaw                mr,
   /usr/local/bin/openclaw                     mr,
+$SANDBOX_APPARMOR_RULES
 
   # ---- OpenClaw data directory ----
-  owner $OC_DIR/                              r,
+  $OC_DIR/                                    r,
   owner $OC_DIR/**                            rw,
-  owner $OC_CONFIG                            rw,
   owner $OC_ENV_FILE                          r,
-  owner $OC_WORKSPACE/**                      rw,
   owner $OC_CREDENTIALS/**                    r,
-  owner $OC_LOG_DIR/**                        rw,
-  owner $OC_DIR/agents/**                     rw,
+  deny $OC_ENV_FILE                           w,
+  deny $OC_CREDENTIALS/**                     w,
 
   # ---- TLS trust store (for HTTPS API calls) ----
   /etc/ssl/certs/**                           r,
@@ -1138,10 +1228,12 @@ profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
   /usr/share/ca-certificates/**               r,
   /etc/ssl/openssl.cnf                        r,
 
-  # ---- Proc (Node.js needs some /proc access) ----
+  # ---- Proc and cgroup (Node.js needs runtime introspection) ----
+  /sys/fs/cgroup/**                           r,
   owner /proc/*/fd/                           r,
   owner /proc/*/status                        r,
   owner /proc/*/stat                          r,
+  owner /proc/*/cgroup                        r,
   owner /proc/*/maps                          r,
   /proc/sys/kernel/random/boot_id             r,
   /proc/sys/kernel/random/uuid                r,
@@ -1152,7 +1244,7 @@ profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
 
   # ---- Temporary files ----
   owner /tmp/**                               rw,
-  owner /var/tmp/**                            rw,
+  owner /var/tmp/**                           rw,
 
   # ---- Deny dangerous operations ----
   deny mount,
@@ -1169,13 +1261,7 @@ profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
   deny /dev/mem                               rwklx,
   deny /dev/kmem                              rwklx,
   deny /dev/port                              rwklx,
-
-  # ---- Deny access to other users' home directories ----
-  deny /home/*/                               rwklx,
   deny /root/**                               rwklx,
-  # Re-allow our own user's home
-  owner $OC_HOME/**                           r,
-  owner $OC_DIR/**                            rw,
 
   # ---- Deny access to SSH keys and auth material ----
   deny $OC_HOME/.ssh/**                       rwklx,
@@ -1189,7 +1275,7 @@ profile openclaw-gateway $NODE_BIN_REAL flags=(enforce) {
 
   # ---- Deny execution from writable paths ----
   deny /tmp/**                                x,
-  deny /var/tmp/**                             x,
+  deny /var/tmp/**                            x,
   deny $OC_WORKSPACE/**                       x,
 }
 EOF
@@ -1197,15 +1283,10 @@ EOF
         chmod 644 "$APPARMOR_DIR/openclaw-gateway"
         msg "AppArmor profile created: $APPARMOR_DIR/openclaw-gateway"
 
-        # Load the profile if AppArmor is active
+        # Load the unattached profile if AppArmor is active (flags=(enforce) sets enforce mode)
         if command -v apparmor_parser &>/dev/null; then
             if apparmor_parser -r -W "$APPARMOR_DIR/openclaw-gateway" 2>/dev/null; then
-                if aa-enforce "$APPARMOR_DIR/openclaw-gateway" 2>/dev/null; then
-                    msg "AppArmor profile loaded in ENFORCE mode"
-                else
-                    warn "AppArmor profile loaded but could not set enforce mode"
-                    warn "Check: aa-status | grep openclaw"
-                fi
+                msg "AppArmor profile 'openclaw-gateway' loaded in ENFORCE mode"
             else
                 warn "Failed to parse AppArmor profile (AppArmor may not be active)"
                 warn "Ensure AppArmor is installed and enabled: systemctl enable --now apparmor"
@@ -1251,12 +1332,7 @@ msg "Step 22: Initializing workspace as git repo for rollback..."
 if [[ -d "$OC_WORKSPACE/.git" ]]; then
     info "Workspace is already a git repository"
 else
-    su - "$OC_USER" -c "cd '$OC_WORKSPACE' && git init --quiet" 2>/dev/null || {
-        # Fallback if su fails (user session not active)
-        cd "$OC_WORKSPACE"
-        git init --quiet
-        chown -R "$OC_USER:$OC_USER" "$OC_WORKSPACE/.git"
-    }
+    runuser -u "$OC_USER" -- env HOME="$OC_HOME" git -C "$OC_WORKSPACE" init --quiet
     msg "Initialized git repo in $OC_WORKSPACE"
 fi
 
@@ -1294,19 +1370,19 @@ build/
 *.tgz
 EOF
 
-chown "$OC_USER:$OC_USER" "$OC_WORKSPACE/.gitignore"
+chown "$OC_USER:$OC_GROUP" "$OC_WORKSPACE/.gitignore"
+chmod 0644 "$OC_WORKSPACE/.gitignore"
 info "Created $OC_WORKSPACE/.gitignore"
 
 # Initial commit
-su - "$OC_USER" -c "
-    cd '$OC_WORKSPACE' && \
-    git config user.email 'openclaw@localhost' 2>/dev/null && \
-    git config user.name 'OpenClaw Hardening' 2>/dev/null && \
-    git add -A 2>/dev/null && \
-    git commit -m 'Initial workspace snapshot (post-hardening)' --allow-empty --quiet 2>/dev/null
-" 2>/dev/null || {
+if runuser -u "$OC_USER" -- env HOME="$OC_HOME" git -C "$OC_WORKSPACE" config user.email "openclaw@localhost" 2>/dev/null && \
+   runuser -u "$OC_USER" -- env HOME="$OC_HOME" git -C "$OC_WORKSPACE" config user.name "OpenClaw Hardening" 2>/dev/null && \
+   runuser -u "$OC_USER" -- env HOME="$OC_HOME" git -C "$OC_WORKSPACE" add -A 2>/dev/null && \
+   runuser -u "$OC_USER" -- env HOME="$OC_HOME" git -C "$OC_WORKSPACE" commit -m "Initial workspace snapshot (post-hardening)" --allow-empty --quiet 2>/dev/null; then
+    :
+else
     info "Could not create initial git commit (non-fatal)"
-}
+fi
 msg "Workspace git repo initialized for rollback capability"
 info "Use 'git log' in $OC_WORKSPACE to track workspace changes"
 
@@ -1320,6 +1396,7 @@ info "Running the installed CLI's configuration and local-state audit..."
 AUDIT_SUCCEEDED=true
 if ! AUDIT_OUTPUT=$(runuser -u "$OC_USER" -- env \
     HOME="$OC_HOME" \
+    OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
     "$OPENCLAW_BIN" security audit 2>&1); then
     AUDIT_SUCCEEDED=false
 fi
@@ -1329,8 +1406,8 @@ if [[ -n "$AUDIT_OUTPUT" ]]; then
 
     # Save both successful results and diagnostics from a failed audit.
     AUDIT_FILE="$OC_DIR/security-audit-$(date +%Y%m%d-%H%M%S).log"
-    printf '%s\n' "$AUDIT_OUTPUT" > "$AUDIT_FILE"
-    chown "$OC_USER:$OC_USER" "$AUDIT_FILE"
+    ( umask 077 && printf '%s\n' "$AUDIT_OUTPUT" > "$AUDIT_FILE" )
+    chown "$OC_USER:$OC_GROUP" "$AUDIT_FILE"
     chmod 600 "$AUDIT_FILE"
     info "Audit results saved to: $AUDIT_FILE"
 fi
@@ -1353,8 +1430,7 @@ msg "Step 24: Creating weekly security audit systemd timer..."
 
 # Audit script
 AUDIT_SCRIPT="$OC_HOME/.local/bin/openclaw-security-audit.sh"
-mkdir -p "$OC_HOME/.local/bin"
-chown "$OC_USER:$OC_USER" "$OC_HOME/.local" "$OC_HOME/.local/bin"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$OC_HOME/.local" "$OC_HOME/.local/bin"
 
 cat > "$AUDIT_SCRIPT" <<'AUDIT_SCRIPT_EOF'
 #!/usr/bin/env bash
@@ -1371,9 +1447,10 @@ set -euo pipefail
 AUDIT_SCRIPT_EOF
 
 cat >> "$AUDIT_SCRIPT" <<EOF
-OC_DIR="$OC_DIR"
-OPENCLAW_BIN="$OPENCLAW_BIN"
-AUDIT_LOG_DIR="$OC_DIR/audit-logs"
+umask 077
+OC_DIR=$(printf '%q' "$OC_DIR")
+OPENCLAW_BIN=$(printf '%q' "$OPENCLAW_BIN")
+AUDIT_LOG_DIR="\$OC_DIR/audit-logs"
 AUDIT_LOG="\$AUDIT_LOG_DIR/security-audit-\$(date +%Y%m%d-%H%M%S).log"
 
 mkdir -p "\$AUDIT_LOG_DIR"
@@ -1395,12 +1472,12 @@ echo "" >> "\$AUDIT_LOG"
 echo "=== Audit complete ===" >> "\$AUDIT_LOG"
 
 # Rotate: keep last 12 audit logs (12 weeks = ~3 months)
-ls -1t "\$AUDIT_LOG_DIR"/security-audit-*.log 2>/dev/null | tail -n +13 | xargs -r rm -f
+ls -1t "\$AUDIT_LOG_DIR"/security-audit-*.log 2>/dev/null | tail -n +13 | xargs -r rm -f || true
 exit "\$audit_status"
 EOF
 
 chmod 755 "$AUDIT_SCRIPT"
-chown "$OC_USER:$OC_USER" "$AUDIT_SCRIPT"
+chown "$OC_USER:$OC_GROUP" "$AUDIT_SCRIPT"
 
 # Audit service (user-level)
 cat > "$SYSTEMD_USER_DIR/openclaw-audit.service" <<EOF
@@ -1413,6 +1490,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=$OC_ENV_FILE
+UMask=0077
 ExecStart=$AUDIT_SCRIPT
 PrivateTmp=true
 EOF
@@ -1434,7 +1513,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-chown "$OC_USER:$OC_USER" \
+chown "$OC_USER:$OC_GROUP" \
     "$SYSTEMD_USER_DIR/openclaw-audit.service" \
     "$SYSTEMD_USER_DIR/openclaw-audit.timer"
 chmod 644 \
@@ -1442,15 +1521,14 @@ chmod 644 \
     "$SYSTEMD_USER_DIR/openclaw-audit.timer"
 
 # Enable the timer
-su - "$OC_USER" -c "
-    XDG_RUNTIME_DIR=/run/user/$(id -u "$OC_USER") \
-    systemctl --user daemon-reload 2>/dev/null && \
-    systemctl --user enable openclaw-audit.timer 2>/dev/null && \
-    systemctl --user start openclaw-audit.timer 2>/dev/null
-" 2>/dev/null || {
+if run_user_systemctl daemon-reload && \
+   run_user_systemctl enable openclaw-audit.timer && \
+   run_user_systemctl start openclaw-audit.timer; then
+    msg "Enabled and started openclaw-audit.timer for $OC_USER"
+else
     warn "Could not enable audit timer (user session may not be active)"
-    warn "Run manually: systemctl --user enable --now openclaw-audit.timer"
-}
+    warn "Run manually: systemctl --machine=${OC_USER}@ --user enable --now openclaw-audit.timer"
+fi
 
 msg "Weekly security audit timer created"
 info "Service: $SYSTEMD_USER_DIR/openclaw-audit.service"
@@ -1583,7 +1661,7 @@ DENYLIST_EOF
 # Replace timestamp placeholder
 sed -i "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" "$DENYLIST_FILE"
 
-chown "$OC_USER:$OC_USER" "$DENYLIST_FILE"
+chown "$OC_USER:$OC_GROUP" "$DENYLIST_FILE"
 chmod 644 "$DENYLIST_FILE"
 msg "Exec denylist documentation written: $DENYLIST_FILE"
 
@@ -1607,86 +1685,68 @@ echo
 echo -e "${C_BLUE}--- Phase 14: Secret Scanning ---${C_NC}"
 
 # -----------------------------------------------------------------------------
-# Step 26: Install and configure detect-secrets
+# Step 26: Install pure-Bash secret-scanning pre-commit hook (optional gitleaks)
 # -----------------------------------------------------------------------------
 
-msg "Step 26: Configuring secret scanning with detect-secrets..."
+msg "Step 26: Configuring staged-file secret scanning hook..."
 
-# Check if pip/python is available
-PYTHON_BIN=""
-if command -v python3 &>/dev/null; then
-    PYTHON_BIN="python3"
-elif command -v python &>/dev/null; then
-    PYTHON_BIN="python"
+if command -v gitleaks &>/dev/null; then
+    info "Detected gitleaks ($(gitleaks version 2>/dev/null || echo 'installed')) — hook will run gitleaks + Bash pattern checks"
+else
+    info "Optional deep scanner available via pacman: pacman -S gitleaks"
 fi
 
-if [[ -n "$PYTHON_BIN" ]]; then
-    # Check if detect-secrets is already installed
-    if command -v detect-secrets &>/dev/null; then
-        DS_VER=$(detect-secrets --version 2>/dev/null || echo "unknown")
-        info "detect-secrets already installed: $DS_VER"
-    else
-        info "Installing detect-secrets..."
-        if pip install detect-secrets 2>/dev/null || pip3 install detect-secrets 2>/dev/null; then
-            msg "detect-secrets installed successfully"
-        else
-            warn "Failed to install detect-secrets via pip"
-            warn "Try: pip install --user detect-secrets"
-        fi
-    fi
+HOOKS_DIR="$OC_WORKSPACE/.git/hooks"
+install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$HOOKS_DIR"
 
-    # Create baseline in workspace
-    if command -v detect-secrets &>/dev/null; then
-        info "Creating secrets baseline in workspace..."
-
-        su - "$OC_USER" -c "
-            cd '$OC_WORKSPACE' && \
-            detect-secrets scan --all-files > .secrets.baseline 2>/dev/null
-        " 2>/dev/null || {
-            # Fallback
-            cd "$OC_WORKSPACE"
-            detect-secrets scan --all-files > "$OC_WORKSPACE/.secrets.baseline" 2>/dev/null || true
-            chown "$OC_USER:$OC_USER" "$OC_WORKSPACE/.secrets.baseline" 2>/dev/null || true
-        }
-
-        if [[ -f "$OC_WORKSPACE/.secrets.baseline" ]]; then
-            chown "$OC_USER:$OC_USER" "$OC_WORKSPACE/.secrets.baseline"
-            chmod 644 "$OC_WORKSPACE/.secrets.baseline"
-            msg "Secrets baseline created: $OC_WORKSPACE/.secrets.baseline"
-            info "Run periodic scans: detect-secrets scan --baseline .secrets.baseline"
-            info "Audit findings: detect-secrets audit .secrets.baseline"
-        else
-            warn "Could not create secrets baseline (non-fatal)"
-        fi
-    fi
-
-    # Create a pre-commit hook for the workspace git repo
-    HOOKS_DIR="$OC_WORKSPACE/.git/hooks"
-    if [[ -d "$HOOKS_DIR" ]] && command -v detect-secrets &>/dev/null; then
-        cat > "$HOOKS_DIR/pre-commit" <<'PRECOMMIT_EOF'
+cat > "$HOOKS_DIR/pre-commit" <<'PRECOMMIT_EOF'
 #!/usr/bin/env bash
-# Pre-commit hook: detect-secrets scan
+# =============================================================================
+# Pre-commit hook: pure-Bash staged secret scanner (+ optional gitleaks)
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
+# =============================================================================
 
-if command -v detect-secrets &>/dev/null; then
-    # Scan staged files for secrets
-    git diff --staged --name-only -z | xargs -0 detect-secrets scan --baseline .secrets.baseline 2>/dev/null
-    if [[ $? -ne 0 ]]; then
-        echo "[!] Potential secrets detected in staged files!"
-        echo "    Run: detect-secrets audit .secrets.baseline"
+set -euo pipefail
+
+# 1. If gitleaks is installed on the host, run it against staged changes first.
+if command -v gitleaks &>/dev/null; then
+    if ! gitleaks protect --staged --no-banner --redact; then
+        printf '[!] gitleaks blocked commit: potential secret in staged changes.\n' >&2
         exit 1
     fi
 fi
-PRECOMMIT_EOF
-        chmod 755 "$HOOKS_DIR/pre-commit"
-        chown "$OC_USER:$OC_USER" "$HOOKS_DIR/pre-commit"
-        msg "Pre-commit hook installed for secret scanning"
-    fi
-else
-    warn "Python not found. Cannot install detect-secrets."
-    warn "Install Python: pacman -S python python-pip"
-    warn "Then install: pip install detect-secrets"
+
+# 2. Block commits of credential files by filename.
+blocked_files=$(git diff --cached --name-only --diff-filter=ACMR | \
+    grep -E '(^|/)(\.env(\..+)?|.*\.(pem|key|p12|pfx))$' || true)
+if [[ -n "$blocked_files" ]]; then
+    printf '[!] Blocked commit of sensitive credential file(s):\n%s\n' "$blocked_files" >&2
+    exit 1
 fi
+
+# 3. Scan added lines in git diff --cached for API keys, tokens, and private keys.
+SECRET_REGEX='(sk-ant-[A-Za-z0-9_-]{20,}|sk-(proj-|live-|test-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----|OPENCLAW_GATEWAY_TOKEN=[0-9a-fA-F]{32,})'
+
+if git diff --cached -U0 --diff-filter=ACMR | awk -v pat="$SECRET_REGEX" '
+    /^\+\+\+ b\// { file = substr($0, 7); next }
+    /^\+[^+]/ {
+        line = substr($0, 2)
+        if (line ~ /REPLACE_WITH_YOUR_[A-Z0-9_]+/) next
+        if (line ~ pat) {
+            printf "[!] Potential secret pattern matched in staged file: %s\n", file > "/dev/stderr"
+            found = 1
+        }
+    }
+    END { exit (found ? 0 : 1) }
+'; then
+    printf '    Remove the secret and store credentials in ~/.openclaw/.env instead.\n' >&2
+    exit 1
+fi
+PRECOMMIT_EOF
+
+chown "$OC_USER:$OC_GROUP" "$HOOKS_DIR/pre-commit"
+chmod 0755 "$HOOKS_DIR/pre-commit"
+msg "Pure-Bash secret-scanning pre-commit hook installed: $HOOKS_DIR/pre-commit"
 
 echo
 
@@ -1727,7 +1787,7 @@ echo "  systemd hardening:   $DROPIN_DIR/hardening.conf"
 echo "  Audit service:       $SYSTEMD_USER_DIR/openclaw-audit.service"
 echo "  Audit timer:         $SYSTEMD_USER_DIR/openclaw-audit.timer"
 echo "  Audit script:        $AUDIT_SCRIPT"
-echo "  Log rotation:        /etc/logrotate.d/openclaw"
+echo "  Log rotation:        $LOGROTATE_CONF"
 echo "  Exec denylist:       $DENYLIST_FILE"
 if [[ "$WITH_FIREWALL" == true ]]; then
 echo "  nftables rules:      /etc/nftables.d/openclaw.conf"
@@ -1790,28 +1850,28 @@ echo "    [24] Audit timer: weekly automated scan"
 echo "  Phase 13: Denylist"
 echo "    [25] Dangerous command denylist documented"
 echo "  Phase 14: Secret Scanning"
-echo "    [26] detect-secrets: baseline + pre-commit hook"
+echo "    [26] Pure-Bash git pre-commit secret scanner (+ optional gitleaks)"
 echo
 
 echo -e "${C_BLUE}systemd Hardening Summary:${C_NC}"
 echo "  - ProtectSystem=strict (read-only /usr, /boot, /etc)"
-echo "  - ProtectHome=read-only (needs read -r access to ~/.openclaw)"
+echo "  - ProtectHome=read-only (needs read access to ~/.openclaw)"
 echo "  - ReadWritePaths=$OC_DIR only"
 echo "  - PrivateTmp=yes, PrivateDevices=yes"
 echo "  - NoNewPrivileges=yes, LockPersonality=yes"
 echo "  - RestrictSUIDSGID=yes, CapabilityBoundingSet= (empty)"
 echo "  - ProtectKernelTunables/Modules/Logs/ControlGroups=yes"
 if [[ "$WITH_SANDBOX" == true ]]; then
-echo "  - RestrictNamespaces=~cgroup ~ipc (allow Docker namespaces)"
+echo "  - RestrictNamespaces=~cgroup ipc (allow Docker namespaces)"
 else
 echo "  - RestrictNamespaces=yes (all restricted)"
 fi
 echo "  - RestrictRealtime=yes"
-echo "  - SystemCallFilter=@system-service @network-io"
-echo "  - SystemCallFilter deny: @mount @reboot @swap @clock @debug @obsolete @raw-io @privileged"
+echo "  - SystemCallFilter=@system-service @network-io (EPERM)"
+echo "  - SystemCallFilter deny: @mount @reboot @swap @clock @cpu-emulation @debug @obsolete @raw-io @privileged"
 echo "  - SystemCallArchitectures=native"
 echo "  - MemoryDenyWriteExecute=no (V8 JIT requires W+X pages)"
-echo "  - IPAddressAllow=localhost, IPAddressDeny=any"
+echo "  - RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK (outbound HTTPS permitted)"
 echo "  - ProtectProc=invisible, ProcSubset=pid"
 echo "  - ProtectHostname=yes"
 echo
@@ -1824,16 +1884,17 @@ echo "  # Run deep security audit"
 echo "  su - $OC_USER -c 'openclaw security audit --deep'"
 echo ""
 echo "  # Start the gateway service"
-echo "  su - $OC_USER -c 'systemctl --user start openclaw-gateway'"
+echo "  systemctl --machine=${OC_USER}@ --user start openclaw-gateway"
 echo ""
 echo "  # Check service status"
-echo "  su - $OC_USER -c 'systemctl --user status openclaw-gateway'"
+echo "  systemctl --machine=${OC_USER}@ --user status openclaw-gateway"
 echo ""
 echo "  # View gateway logs"
+echo "  systemctl --machine=${OC_USER}@ --user status openclaw-gateway --no-pager"
 echo "  su - $OC_USER -c 'journalctl --user -u openclaw-gateway -f'"
 echo ""
 echo "  # Check audit timer"
-echo "  su - $OC_USER -c 'systemctl --user list-timers openclaw-audit.timer'"
+echo "  systemctl --machine=${OC_USER}@ --user list-timers openclaw-audit.timer"
 echo ""
 echo "  # Verify AppArmor (if enabled)"
 echo "  aa-status 2>/dev/null | grep openclaw"
@@ -1844,8 +1905,8 @@ echo ""
 echo "  # Verify file permissions"
 echo "  stat -c '%a %U:%G %n' $OC_CONFIG $OC_ENV_FILE $OC_DIR"
 echo ""
-echo "  # Scan workspace for secrets"
-echo "  cd $OC_WORKSPACE && detect-secrets scan --baseline .secrets.baseline"
+echo "  # Test workspace pre-commit secret scanner"
+echo "  $OC_WORKSPACE/.git/hooks/pre-commit"
 echo
 
 echo -e "${C_YELLOW}IMPORTANT — Next Steps:${C_NC}"
