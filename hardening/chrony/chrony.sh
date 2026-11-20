@@ -390,20 +390,26 @@ echo -e "${C_GREEN} Chrony NTS setup complete!${C_NC}"
 echo -e "${C_GREEN}========================================================================${C_NC}"
 echo
 
-# Count NTS-authenticated sources
+# Count NTS-authenticated sources. "Mode = NTS" only says that the source is
+# configured with nts; the key exchange has succeeded once the source holds
+# cookies (Cook column above zero).
 NTS_COUNT=0
-while IFS= read -r line; do
-    if [[ "$line" == *"NTS"* ]]; then
+NTS_CONFIGURED=0
+while read -r _ nts_mode _ _ _ _ _ _ nts_cookies _; do
+    [[ "$nts_mode" == "NTS" ]] || continue
+    (( ++NTS_CONFIGURED ))
+    if [[ "$nts_cookies" =~ ^[0-9]+$ ]] && (( 10#$nts_cookies > 0 )); then
         (( ++NTS_COUNT ))
     fi
 done < <(chronyc -N authdata 2>/dev/null || true)
 
 echo -e "${C_BLUE}NTS Status:${C_NC}"
 if [[ "$NTS_COUNT" -gt 0 ]]; then
-    echo -e "  ${C_GREEN}$NTS_COUNT server(s) authenticated with NTS${C_NC}"
+    echo -e "  ${C_GREEN}$NTS_COUNT of $NTS_CONFIGURED server(s) hold NTS cookies (key exchange succeeded)${C_NC}"
 else
-    echo -e "  ${C_YELLOW}NTS cookies not yet established.${C_NC}"
+    echo -e "  ${C_YELLOW}NTS cookies not yet established (0 of $NTS_CONFIGURED servers).${C_NC}"
     echo "  This can take a minute. Re-check with: chronyc -N authdata"
+    echo "  If the Cook column stays at 0, outbound TCP 4460 (NTS-KE) is probably blocked."
 fi
 echo
 

@@ -3,7 +3,10 @@
 # =============================================================================
 # Script:      crowdsec.sh
 # Description: Installs and configures CrowdSec IDS on Arch Linux with
-#              optional nftables firewall bouncer and nginx bouncer.
+#              optional nftables firewall bouncer and nginx bouncer. The
+#              nftables bouncer is configured and started; the nginx bouncer
+#              is only installed and registered (its API key has to be added
+#              to the bouncer configuration by hand).
 #
 # CrowdSec is a modern, collaborative intrusion detection system that
 # analyzes visitor behavior and provides an adapted response to attacks.
@@ -26,7 +29,8 @@
 #   3. Installs CrowdSec detection collections (linux, sshd, nginx)
 #   4. Hardens and starts CrowdSec systemd service (initializing LAPI)
 #   5. Optionally installs and configures the nftables firewall bouncer
-#   6. Optionally installs and configures the nginx bouncer
+#   6. Optionally installs the nginx bouncer and registers an API key for it
+#      (the key is saved to a root-only file; nginx is not reconfigured)
 #   7. Prints enrollment instructions and status
 # =============================================================================
 
@@ -63,7 +67,9 @@ usage() {
 Usage: sudo $0 [options]
 
 Options:
-  --with-nginx      Install nginx bouncer and add nginx log acquisition
+  --with-nginx      Add nginx log acquisition, install the nginx bouncer and
+                    register an API key for it. The bouncer does not block
+                    anything until you add that key to its configuration.
   --with-nftables   Install nftables firewall bouncer for IP blocking
   -h, --help        Show this help
 
@@ -455,6 +461,7 @@ if [[ "$WITH_NGINX" == true ]]; then
         info "Nginx bouncer API key saved to $NGINX_BOUNCER_KEY_FILE (mode 600)"
         info "Add that key to your nginx bouncer configuration, then remove the file."
     fi
+    warn "The nginx bouncer is installed and registered, but NOT configured: nginx blocks nothing yet."
 fi
 
 # =============================================================================
@@ -503,7 +510,7 @@ if [[ "$WITH_NFTABLES" == true ]]; then
     echo "  - nftables firewall bouncer"
 fi
 if [[ "$WITH_NGINX" == true ]]; then
-    echo "  - nginx bouncer"
+    echo "  - nginx bouncer (installed and registered; not yet configured, see below)"
 fi
 echo
 echo -e "${C_BLUE}Configuration files:${C_NC}"
@@ -525,6 +532,20 @@ echo "  cscli hub update && cscli hub upgrade # Update all hub content"
 echo "  cscli bouncers list              # List registered bouncers"
 echo "  journalctl -u crowdsec -f        # Follow CrowdSec logs"
 echo
+if [[ "$WITH_NGINX" == true ]]; then
+    echo -e "${C_YELLOW}REQUIRED for the nginx bouncer: add its API key${C_NC}"
+    echo "  This script does not edit the bouncer or nginx configuration."
+    echo "  Until the key is in place, nginx does not enforce CrowdSec decisions."
+    echo
+    echo "  1. Find the bouncer configuration shipped by the package:"
+    echo "       pacman -Ql crowdsec-nginx-bouncer | grep -E '\\.conf\$'"
+    echo "     (upstream default: /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf)"
+    echo "  2. Set API_KEY in it to the content of $NGINX_BOUNCER_KEY_FILE"
+    echo "  3. Run: sudo nginx -t && sudo systemctl reload nginx"
+    echo "  4. Check that the bouncer authenticates: sudo cscli bouncers list"
+    echo "  5. Delete $NGINX_BOUNCER_KEY_FILE"
+    echo
+fi
 echo -e "${C_YELLOW}OPTIONAL: Enroll in CrowdSec Console (free)${C_NC}"
 echo "  The CrowdSec Console provides a web dashboard for monitoring"
 echo "  alerts, managing blocklists, and contributing to the community."

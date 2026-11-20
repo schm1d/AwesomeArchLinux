@@ -55,6 +55,21 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 
 ### 3. postgresql.conf Hardening
 
+`postgresql.conf` and `pg_hba.conf` are regenerated on every run. Before they are replaced:
+
+- The current versions are copied to `/var/backups/postgresql-hardening/<timestamp>/` (root-only, one directory per run). The first run additionally keeps the pre-hardening files as `postgresql.conf.orig` and `pg_hba.conf.orig` in the data directory.
+- The settings `initdb` wrote for this cluster are carried over into the new file: `timezone`, `log_timezone`, `datestyle`, `lc_messages`, `lc_monetary`, `lc_numeric`, `lc_time`, `default_text_search_config`, `dynamic_shared_memory_type`, `max_wal_size` and `min_wal_size`. Without them PostgreSQL falls back to GMT, `C` formatting and the `simple` text search configuration. If an earlier version of this script already dropped them, they are recovered from `postgresql.conf.orig`.
+- On a re-run, the script warns when the previous file had active lines that are not in the regenerated one (for example an extra `pg_hba.conf` rule or a tuned `work_mem`) and prints the `diff` command to compare them.
+
+**Keeping your own settings across re-runs.** Do not edit the generated files; use the include directories, which the script creates and never writes to:
+
+| Directory | Read | Use it for |
+|-----------|------|------------|
+| `/var/lib/postgres/data/conf.d/*.conf` | Last, via `include_dir = 'conf.d'` at the end of `postgresql.conf`, so it overrides the generated values | `archive_command`, memory tuning, extra `shared_preload_libraries`, ... |
+| `/var/lib/postgres/data/hba.d/*.conf` | After the generated rules, via `include_dir` at the end of `pg_hba.conf` (PostgreSQL 16 or newer; the first matching rule wins) | Per-database or per-user rules, replication rows. Never use `trust` |
+
+Files there must be readable by `postgres` (for example `install -o postgres -g postgres -m 0600 my.conf /var/lib/postgres/data/conf.d/`). Reload with `systemctl reload postgresql`; settings marked "change requires restart" need `systemctl restart postgresql`.
+
 #### Connection Settings
 
 | Parameter | Value | Purpose |
@@ -85,9 +100,10 @@ sudo ./postgresql.sh --no-local --allow-cidr 10.20.30.0/24 --ssl \
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | `logging_collector` | `on` | Capture logs to files |
-| `log_filename` | `postgresql-%Y-%m-%d.log` | Daily log rotation |
+| `log_filename` | `postgresql-%d.log` | One file per day of the month |
+| `log_truncate_on_rotation` | `on` | Overwrite the file from a month ago instead of appending (bounded retention: at most 31 files) |
 | `log_rotation_age` | `1d` | Rotate daily |
-| `log_rotation_size` | `100MB` | Rotate at 100MB |
+| `log_rotation_size` | `0` | No size-driven rotation (it would reopen the same file name; truncation only happens on time-driven rotation) |
 | `log_min_messages` | `warning` | Minimum severity logged |
 | `log_connections` | `on` | Log every connection attempt |
 | `log_disconnections` | `on` | Log session end |
@@ -580,6 +596,9 @@ CREATE POLICY user_isolation ON sensitive_data
 | `/var/lib/postgres/tls/server.{crt,key}` | Installed TLS material (`0600`, `postgres:postgres`) |
 | `/etc/systemd/system/postgresql.service.d/hardening.conf` | systemd security override |
 | `/etc/nftables.conf` managed block | CIDR-restricted firewall rule (remote access only) |
+| `/var/backups/postgresql-hardening/<timestamp>/` | `postgresql.conf` and `pg_hba.conf` as they were before each run (`0700`, root) |
+| `/var/lib/postgres/data/conf.d/`, `/var/lib/postgres/data/hba.d/` | Your own settings and client rules, kept across re-runs |
+| `/var/lib/postgres/data/log/postgresql-<day>.log` | Server logs, one per day of the month, recycled monthly |
 | `/var/log/postgresql-hardening-*.log` | Script execution log |
 
 ## References

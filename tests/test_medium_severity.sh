@@ -47,13 +47,17 @@ aal_aur_install_reviewed() {
     touch "$FIXTURE/$1.installed"
 }
 EOF
+    # Every stub run writes a different baseline, so a second initialization
+    # is visible in the database content as well as in the event log.
     cat > "$tmp/aide-config.sh" <<'EOF'
 echo "AIDE $*" >> "$EVENTS"
-printf 'reference baseline' > "$FIXTURE/aide.db"
+echo "init" >> "$FIXTURE/aide-runs"
+printf 'reference baseline %s' "$(wc -l < "$FIXTURE/aide-runs" | tr -d ' ')" > "$FIXTURE/aide.db"
 EOF
 
-    local reject rc out events
+    local reject rc out events run=0
     for reject in true false false; do
+        (( ++run ))
         : > "$tmp/events"
         rc=0
         out="$(FIXTURE="$tmp" EVENTS="$tmp/events" REJECT_REVIEW="$reject" bash -c '
@@ -77,7 +81,12 @@ EOF
             assert_not_contains "$events" "AIDE"
         else
             assert_eq "$rc" "0" "accepted review completes setup"
-            assert_eq "$(cat "$tmp/aide.db")" "reference baseline"
+            assert_eq "$(cat "$tmp/aide.db")" "reference baseline 1" "baseline is the one from the first initialization"
+            if (( run == 2 )); then
+                assert_contains "$events" "AIDE --init" "first accepted run initializes AIDE"
+            else
+                assert_not_contains "$events" "AIDE" "re-run must not initialize AIDE again"
+            fi
         fi
     done
     assert_contains "$out" "Existing AIDE baseline preserved"

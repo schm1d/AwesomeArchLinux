@@ -208,6 +208,7 @@
 -a always,exit -F arch=b32 -S chown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -S fchmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -S fchmodat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S fchmodat2 -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -S fchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -S fchownat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
@@ -221,6 +222,7 @@
 -a always,exit -F arch=b64 -S chown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S fchmod -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S fchmodat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S fchmodat2 -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S fchown -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S fchownat -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
@@ -232,10 +234,10 @@
 -a always,exit -F arch=b64 -S setxattr -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b64 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
 -a always,exit -F arch=b32 -C auid!=uid -S execve -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -F exit=-EPERM -k T1166_Setuid_and_Setgid
--a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -F exit=-EPERM -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -S setresuid -S setresgid -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -S setresuid -S setresgid -S setuid32 -S setgid32 -S setreuid32 -S setregid32 -S setresuid32 -S setresgid32 -F auid>=1000 -F auid!=4294967295 -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -S setresuid -S setresgid -F exit=-EPERM -k T1166_Setuid_and_Setgid
+-a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -S setresuid -S setresgid -S setuid32 -S setgid32 -S setreuid32 -S setregid32 -S setresuid32 -S setresgid32 -F exit=-EPERM -k T1166_Setuid_and_Setgid
 -w /usr/bin/ -p wa -k T1068_Exploitation_for_Privilege_Escalation
 
 ## Recon Related Events

@@ -42,10 +42,6 @@ EOF
     exit 0
 }
 
-if [[ "${EUID}" -ne 0 ]]; then
-    die "This script must be run as root. Use: sudo $0"
-fi
-
 MODE=""
 if [[ $# -eq 0 ]]; then
     usage
@@ -64,6 +60,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${MODE}" ]] || usage
+
+# Checked after option parsing so --help works without root.
+if [[ "${EUID}" -ne 0 ]]; then
+    die "This script must be run as root. Use: sudo $0"
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AIDE_CONF="/etc/aide.conf"
@@ -86,38 +87,21 @@ install_aide() {
         info "Installing aide from official repositories..."
         pacman -S --needed --noconfirm aide
     else
-        local aur_lib=""
+        # aide is an AUR package: it is only ever built through the reviewed
+        # builder (PKGBUILD shown and confirmed, unprivileged build), never by
+        # an AUR helper with --noconfirm.
+        local aur_lib="" candidate
         for candidate in "$SCRIPT_DIR/aur-review.sh" "$SCRIPT_DIR/../hardening/lib/aur-review.sh" "/root/aur-review.sh"; do
             if [[ -r "$candidate" ]]; then
                 aur_lib="$candidate"
                 break
             fi
         done
-        if [[ -n "$aur_lib" ]]; then
-            info "Installing aide via reviewed unprivileged AUR builder..."
-            # shellcheck disable=SC1090
-            source "$aur_lib"
-            aal_aur_install_reviewed aide
-        elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-            local helper="" h user_home
-            user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-            for h in yay paru; do
-                if command -v "$h" &>/dev/null; then
-                    helper="$h"
-                    break
-                fi
-            done
-            [[ -n "$helper" ]] || die "AIDE is not installed and neither aur-review.sh nor yay/paru was found."
-            info "Installing aide via $helper as $SUDO_USER..."
-            runuser -u "$SUDO_USER" -- mkdir -p -m 0700 "$user_home/.cache/$helper" "$user_home/.cache/aide-tmp"
-            if command -v setfacl &>/dev/null; then
-                setfacl -b -k "$user_home/.cache/$helper" "$user_home/.cache/aide-tmp" 2>/dev/null || true
-            fi
-            runuser -u "$SUDO_USER" -- env TMPDIR="$user_home/.cache/aide-tmp" "$helper" -S --noconfirm --needed aide
-            rm -rf -- "$user_home/.cache/aide-tmp" 2>/dev/null || true
-        else
-            die "AIDE is not installed. Run /root/install-aur-packages.sh or install aide first."
-        fi
+        [[ -n "$aur_lib" ]] || die "AIDE is not installed and hardening/lib/aur-review.sh was not found. Run this script from a full checkout, run /root/install-aur-packages.sh, or install aide first."
+        info "Installing aide via reviewed unprivileged AUR builder..."
+        # shellcheck disable=SC1090
+        source "$aur_lib"
+        aal_aur_install_reviewed aide
     fi
 
     command -v aide &>/dev/null || die "AIDE installation failed."
@@ -235,7 +219,8 @@ After=local-fs.target
 Type=oneshot
 ExecStart=/usr/bin/aide --check
 UMask=0077
-StandardOutput=file:${AIDE_LOG_DIR}/aide-check.log
+# truncate: (not file:) so a shorter report never keeps the tail of an older one.
+StandardOutput=truncate:${AIDE_LOG_DIR}/aide-check.log
 StandardError=inherit
 Nice=19
 IOSchedulingClass=idle
@@ -278,6 +263,15 @@ mode_init() {
 
     if [[ ! -f "${AIDE_DB_NEW}" ]]; then
         die "AIDE database generation failed — ${AIDE_DB_NEW} not found."
+    fi
+
+    # Re-running --init must not silently discard the previous baseline.
+    if [[ -s "${AIDE_DB}" ]]; then
+        local backup
+        backup="${AIDE_DB}.bak.$(date +%Y%m%d%H%M%S)"
+        cp "${AIDE_DB}" "${backup}"
+        chmod 600 "${backup}"
+        warn "Existing AIDE database backed up to ${backup} before re-initialization."
     fi
 
     cp "${AIDE_DB_NEW}" "${AIDE_DB}"

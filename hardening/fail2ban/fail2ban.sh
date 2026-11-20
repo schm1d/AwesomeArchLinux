@@ -6,13 +6,14 @@
 #              Linux, targeting:
 #                - SSH brute-force protection (standard + aggressive)
 #                - nginx HTTP abuse protection
+#                - Postfix SMTP AUTH and Dovecot login protection (when installed)
 #                - Recidive jail for repeat offenders
 #                - nftables integration (Arch default firewall)
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
 #
-# Usage:       sudo ./fail2ban.sh [-p SSH_PORT] [-h]
+# Usage:       sudo ./fail2ban.sh [-p SSH_PORT] [-i ADDRESS]... [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -45,6 +46,7 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 
 # --- Defaults ---
 SSH_PORT=22
+IGNORE_IPS=()
 
 # --- Usage ---
 usage() {
@@ -53,11 +55,18 @@ Usage: sudo $0 [options]
 
 Optional:
   -p PORT       SSH port (default: $SSH_PORT)
+  -i ADDRESS    Never ban this IP address or CIDR network (repeatable). Use it
+                for the address you administer the host from, so a few typos
+                cannot lock you out for up to four weeks.
   -h            Show this help
+
+jail.local is regenerated on every run: pass the same -p and -i options again
+when you re-run the script.
 
 Examples:
   sudo $0
   sudo $0 -p 2222
+  sudo $0 -p 2222 -i 203.0.113.7 -i 2001:db8:1234::/48
 EOF
     exit 0
 }
@@ -70,6 +79,11 @@ while [[ $# -gt 0 ]]; do
             SSH_PORT="$2"
             shift 2
             ;;
+        -i)
+            [[ $# -ge 2 && -n "${2:-}" ]] || err "Option -i requires an IP address or CIDR network"
+            IGNORE_IPS+=("$2")
+            shift 2
+            ;;
         -h|--help)  usage ;;
         *)          err "Unknown option: $1" ;;
     esac
@@ -78,12 +92,55 @@ done
 # --- Validate ---
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 
-# Validate SSH_PORT is a number in valid range
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+# Validate SSH_PORT is a number in valid range. 10# keeps a leading zero from
+# being read as octal ("08" is an error, "010" would silently become 8).
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( 10#$SSH_PORT < 1 || 10#$SSH_PORT > 65535 )); then
     err "Invalid SSH port: $SSH_PORT (must be 1-65535)"
 fi
+SSH_PORT=$((10#$SSH_PORT))
+
+# Succeeds for an IPv4/IPv6 address with an optional prefix length. The value
+# is written into jail.local, so anything else (spaces, newlines, option
+# syntax) is rejected. Hex digits are listed explicitly because the range a-f
+# also matches accented letters in UTF-8 locales.
+valid_ignore_entry() {
+    local entry="$1" addr prefix="" max octet
+    local v4_re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
+    local v6_re='^[0123456789abcdefABCDEF:]{2,39}$'
+
+    addr="${entry%%/*}"
+    if [[ "$addr" =~ $v4_re ]]; then
+        for octet in "${BASH_REMATCH[@]:1:4}"; do
+            (( 10#$octet <= 255 )) || return 1
+        done
+        max=32
+    elif [[ "$addr" == *:* && "$addr" != *:::* && "$addr" =~ $v6_re ]]; then
+        max=128
+    else
+        return 1
+    fi
+    if [[ "$entry" == */* ]]; then
+        prefix="${entry#*/}"
+        # No leading zero, and not /0: that would exempt the whole address
+        # family from every jail.
+        [[ "$prefix" =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+        (( prefix <= max )) || return 1
+    fi
+}
+
+IGNORE_LIST=""
+for entry in "${IGNORE_IPS[@]}"; do
+    valid_ignore_entry "$entry" ||
+        err "Invalid -i value: $entry (expected an IPv4/IPv6 address or CIDR network, prefix length at least 1)"
+    IGNORE_LIST+=" $entry"
+done
 
 info "SSH port: $SSH_PORT"
+if [[ -n "$IGNORE_LIST" ]]; then
+    info "Never banned:$IGNORE_LIST"
+else
+    warn "No -i ADDRESS given: only loopback is exempt from bans, including your own address."
+fi
 
 # =============================================================================
 # 1. INSTALL FAIL2BAN
@@ -128,6 +185,22 @@ else
     info "nginx log files not present — setting [nginx-*] jails to enabled = false"
 fi
 
+# Mail jails read the systemd journal (paths-arch.conf), so there is no log
+# file to wait for; they are enabled as soon as the service is installed.
+POSTFIX_JAIL_ENABLED=false
+DOVECOT_JAIL_ENABLED=false
+if pacman -Qq postfix &>/dev/null; then
+    POSTFIX_JAIL_ENABLED=true
+    info "Detected postfix — enabling [postfix-sasl] jail"
+fi
+if pacman -Qq dovecot &>/dev/null; then
+    DOVECOT_JAIL_ENABLED=true
+    info "Detected dovecot — enabling [dovecot] jail"
+fi
+if ! $POSTFIX_JAIL_ENABLED && ! $DOVECOT_JAIL_ENABLED; then
+    info "postfix/dovecot not installed — mail jails set to enabled = false (re-run after installing them)"
+fi
+
 # Back up existing jail.local if present
 if [[ -f /etc/fail2ban/jail.local ]]; then
     BACKUP="/etc/fail2ban/jail.local.bak.$(date +%Y%m%d-%H%M%S)"
@@ -153,8 +226,8 @@ maxretry  = 5
 banaction          = nftables-multiport
 banaction_allports = nftables-allports
 
-# --- Whitelist loopback ---
-ignoreip = 127.0.0.1/8 ::1
+# --- Whitelist loopback and the addresses given with -i ---
+ignoreip = 127.0.0.1/8 ::1${IGNORE_LIST}
 
 # --- Use systemd journal (Arch does not use rsyslog by default) ---
 backend = systemd
@@ -174,7 +247,7 @@ findtime = 1h
 # Harsh 7-day ban for clearly malicious SSH probing:
 #   - Invalid user attempts
 #   - Pre-auth disconnects/closures involving invalid/authenticating users
-#   - Bad protocol version identification
+#   - Clients that do not send an SSH protocol banner
 [sshd-aggressive]
 enabled  = true
 filter   = sshd-aggressive
@@ -210,6 +283,24 @@ port     = http,https
 logpath  = /var/log/nginx/error.log
 maxretry = 5
 bantime  = 1h
+
+# ============================================================================
+# MAIL JAILS
+# ============================================================================
+
+# SMTP AUTH brute force on submission/smtps ("SASL ... authentication failed").
+[postfix-sasl]
+enabled  = ${POSTFIX_JAIL_ENABLED}
+maxretry = 5
+bantime  = 24h
+findtime = 1h
+
+# IMAP/POP3/ManageSieve logins and the SASL lookups Dovecot does for Postfix.
+[dovecot]
+enabled  = ${DOVECOT_JAIL_ENABLED}
+maxretry = 5
+bantime  = 24h
+findtime = 1h
 
 # ============================================================================
 # RECIDIVE JAIL (repeat offenders)
@@ -276,7 +367,7 @@ _daemon = sshd(?:-session|-auth)?
 failregex = ^%(__prefix_line)sInvalid user .* from <HOST>
             ^%(__prefix_line)sConnection closed by (?:invalid|authenticating) user .* <HOST> port \d+ \[preauth\]
             ^%(__prefix_line)sDisconnected from (?:invalid|authenticating) user .* <HOST> port \d+ \[preauth\]
-            ^%(__prefix_line)sBad protocol version identification .* from <HOST>
+            ^%(__prefix_line)sbanner exchange: Connection from <HOST> port \d+: invalid format
 
 ignoreregex =
 
@@ -362,7 +453,13 @@ echo "  sshd-aggressive   - Aggressive SSH abuse (3 attempts -> 7d ban)"
 echo "  nginx-http-auth   - HTTP basic auth failures (3 attempts -> 1h ban)"
 echo "  nginx-botsearch   - Vulnerability scanner bots (2 attempts -> 7d ban)"
 echo "  nginx-limit-req   - Rate limit violations (5 attempts -> 1h ban)"
+echo "  postfix-sasl      - SMTP AUTH failures (5 attempts -> 24h ban, enabled: ${POSTFIX_JAIL_ENABLED})"
+echo "  dovecot           - IMAP/POP3/Sieve login failures (5 attempts -> 24h ban, enabled: ${DOVECOT_JAIL_ENABLED})"
 echo "  recidive          - Repeat offenders (3 bans -> 4 weeks, all ports)"
+echo
+
+echo -e "${C_BLUE}Never banned:${C_NC}"
+echo "  127.0.0.1/8 ::1${IGNORE_LIST}"
 echo
 
 echo -e "${C_YELLOW}Useful commands:${C_NC}"

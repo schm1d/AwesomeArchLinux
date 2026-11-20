@@ -44,7 +44,7 @@ AwesomeArchLinux/
 |   |   +-- nftables.sh      # Shared validated, ownership-scoped nftables persistence
 |   |   +-- validation.sh    # Shared hostname/FQDN and email input validators
 |   +-- apparmor/
-|   |   +-- apparmor.sh      # AppArmor profiles for 7 services (enforce mode)
+|   |   +-- apparmor.sh      # AppArmor profiles for 7 services (sshd log-only until --enforce)
 |   |   +-- README.md
 |   +-- chrony/
 |   |   +-- chrony.sh        # Chrony NTS (authenticated time synchronization)
@@ -56,10 +56,10 @@ AwesomeArchLinux/
 |   |   +-- openclaw.sh      # OpenClaw/ClawdBot AI agent hardening (27 steps)
 |   |   +-- README.md
 |   +-- crowdsec/
-|   |   +-- crowdsec.sh      # CrowdSec IDS with nftables & nginx bouncers
+|   |   +-- crowdsec.sh      # CrowdSec IDS with nftables bouncer (nginx bouncer installed & registered)
 |   |   +-- README.md
 |   +-- fail2ban/
-|   |   +-- fail2ban.sh      # Extended fail2ban jails (SSH, nginx, recidive)
+|   |   +-- fail2ban.sh      # Extended fail2ban jails (SSH, nginx, mail, recidive)
 |   |   +-- README.md
 |   +-- firehol/
 |   |   +-- firehol.sh       # FireHOL firewall with IP blocklist integration
@@ -142,10 +142,10 @@ AwesomeArchLinux/
 |   +-- vmware-workstation.sh # VMware Workstation installer, SUID/ACL fixer & pacman hook
 |   +-- nano.sh              # Nano configuration & hardening
 |   +-- zsh.sh               # Zsh configuration & hardening
-|   +-- yay.sh               # yay AUR helper installation (noexec /tmp & ACL safe)
+|   +-- yay.sh               # yay AUR helper installation (reviewed build; noexec /tmp & ACL safe)
 |   +-- theme.sh             # Desktop & GRUB theming
 |   +-- zram.sh              # zram-generator compressed RAM swap
-|   +-- cpufreq.sh           # CPU governor via linux-cpupower
+|   +-- cpufreq.sh           # CPU governor via cpupower
 |   +-- iosched.sh           # udev I/O scheduler by device type
 |   +-- vaapi.sh             # VA-API / VDPAU packages and driver pin
 |   +-- gpu-unlock.sh        # Optional Zagitta/gpu-unlock tensor-core unlock (RTX 20/30/40)
@@ -180,16 +180,16 @@ AwesomeArchLinux/
 
 #### Firewall
 
-- **nftables** &mdash; Default deny policy, SSH rate limiting (4/min), stateful connection tracking, drop invalid packets. Configured automatically during installation.
+- **nftables** &mdash; Default deny policy, per-source SSH rate limiting (4 new connections per minute for each client address, so scan noise cannot lock out legitimate logins), stateful connection tracking, drop invalid packets. Configured automatically during installation.
 - **FireHOL** &mdash; Optional iptables-based alternative firewall with FireHOL blocklists, explicit inbound-service selection, fail-closed daily updates, and mandatory per-commit AUR recipe review. It refuses to stack on the installer-owned nftables ruleset.
 - **nftables rate limiting** &mdash; SSH brute-force protection via the SSH hardening script (uses the `inet filter` table; automatic iptables fallback on VPS kernels without `nf_tables`).
 - **Composable sysctl profiles** &mdash; Compatible workstation hardening by default, with explicit strict, fq + BBR performance, and IPv6-disable overlays plus companion guidance for `irqbalance`, THP, swap, `systemd-oomd`, and other non-sysctl tuning in [`hardening/sysctl/`](hardening/sysctl/).
 
 #### Mandatory Access Control (AppArmor)
 
-- **AppArmor profiles** for up to 7 services in enforce mode: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), chronyd, and — only if the Stubby binary is installed manually as an opt-in — Stubby DNS.
+- **AppArmor profiles** for up to 7 services: nginx, sshd, fail2ban, ClamAV (freshclam + clamd), chronyd, and — only if the Stubby binary is installed manually as an opt-in — Stubby DNS. All are enforced except sshd, which starts in complain (log-only) mode so that a profile gap cannot lock out remote logins; review the log after the reboot and run `apparmor.sh --enforce`.
 - Each profile uses `abi <abi/3.0>`, precise path rules, minimal network access, and least-privilege capabilities.
-- Kernel boot parameters (`lsm=landlock,lockdown,yama,integrity,apparmor,bpf`) configured automatically across UKI, systemd-boot, and GRUB when running `hardening/apparmor/apparmor.sh`.
+- Kernel boot parameters are configured across UKI, systemd-boot, and GRUB when running `hardening/apparmor/apparmor.sh`: it ensures `apparmor=1` and that `apparmor` is in the kernel's `lsm=` list (an existing list is kept and extended; `lsm=landlock,lockdown,yama,integrity,apparmor,bpf` is only the fallback when none is set). AppArmor is not active until this has run and the machine has rebooted; check with `cat /sys/kernel/security/lsm` and `aa-status`.
 - See [`hardening/apparmor/README.md`](hardening/apparmor/README.md) for profile details and customization.
 
 #### VPN (WireGuard)
@@ -198,6 +198,7 @@ AwesomeArchLinux/
 - **nftables integration** &mdash; Managed rules are inserted into the installer-owned default-deny chains, with one persistent NAT table and no duplicate `PostUp` rules.
 - **Client provisioning** &mdash; QR codes generated for each client config (mobile-friendly via `qrencode`).
 - **Multi-client support** &mdash; Generate any number of clients with unique IPs.
+- **IPv4-only tunnel** &mdash; Client IPv6 traffic bypasses the VPN unless the client configs are generated with `--block-ipv6`, which routes IPv6 into the tunnel where it is dropped. The script refuses a VPN subnet that overlaps an existing address or route.
 - See [`hardening/wireguard/README.md`](hardening/wireguard/README.md) for usage and client management.
 
 #### Intrusion Detection (CrowdSec)
@@ -246,6 +247,7 @@ AwesomeArchLinux/
 - **nginx server block** &mdash; `xmlrpc.php` blocked, PHP execution denied in `wp-content/uploads`, hidden files blocked, rate limiting on `wp-login.php` and `wp-admin`.
 - **fail2ban jails** &mdash; `wordpress-auth` (login brute-force) and `wordpress-xmlrpc` (XML-RPC abuse).
 - **wp-cron** &mdash; Replaces WP's unreliable pseudo-cron with a systemd timer (every 15 minutes).
+- **Updates** &mdash; The code stays read-only for PHP; a daily timer applies core, plugin and theme updates through `awesome-wordpress-update`, which runs wp-cli as a separate locked account in a systemd sandbox and seals the code again.
 - See [`hardening/wordpress/README.md`](hardening/wordpress/README.md) for plugin security and update strategies.
 
 #### Docker Runtime Security
@@ -265,7 +267,7 @@ AwesomeArchLinux/
 - **Docker sandbox** (optional) &mdash; All tool execution in isolated containers: `network: none`, `readOnlyRoot: true`, `capDrop: ALL`, PID/memory/CPU limits, non-root user.
 - **Plugin & skill lockdown** &mdash; Deny-by-default plugin policy, ClawHub auto-install disabled, hooks disabled to prevent prompt injection.
 - **Secure logging** &mdash; 9 API key redaction patterns (Anthropic, OpenAI, bearer tokens, PEM keys), log rotation, `redactSensitive: tools`.
-- **systemd user service** &mdash; Hardened drop-in with `ProtectSystem=strict`, `NoNewPrivileges`, `IPAddressAllow=localhost`, syscall filtering, `MemoryDenyWriteExecute=no` (V8 JIT).
+- **systemd system service** &mdash; Root-owned `openclaw-gateway-<user>.service` that runs as the service account (the account cannot edit its own unit or sandbox), with `ProtectSystem=strict`, `NoNewPrivileges`, syscall filtering, `MemoryDenyWriteExecute=no` (V8 JIT). Earlier user-level units are stopped and removed on the next run.
 - **AppArmor confinement** (optional) &mdash; Enforce mode profile denying mount/ptrace/raw, restricting file access to `~/.openclaw/` only.
 - **nftables firewall** (optional) &mdash; Blocks every non-loopback packet to the gateway port and rate-limits denial logging. Outbound traffic remains governed by the host firewall and service sandbox.
 - **Secret scanning** &mdash; `detect-secrets` with baseline and pre-commit hook, workspace git init for rollback.
@@ -274,7 +276,7 @@ AwesomeArchLinux/
 
 #### SSH Hardening
 
-- **Server** (`ssh.sh -u <user> [-p <port>]`) &mdash; Regenerates host keys (Ed25519 + RSA 4096), writes a complete hardened `sshd_config` with post-quantum KEX (`sntrup761x25519-sha512`), AEAD-only ciphers (ChaCha20-Poly1305, AES-256-GCM, AES-128-GCM), ETM-only MACs, public-key-only authentication (passwords disabled), all forwarding disabled (`DisableForwarding yes`), strict session limits (MaxSessions 2, MaxAuthTries 3), client alive timeout (300s), VERBOSE logging, revoked keys file, and a legal warning banner. Validates config with `sshd -t` and automatically rolls back on failure. Rate limits via nftables (iptables fallback on legacy VPS kernels).
+- **Server** (`ssh.sh -u <user> [-p <port>]`) &mdash; Generates host keys (Ed25519 + RSA 4096) on the first run or when they are missing or weak (`-r` forces new ones; fingerprints are printed), writes a complete hardened `sshd_config` with post-quantum KEX (`sntrup761x25519-sha512`), AEAD-only ciphers (ChaCha20-Poly1305, AES-256-GCM, AES-128-GCM), ETM-only MACs, public-key-only authentication (passwords disabled), all forwarding disabled (`DisableForwarding yes`), strict session limits (MaxSessions 2, MaxAuthTries 3), client alive timeout (300s), VERBOSE logging, revoked keys file, and a legal warning banner. Validates config with `sshd -t` and automatically rolls back on failure. Rate limits via nftables (iptables fallback on legacy VPS kernels).
 - **Client** (`ssh_client.sh`) &mdash; Generates Ed25519 key pair, configures SSH client with matching modern algorithms, hashes `known_hosts`, assists with public key deployment to servers.
 - **Key Rotation** &mdash; Automated quarterly SSH key rotation via cron.
 - See [`hardening/ssh/README.md`](hardening/ssh/README.md) for algorithm details and testing commands.
@@ -282,8 +284,8 @@ AwesomeArchLinux/
 #### Two-Factor Authentication (TOTP)
 
 - **SSH 2FA** (`totp.sh`) &mdash; Google Authenticator/TOTP for SSH with `pam_google_authenticator`.
-- **Multi-factor enforcement** &mdash; Configures `AuthenticationMethods publickey,keyboard-interactive` (SSH key + TOTP required).
-- **Fail-closed by default** &mdash; TOTP enrollment completes before PAM changes and `nullok` is absent by default. `--allow-missing-totp` is the explicit staged-rollout escape hatch.
+- **Multi-factor enforcement** &mdash; Configures `AuthenticationMethods publickey,keyboard-interactive` (SSH key + TOTP required) in an `sshd_config.d` drop-in when the main configuration includes that directory. The candidate configuration is validated with `sshd -t` before anything changes, and PAM and sshd files are restored if any step fails. `ssh.sh` includes that drop-in first, so re-running it keeps TOTP in force; it warns in the one case where `totp.sh` has to be run again.
+- **Fail-closed by default** &mdash; TOTP enrollment completes before PAM changes and `nullok` is absent by default. `--allow-missing-totp` is the explicit staged-rollout escape hatch. An existing secret is kept on re-runs; `--rotate` issues a new one.
 - **Emergency scratch codes** &mdash; Backup codes generated for account recovery.
 - See [`hardening/totp/README.md`](hardening/totp/README.md) for compatible apps and setup guide.
 
@@ -357,7 +359,7 @@ Passed via GRUB or embedded into signed systemd-boot UKIs (`/etc/kernel/cmdline`
 These are companion utilities, not silent installer defaults (except the I/O scheduler udev rule, which is low-risk and now written by `chroot.sh`):
 
 - **zram** (`utils/zram.sh`) &mdash; `zram-generator` at 50% RAM / zstd / priority 100, disk swap kept as overflow. Built-in kernel `zswap` is disabled persistently via `tmpfiles.d`; stacking zswap + zram double-compresses pages.
-- **CPU governor** (`utils/cpufreq.sh`) &mdash; `linux-cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
+- **CPU governor** (`utils/cpufreq.sh`) &mdash; `cpupower` with `schedutil` (or `performance` on request). Refuses to run alongside power-profiles-daemon, TLP, auto-cpufreq, or tuned.
 - **I/O scheduler** (`utils/iosched.sh`) &mdash; BFQ for HDDs, `mq-deadline` for SATA/virtio SSD, `none` for NVMe.
 - **NVMe dropout workaround** (`utils/nvme-stability.sh`) &mdash; Pure-Bash opt-in power-management diagnostic for existing signed UKI installs, with staged builds, signature verification, backups and rollback. See [NVMe stability and offline recovery](utils/NVME-STABILITY.md).
 - **Motherboard thermal monitoring** (`utils/board-health.sh`) &mdash; Pure-Bash exact ASUS ROG Zenith II Extreme Alpha detection enables minute-by-minute CPU, chipset, VRM and NVMe monitoring on bare-metal installs. Sustained heat and missing sensors produce journal warnings; existing installs can use `--install`. See [board support and tuning notes](utils/ZENITH-II-ALPHA.md).
@@ -513,8 +515,8 @@ units; hardware daemons also require representative hot-plug coverage.
 - **rkhunter** &mdash; Rootkit detection with daily automated checks via systemd timer.
 - **AIDE** &mdash; File integrity monitoring with custom rules (NORMAL, DIR, PERMS, LOG, DATAONLY), monitors `/boot`, `/etc`, `/usr/bin`, `/usr/sbin`, sensitive config files. Daily checks preserve AIDE's exit status so detected changes and scan errors are visible as failed systemd units. See `utils/aide-config.sh`.
 - **auditd** &mdash; MITRE ATT&CK-mapped audit rules (~500 rules covering initial access, execution, persistence, privilege escalation, defense evasion, credential access, discovery, lateral movement, collection, exfiltration, and C2).
-- **fail2ban** &mdash; 7 jails covering SSH, nginx, and recidive (repeat offenders).
-- **CrowdSec** &mdash; Behavior-based IDS with community threat intelligence, nftables and nginx bouncers.
+- **fail2ban** &mdash; Jails covering SSH, nginx, and recidive (repeat offenders), plus `postfix-sasl` and `dovecot` when those packages are installed. `fail2ban.sh -i ADDRESS` (repeatable) adds addresses that are never banned.
+- **CrowdSec** &mdash; Behavior-based IDS with community threat intelligence and the nftables bouncer. The nginx bouncer is installed and registered; the script prints the steps for putting its API key into the bouncer configuration.
 - **arch-audit** &mdash; Daily vulnerability scanning for installed packages via systemd timer.
 - **lynis** &mdash; Security auditing framework for compliance checking.
 - **arpwatch** &mdash; ARP spoofing detection and monitoring.
@@ -622,16 +624,16 @@ recovery-aware migration.
 | `utils/vim.sh` | Vim with plugins and hardening |
 | `utils/nano.sh` | Nano with backups, locking, and syntax highlighting |
 | `utils/zsh.sh` | Zsh shell configuration and hardening |
-| `utils/yay.sh` | yay AUR helper installation (safe under `/tmp` `noexec` and home default ACLs) |
-| `utils/brave.sh` | Brave Browser installer, `/opt/brave-bin` permission/ACL/SUID fixer, pacman upgrade hook, and policy helper |
-| `utils/vmware-workstation.sh` | VMware Workstation AUR installer, group-restricted SUID/library permissions, and pacman upgrade hook |
+| `utils/yay.sh` | yay AUR helper installation through the reviewed AUR builder (needs a terminal for the recipe review; safe under `/tmp` `noexec` and home default ACLs) |
+| `utils/brave.sh` | Brave Browser installer (reviewed AUR build, needs a terminal), `/opt/brave-bin` permission/ACL/SUID fixer, pacman upgrade hook, and policy helper |
+| `utils/vmware-workstation.sh` | VMware Workstation AUR installer (reviewed AUR build, needs a terminal; `AUR_HELPER` is ignored), group-restricted SUID/library permissions, and pacman upgrade hook |
 | `utils/board-health.sh` | Pure-Bash ASUS ROG Zenith II Extreme Alpha EC/NVMe thermal monitor and systemd timer |
 | `utils/nvme-stability.sh` | Pure-Bash reversible NVMe APST/ASPM workaround for signed UKI installations |
 | `utils/zram.sh` | `zram-generator` compressed RAM swap with persistent `zswap` disablement |
-| `utils/cpufreq.sh` | CPU scaling governor configuration via `linux-cpupower` |
+| `utils/cpufreq.sh` | CPU scaling governor configuration via `cpupower` |
 | `utils/iosched.sh` | Automatic udev I/O scheduler rules by block device type |
 | `utils/vaapi.sh` | Hardware video acceleration (VA-API / VDPAU) setup |
-| `utils/theme.sh` | WhiteSur GTK and GRUB theming |
+| `utils/theme.sh` | WhiteSur GTK and GRUB theming (upstream installers pinned to a tag and verified commit; the GRUB theme is generated unprivileged) |
 
 ---
 
@@ -781,7 +783,7 @@ sudo ./hardening/nginx/nginx.sh -d example.com -e admin@example.com   # nginx + 
 sudo ./hardening/react/react.sh -a /var/www/myapp -d app.example.com  # React SPA hardening
 sudo ./hardening/nodejs/nodejs.sh -a /opt/api -n api-server           # Node.js hardening
 sudo ./hardening/php/php.sh -a /var/www/myapp                         # PHP production hardening
-sudo ./hardening/wordpress/wordpress.sh -a /var/www/wordpress -d wp.example.com  # WordPress hardening
+sudo ./hardening/wordpress/wordpress.sh -w /var/www/wordpress -d wp.example.com  # WordPress hardening
 
 # --- Per-user disk encryption (opt-in, complements LUKS FDE) ---
 sudo ./hardening/fscrypt/fscrypt.sh --setup                  # System-wide PAM wiring + fscrypt config
@@ -839,8 +841,8 @@ sudo ./utils/vaapi.sh                          # Hardware video decode stack
 - **DNS providers** &mdash; Edit `/etc/systemd/resolved.conf.d/dns-over-tls.conf` to change upstream DoT resolvers (the default is Cloudflare primary, Quad9 fallback). If you have installed Stubby manually as an opt-in, edit `/etc/stubby/stubby.yml` instead.
 - **CSP headers** &mdash; Customize `Content-Security-Policy` in nginx configs for your application needs.
 - **Backup paths** &mdash; Edit `backup.sh` include/exclude lists for your environment.
-- **Backup maintenance** &mdash; Install Borg separately before `backup.sh --init`. Only `--init` configures the timer and log rotation; routine backup, prune, list, and restore operations never install packages or upgrade the system.
-- **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/prometheus/node-exporter/`.
+- **Backup maintenance** &mdash; Install Borg separately before `backup.sh --init`. Only `--init` configures the timer and log rotation; routine backup, prune, list, and restore operations never install packages or upgrade the system. The timer runs a root-owned copy at `/usr/local/sbin/awesome-borg-backup`, so re-run `backup.sh --init` after editing the script.
+- **Monitoring** &mdash; Add custom Prometheus textfile collectors in `/var/lib/node_exporter/textfile_collector/` (root-owned). Grafana listens on loopback only and its random admin password is saved to `/root/.grafana-admin-password`.
 
 ### Security References and Methodology
 

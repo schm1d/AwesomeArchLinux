@@ -10,13 +10,22 @@ opaque `99-sysctl.conf`. Every installer uses the same entry point,
 | Profile | Installed layers | Intended use | Important tradeoffs |
 |---|---|---|---|
 | `workstation` | security core + workstation network | Desktops, laptops, development hosts, and general servers | Leaves io_uring and the distribution's user-namespace policy unchanged; IPv6 stays enabled |
-| `strict` | workstation + strict overlay | Fixed-purpose hosts with tested workloads | Disables io_uring, unprivileged user namespaces, kexec, SysRq, and most unprivileged debugging; panics on oops |
+| `strict` | workstation + strict overlay | Fixed-purpose hosts with tested workloads | Disables io_uring, unprivileged user namespaces, kexec, SysRq, and most unprivileged debugging; panics on oops; strict reverse-path filtering on every interface (breaks asymmetric routing and some VPNs) |
 | `performance` | workstation + performance overlay | Hosts where fq + BBR has been measured or is desired | Loads `tcp_bbr`; deliberately does not guess socket buffers, dirty-memory limits, keepalives, or TCP timeouts |
 
 IPv6 is independent of the profile. It remains enabled, accepts router
 advertisements for SLAAC, and rejects redirects and source-routing headers by
 default. Add `--disable-ipv6` only when the host's network policy explicitly
 forbids IPv6.
+
+Per-interface settings use `net.ipv4.conf.*` / `net.ipv6.conf.*` globs where
+`all` and `default` are not enough. The kernel takes the larger of
+`conf/all/rp_filter` and the interface's own value, and systemd's
+`50-default.conf` sets every interface to `2` (loose), so the `strict` profile
+sets `net.ipv4.conf.*.rp_filter = 1` as well; without it strict mode would be
+silently loose. The IPv6 redirect and source-route keys are globbed because
+IPv6 does not copy `default` to interfaces that already exist when the profile
+is applied to a running system.
 
 ## Files and precedence
 

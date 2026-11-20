@@ -1,14 +1,30 @@
 # fail2ban Hardening for Arch Linux
 
-Extended fail2ban jail configuration with nftables integration, targeting SSH brute-force protection, nginx HTTP abuse mitigation, and automatic escalation for repeat offenders.
+Extended fail2ban jail configuration with nftables integration, targeting SSH brute-force protection, nginx HTTP abuse mitigation, Postfix/Dovecot login protection, and automatic escalation for repeat offenders.
 
 ## Usage
 
 ```bash
 sudo ./fail2ban.sh              # Default SSH port 22
 sudo ./fail2ban.sh -p 2222      # Custom SSH port
+sudo ./fail2ban.sh -p 2222 -i 203.0.113.50 -i 2001:db8:1234::/48   # Never ban these
 sudo ./fail2ban.sh -h           # Show help
 ```
+
+| Option | Meaning |
+|---|---|
+| `-p PORT` | SSH port (default 22; decimal, a leading zero is ignored) |
+| `-i ADDRESS` | IPv4/IPv6 address or CIDR network that is never banned (repeatable). A `/0` network is rejected |
+| `-h` | Show help |
+
+`jail.local` is regenerated on every run (the previous file is kept as
+`jail.local.bak.<timestamp>`). Pass the same `-p` and `-i` options again when
+you re-run the script, otherwise the SSH port returns to 22 and the whitelist
+to loopback only.
+
+Give `-i` the address you administer the host from. Without it, three mistyped
+SSH logins ban your own address for 24 hours, and three bans within a day
+escalate to four weeks on all ports.
 
 ## Jail Descriptions
 
@@ -17,7 +33,7 @@ sudo ./fail2ban.sh -h           # Show help
 | Jail | Trigger | Ban Duration | Description |
 |------|---------|-------------|-------------|
 | `sshd` | 3 failed logins in 1h | 24 hours | Standard SSH brute-force protection. Matches failed password and publickey attempts via the built-in `sshd` filter plus `filter.d/sshd.local` (which matches OpenSSH 10.x `sshd-auth` / `sshd-session` journal entries). |
-| `sshd-aggressive` | 3 attempts in 24h | 7 days | Custom filter catching invalid usernames, pre-auth closures/disconnections involving `(?:invalid\|authenticating) user`, and bad protocol version strings, while ignoring benign bare TCP probes and Happy Eyeballs races. |
+| `sshd-aggressive` | 3 attempts in 24h | 7 days | Custom filter catching invalid usernames, pre-auth closures/disconnections involving `(?:invalid\|authenticating) user`, and clients that do not send an SSH banner (`banner exchange: Connection from ... invalid format`), while ignoring benign bare TCP probes and Happy Eyeballs races. |
 
 ### nginx Jails
 
@@ -26,6 +42,16 @@ sudo ./fail2ban.sh -h           # Show help
 | `nginx-http-auth` | 3 failures in 10m | 1 hour | Protects HTTP basic auth endpoints from credential stuffing. Reads from nginx error log. |
 | `nginx-botsearch` | 2 attempts in 10m | 7 days | Catches vulnerability scanners probing for common exploit paths (e.g., `/wp-admin`, `/phpmyadmin`, `/.env`). Reads from nginx access log. |
 | `nginx-limit-req` | 5 violations in 10m | 1 hour | Enforces nginx rate limiting. Requires `limit_req_zone` and `limit_req` directives in your nginx config. Reads from nginx error log. |
+
+### Mail Jails
+
+| Jail | Trigger | Ban Duration | Description |
+|------|---------|-------------|-------------|
+| `postfix-sasl` | 5 failures in 1h | 24 hours | SMTP AUTH failures on the submission ports (`SASL ... authentication failed`), using the built-in `postfix[mode=auth]` filter on the systemd journal. Enabled when the `postfix` package is installed. |
+| `dovecot` | 5 failures in 1h | 24 hours | IMAP/POP3/ManageSieve login failures, using the built-in `dovecot` filter on the systemd journal. Enabled when the `dovecot` package is installed. |
+
+Both are written with `enabled = false` when the package is missing. Re-run
+`fail2ban.sh` after `hardening/postfix/postfix.sh` to switch them on.
 
 ### Recidive Jail
 
@@ -46,7 +72,14 @@ sudo ./fail2ban.sh -h           # Show help
 
 ### Adding Your IP to the Whitelist
 
-Edit `/etc/fail2ban/jail.local` and add your IP to the `ignoreip` line in the `[DEFAULT]` section:
+Preferably pass the addresses with `-i` when running the script, so they survive a re-run:
+
+```bash
+sudo ./fail2ban.sh -p 2222 -i 203.0.113.50 -i 2001:db8::1
+```
+
+A manual edit of the `ignoreip` line in the `[DEFAULT]` section of
+`/etc/fail2ban/jail.local` works as well, but is overwritten by the next run:
 
 ```ini
 ignoreip = 127.0.0.1/8 ::1 203.0.113.50 2001:db8::1
@@ -153,7 +186,7 @@ If nginx is not installed or `/var/log/nginx/{access,error}.log` do not exist wh
 
 If a legitimate user triggers the aggressive filter (e.g., typos in username), either:
 
-1. Add their IP to `ignoreip` in `jail.local`
+1. Add their IP with `-i` (or to `ignoreip` in `jail.local`)
 2. Increase `maxretry` in the `[sshd-aggressive]` section
 3. Unban them: `sudo fail2ban-client set sshd-aggressive unbanip <IP>`
 

@@ -17,11 +17,11 @@ sudo ./react.sh -a /var/www/myapp -d app.example.com
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-a APP_PATH` | Path to the React app (project root or build dir) | *required* |
-| `-p PORT` | Listening port | `3000` |
+| `-p PORT` | Listening port. `80`/`443` are handled as a pair, see [Ports and TLS](#ports-and-tls) | `3000` |
 | `-d DOMAIN` | Server name / domain | `localhost` |
 | `-h` | Show help | |
 
-The script auto-detects the build directory by checking for `index.html` in the root, then in `dist/`, `build/`, and `out/` subdirectories.
+The script auto-detects the build directory by checking for `index.html` in the `dist/`, `build/` and `out/` subdirectories first, and only then in `APP_PATH` itself. Build output wins because a Vite project keeps its *source* `index.html` in the project root: serving that root would publish sources, `package.json` and `node_modules`. If only the root has an `index.html` and it also contains a `package.json`, the script warns that it looks like an unbuilt project.
 For safety, the resolved application path must be below `/var/www/` or `/srv/http/`; domain names are validated before they are used in nginx paths or directives.
 
 ## What It Does
@@ -33,13 +33,27 @@ For safety, the resolved application path must be below `/var/www/` or `/srv/htt
 | Vite | `dist/` | Yes |
 | Create React App | `build/` | Yes |
 | Next.js (static export) | `out/` | Yes |
-| Custom (root) | `./` | Yes |
+| Custom (root) | `./` | Yes, when no `dist/`, `build/` or `out/` output exists |
 
 ### 2. nginx Server Block for SPA
 
 - `try_files $uri $uri/ /index.html` for client-side routing
 - Automatic HTTPS if Let's Encrypt certificates exist (falls back to HTTP)
 - HTTP/2 enabled when serving over SSL
+
+#### Ports and TLS
+
+| Invocation | Certificate for `DOMAIN` | Result |
+|------------|--------------------------|--------|
+| `-p 80` | none | HTTP on port 80, including `/.well-known/acme-challenge/` so a certificate can be issued |
+| `-p 80` or `-p 443` | present | HTTPS on port 443 plus a port-80 server block that answers the ACME challenge and redirects everything else to HTTPS (TLS is never put on port 80) |
+| `-p 443` | none | Listens on 443 without TLS settings of its own and warns; use `-p 80` until the certificate exists |
+| any other port (default `3000`) | present | HTTPS on that port only |
+| any other port | none | HTTP on that port only |
+
+- **Firewall**: `../nginx/nginx.sh` opens ports 80 and its HTTPS port only. A non-standard port (including the default `3000`) is not opened by this script; allow it in your firewall or use the standard ports.
+- **ACME challenge** (standard ports): the challenge directory is the webroot certbot recorded for the domain in `/etc/letsencrypt/renewal/*.conf` (the directory `../nginx/nginx.sh` passed with `-w`), falling back to the build directory, so renewals keep working after this vhost takes the name over. It is announced in a `# ACME-Webroot:` header line that `../nginx/nginx.sh` reads.
+- **Overlap with `default.conf`** (standard ports): nginx only uses the first server block per name and port, so this vhost takes the domain over from `/etc/nginx/sites-enabled/default.conf`. A `default.conf` that serves only this domain is removed; otherwise the domain is removed from its `server_name` lines. The original is saved to `/var/backups/react-hardening/nginx-default.conf.<domain>.<timestamp>` and restored if `nginx -t` or the reload fails. On a non-standard port nothing is taken over: `default.conf` keeps ports 80/443.
 
 ### 3. Caching Strategy
 
@@ -340,6 +354,7 @@ npx npm-audit-html  # visual audit report
 |------|-------------|
 | `/etc/nginx/sites-enabled/<domain>.conf` | nginx server block with SPA routing, caching, security headers |
 | `<APP_PATH>/.env.production.example` | Template showing secure env var patterns |
+| `/var/backups/react-hardening/` | Root-only copies of a `default.conf` this vhost superseded or edited (standard ports only) |
 
 ## Verification
 

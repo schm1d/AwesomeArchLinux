@@ -58,7 +58,7 @@ After running the script, verify NTS is working:
 
 ```bash
 # Show NTS cookie status for each server
-# Look for "NTS" in the "AuthData" column with cookie counts > 0
+# Look for "NTS" in the "Mode" column with a "Cook" count above 0
 chronyc -N authdata
 
 # Show all time sources, their stratum, poll interval, and offset
@@ -90,10 +90,13 @@ nts.sth2.ntp.se              NTS     1   15  256  33m    0    0    8  100
 ```
 
 Key indicators:
-- **Mode = NTS** — NTS is active for this server
+- **Mode = NTS** — the server is configured with NTS (this alone does not mean the key exchange worked)
 - **Cook > 0** — NTS cookies have been obtained (typically 8)
 - **NAK = 0** — No authentication failures
 - **Atmp = 0** — No retry attempts needed
+
+The summary printed by the script counts a server as authenticated only when
+its `Cook` value is above zero, and reports it as "N of M server(s)".
 
 ## Troubleshooting
 

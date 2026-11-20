@@ -37,12 +37,17 @@ SSH_PORT="${INSTALL_SSH_PORT:-${_INSTALL_SSH_PORT:-22}}"
 SSH_PUBKEY="${INSTALL_SSH_PUBKEY:-${_INSTALL_SSH_PUBKEY:-}}"
 ALLOW_NO_SSH_KEY="${INSTALL_ALLOW_NO_SSH_KEY:-${_INSTALL_ALLOW_NO_SSH_KEY:-false}}"
 INSTALL_TYPE_VAL="${INSTALL_TYPE:-${_INSTALL_TYPE:-vps}}"
-# shellcheck disable=SC2034  # Cross-script env vars from installer
-TIMEZONE="${INSTALL_TIMEZONE:-${_INSTALL_TIMEZONE:-UTC}}"
-# shellcheck disable=SC2034
-LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-en_US.UTF-8}}"
-# shellcheck disable=SC2034
-KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-us}}"
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+    # A live server keeps its timezone, locale and keymap. They are only
+    # changed when the caller passes a value explicitly.
+    TIMEZONE="${INSTALL_TIMEZONE:-${_INSTALL_TIMEZONE:-}}"
+    LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-}}"
+    KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-}}"
+else
+    TIMEZONE="${INSTALL_TIMEZONE:-${_INSTALL_TIMEZONE:-UTC}}"
+    LOCALE="${INSTALL_LOCALE:-${_INSTALL_LOCALE:-en_US.UTF-8}}"
+    KEYMAP="${INSTALL_KEYMAP:-${_INSTALL_KEYMAP:-us}}"
+fi
 SYSCTL_PROFILE="${INSTALL_SYSCTL_PROFILE:-${_INSTALL_SYSCTL_PROFILE:-workstation}}"
 SYSCTL_DISABLE_IPV6="${INSTALL_DISABLE_IPV6:-${_INSTALL_DISABLE_IPV6:-false}}"
 
@@ -58,11 +63,318 @@ esac
 source /usr/local/lib/awesomearchlinux/chroot-security.sh
 
 # --- Other Variables ---
-SSH_CONFIG_FILE="/home/$USERNAME/.ssh/config"
+# An account that already exists (live systems) keeps its real home directory
+# and primary group: neither /home/<name> nor a group named after the user can
+# be assumed there.
+USER_HOME="/home/$USERNAME"
+USER_GROUP="$USERNAME"
+# Prints the passwd database entry of the administrator account, if it exists.
+user_account_entry() {
+    getent passwd -- "$USERNAME"
+}
+if USER_PASSWD_ENTRY=$(user_account_entry); then
+    USER_UID=$(cut -d: -f3 <<< "$USER_PASSWD_ENTRY")
+    if (( USER_UID < 1000 || USER_UID == 65534 )); then
+        echo -e "${BRed}ERROR: '$USERNAME' is a system account (uid $USER_UID); it cannot be used as the administrator account.${NC}" >&2
+        exit 1
+    fi
+    USER_HOME=$(cut -d: -f6 <<< "$USER_PASSWD_ENTRY")
+    USER_GROUP=$(id -gn "$USERNAME")
+    if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
+        echo -e "${BRed}ERROR: the home directory of '$USERNAME' ('$USER_HOME') does not exist.${NC}" >&2
+        exit 1
+    fi
+elif getent group "$USERNAME" >/dev/null; then
+    echo -e "${BRed}ERROR: a group named '$USERNAME' already exists, so the user cannot be created. Choose another username.${NC}" >&2
+    exit 1
+fi
+
+SSH_CONFIG_FILE="$USER_HOME/.ssh/config"
 SSH_KEY_TYPE="ed25519"
-SSH_KEY_FILE="/home/$USERNAME/.ssh/id_$SSH_KEY_TYPE"
+SSH_KEY_FILE="$USER_HOME/.ssh/id_$SSH_KEY_TYPE"
 
 CPU_VENDOR_ID=$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/, "", $2); print $2}')
+
+###############################################################################
+# SAFETY CHECKS (before anything is changed)
+###############################################################################
+
+NFT_CONF="/etc/nftables.conf"
+# Tag of the firewall rules that keep the ports of the running sshd open while
+# it is being moved to another port (live systems only).
+SSH_TRANSITION_TAG="awesome-ssh-transition"
+BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
+
+# install    - installer chroot: this script owns every file it writes
+# fresh/own/keep - live system, see classify_live_firewall
+FIREWALL_MODE="install"
+FIREWALL_KEEP_REASONS=()
+CURRENT_SSH_PORTS=()
+SSH_TRANSITION_PORTS=()
+# Ports of services that are reachable now and stay reachable when a firewall
+# is installed on a live system that had none (see find_public_listeners).
+KEPT_TCP_PORTS=()
+KEPT_UDP_PORTS=()
+# Extra environment for the ssh.sh call (see the firewall section).
+SSH_HARDEN_ENV=()
+
+# Keep a timestamped copy of a file before a live system's version is changed.
+backup_before_change() {
+    local file="$1" backup
+    [[ -e "$file" || -L "$file" ]] || return 0
+    backup="${file}.before-awesome.${BACKUP_STAMP}"
+    if [[ ! -e "$backup" && ! -L "$backup" ]]; then
+        cp -a -- "$file" "$backup"
+        echo -e "${BBlue}Backup: $backup${NC}"
+    fi
+}
+
+# True when the file holds at least one public key that the sshd_config
+# written by ssh.sh accepts (its PubkeyAcceptedAlgorithms line; RSA keys below
+# 1024 bits are refused by sshd's RequiredRSASize default). A non-empty
+# authorized_keys with only plain ECDSA or DSA keys would pass an emptiness
+# test and still lock the user out once passwords are disabled. Same test as
+# has_accepted_authorized_key in ssh.sh.
+authorized_keys_usable() {
+    local key_file="$1" listing
+    [[ -s "$key_file" ]] || return 1
+    listing=$(ssh-keygen -l -f "$key_file" 2>/dev/null || true)
+    awk '
+        { type = $NF }
+        type == "(ED25519)" || type == "(ED25519-SK)" || type == "(ECDSA-SK)" { ok = 1 }
+        type == "(RSA)" && $1 + 0 >= 1024 { ok = 1 }
+        END { exit ok ? 0 : 1 }
+    ' <<< "$listing"
+}
+
+# Ports the running sshd listens on, one per line. When no listening sshd is
+# found (stopped, or started through a socket unit) the configured ports are
+# used instead, unless "live" is passed as the first argument.
+sshd_listen_ports() {
+    local ports=""
+    if command -v ss >/dev/null 2>&1; then
+        ports=$(ss -H -tlnp 2>/dev/null |
+            awk '/users:\(\("sshd"/ { n = split($4, part, ":"); print part[n] }' | sort -un || true)
+    fi
+    if [[ -z "$ports" && "${1:-}" != "live" ]] && command -v sshd >/dev/null 2>&1; then
+        # sshd -T prints the keyword as "port" or "Port" depending on the version.
+        ports=$(sshd -T 2>/dev/null | awk 'tolower($1) == "port" { print $2 }' | sort -un || true)
+    fi
+    [[ -z "$ports" ]] || printf '%s\n' "$ports"
+}
+
+# True when /etc/nftables.conf is a ruleset written by this installer (any
+# version): it owns the complete ruleset and carries the installer's SSH
+# comment, or (once ssh.sh has moved the SSH rule into its own block) the
+# managed blocks of the hardening scripts.
+nft_conf_is_installer_owned() {
+    [[ -f "$NFT_CONF" ]] || return 1
+    grep -Eq '^[[:space:]]*flush[[:space:]]+ruleset([[:space:]]|$)' "$NFT_CONF" &&
+        grep -Eq '^([[:space:]]*# Allow SSH with (per-source )?rate limiting|# BEGIN AwesomeArchLinux: )' "$NFT_CONF"
+}
+
+# TCP and UDP ports, other than sshd's, on which this host accepts traffic
+# from the network right now. Fills KEPT_TCP_PORTS and KEPT_UDP_PORTS.
+# Loopback-only sockets are skipped, and so are the link-local client
+# protocols that need no inbound rule of their own (DHCP 68, DHCPv6 546,
+# mDNS 5353, LLMNR 5355) and UDP sockets that are bound to one address on an
+# ephemeral port (the sockets of clients, not of services).
+find_public_listeners() {
+    local proto port skip ssh_port ephemeral_low=32768 ephemeral_high=60999
+    KEPT_TCP_PORTS=()
+    KEPT_UDP_PORTS=()
+    command -v ss >/dev/null 2>&1 || return 0
+    if [[ -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+        read -r ephemeral_low ephemeral_high < /proc/sys/net/ipv4/ip_local_port_range || true
+    fi
+    while read -r proto port; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        if [[ "$proto" == tcp ]]; then
+            skip=0
+            for ssh_port in "$SSH_PORT" "${CURRENT_SSH_PORTS[@]}"; do
+                if [[ "$port" == "$ssh_port" ]]; then
+                    skip=1
+                fi
+            done
+            (( skip )) || KEPT_TCP_PORTS+=("$port")
+        else
+            case "$port" in
+                68|546|5353|5355) ;;
+                *) KEPT_UDP_PORTS+=("$port") ;;
+            esac
+        fi
+    done < <(
+        {
+            ss -H -tln 2>/dev/null | sed 's/^/tcp /' || true
+            ss -H -uln 2>/dev/null | sed 's/^/udp /' || true
+        } | awk -v low="${ephemeral_low:-32768}" -v high="${ephemeral_high:-60999}" '
+            {
+                local_addr = $5
+                n = split(local_addr, part, ":")
+                port = part[n]
+                addr = substr(local_addr, 1, length(local_addr) - length(port) - 1)
+                if (addr ~ /^127\./ || addr ~ /^\[::1\]/ || addr ~ /^\[::ffff:127\./ || addr ~ /%lo$/) next
+                wildcard = (addr == "0.0.0.0" || addr == "*" || addr == "[::]")
+                if ($1 == "udp" && !wildcard && port + 0 >= low + 0 && port + 0 <= high + 0) next
+                print $1, port
+            }
+        ' | sort -k1,1 -k2,2n -u || true
+    )
+}
+
+# Decide what may be done to the firewall of a live system:
+#   fresh - no firewall is in use: the installer ruleset is installed
+#   own   - the installer ruleset of an earlier run: it is updated in place
+#   keep  - another firewall is in use (the reasons are collected in
+#           FIREWALL_KEEP_REASONS): it is left alone
+classify_live_firewall() {
+    local unit live_tables foreign_tables package_info iptables_rules conf_state="absent"
+    FIREWALL_KEEP_REASONS=()
+
+    # The file shipped by the nftables package counts as "no firewall yet"
+    # as long as pacman reports it unmodified.
+    if [[ -f "$NFT_CONF" ]]; then
+        package_info=$(LC_ALL=C pacman -Qii nftables 2>/dev/null || true)
+        if nft_conf_is_installer_owned; then
+            conf_state="own"
+        elif [[ "$package_info" == *"$NFT_CONF [unmodified]"* ]]; then
+            conf_state="stock"
+        else
+            conf_state="custom"
+            FIREWALL_KEEP_REASONS+=("$NFT_CONF holds a ruleset that this installer did not write")
+        fi
+    fi
+    # Loading the installer ruleset starts with "flush ruleset", which would
+    # also delete the tables of Docker, libvirt, iptables-nft and the like.
+    live_tables=$(nft list tables 2>/dev/null || true)
+    foreign_tables=$(grep -Ev '^table inet (filter|f2b-table)$' <<< "$live_tables" | tr '\n' ' ' || true)
+    if [[ -n "${foreign_tables// /}" ]]; then
+        FIREWALL_KEEP_REASONS+=("other tools have loaded firewall tables: ${foreign_tables% }")
+    fi
+    if [[ "$conf_state" == "absent" ]] && grep -Fxq 'table inet filter' <<< "$live_tables"; then
+        FIREWALL_KEEP_REASONS+=("a firewall table (inet filter) is loaded that does not come from $NFT_CONF")
+    fi
+    if ! nft list ruleset &>/dev/null && command -v iptables &>/dev/null; then
+        iptables_rules=$(iptables -S 2>/dev/null || true)
+        if [[ -n "$iptables_rules" ]] &&
+           grep -Evq '^-P (INPUT|FORWARD|OUTPUT) ACCEPT$' <<< "$iptables_rules"; then
+            FIREWALL_KEEP_REASONS+=("iptables rules are loaded")
+        fi
+    fi
+    for unit in firewalld ufw iptables ip6tables; do
+        if systemctl is-active --quiet "$unit.service" 2>/dev/null ||
+           systemctl is-enabled --quiet "$unit.service" 2>/dev/null; then
+            FIREWALL_KEEP_REASONS+=("$unit.service is active or enabled")
+        fi
+    done
+
+    if (( ${#FIREWALL_KEEP_REASONS[@]} > 0 )); then
+        FIREWALL_MODE="keep"
+    elif nft_conf_is_installer_owned; then
+        FIREWALL_MODE="own"
+    else
+        FIREWALL_MODE="fresh"
+    fi
+}
+
+# Password logins are disabled further down, so stop now if no key that the
+# hardened sshd accepts would be in place by then.
+if [[ "$ALLOW_NO_SSH_KEY" != "true" ]]; then
+    SSH_KEY_PROBE=$(mktemp)
+    {
+        cat "$USER_HOME/.ssh/authorized_keys" 2>/dev/null || true
+        # The existing file may lack a final newline.
+        printf '\n%s\n' "$SSH_PUBKEY"
+    } > "$SSH_KEY_PROBE"
+    if ! authorized_keys_usable "$SSH_KEY_PROBE"; then
+        rm -f -- "$SSH_KEY_PROBE"
+        echo -e "${BRed}ERROR: no SSH public key that the hardened sshd accepts was provided or found in $USER_HOME/.ssh/authorized_keys.${NC}" >&2
+        echo -e "${BRed}Accepted: ssh-ed25519, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com and ssh-rsa.${NC}" >&2
+        echo -e "${BRed}Plain ECDSA (ecdsa-sha2-*) and DSA keys are rejected. Stopped before any SSH or firewall setting was changed.${NC}" >&2
+        exit 1
+    fi
+    rm -f -- "$SSH_KEY_PROBE"
+fi
+
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+    echo -e "${BBlue}Checking the live system before changing anything...${NC}"
+
+    # Everything installed below must be downloadable now. A stale sync
+    # database (404 from the mirror) would otherwise abort the run halfway.
+    mapfile -t MISSING_PACKAGES < <(pacman -T \
+        nftables logrotate rng-tools arch-audit pax-utils lynis clamav rkhunter \
+        arpwatch chrony sysstat audit fail2ban sudo zsh zsh-completions pambase \
+        pam libpwquality nano-syntax-highlighting pacman-contrib 2>/dev/null || true)
+    if (( ${#MISSING_PACKAGES[@]} > 0 )); then
+        echo -e "${BBlue}Downloading the packages this run installs: ${MISSING_PACKAGES[*]}${NC}"
+        if ! pacman -Sw --noconfirm --needed "${MISSING_PACKAGES[@]}"; then
+            echo -e "${BRed}ERROR: pacman could not download the required packages. No software hardening has been applied yet.${NC}" >&2
+            echo -e "${BRed}The package database is probably out of date: run 'pacman -Syu', reboot if the kernel${NC}" >&2
+            echo -e "${BRed}was upgraded, and start again.${NC}" >&2
+            exit 1
+        fi
+    fi
+    # nft is needed to look at the firewall that is loaded now. Installing the
+    # package changes nothing by itself: its service stays disabled.
+    if ! command -v nft &>/dev/null; then
+        pacman -S --needed --noconfirm nftables
+    fi
+
+    # sshd must stay reachable on the port(s) it uses now until it has really
+    # moved, and another firewall must not be replaced behind the admin's back.
+    mapfile -t CURRENT_SSH_PORTS < <(sshd_listen_ports)
+    for current_port in "${CURRENT_SSH_PORTS[@]}"; do
+        if [[ "$current_port" != "$SSH_PORT" ]]; then
+            SSH_TRANSITION_PORTS+=("$current_port")
+        fi
+    done
+    if (( ${#CURRENT_SSH_PORTS[@]} > 0 )); then
+        echo -e "${BBlue}sshd currently listens on port(s): ${CURRENT_SSH_PORTS[*]}${NC}"
+    fi
+
+    classify_live_firewall
+    case "$FIREWALL_MODE" in
+        keep)
+            echo -e "${BYellow}An existing firewall is in use and will be left untouched:${NC}"
+            for keep_reason in "${FIREWALL_KEEP_REASONS[@]}"; do
+                echo -e "${BYellow}  - $keep_reason${NC}"
+            done
+            # ssh.sh opens a new port itself in a ruleset the installer owns.
+            # In any other firewall nobody would open it.
+            if ! nft_conf_is_installer_owned &&
+               (( ${#SSH_TRANSITION_PORTS[@]} > 0 && ${#SSH_TRANSITION_PORTS[@]} == ${#CURRENT_SSH_PORTS[@]} )); then
+                echo -e "${BRed}ERROR: sshd would be moved from port ${CURRENT_SSH_PORTS[*]} to $SSH_PORT, but this script cannot open${NC}" >&2
+                echo -e "${BRed}port $SSH_PORT in a firewall it does not manage. No software hardening has been applied yet.${NC}" >&2
+                echo -e "${BRed}Keep the current port (-p ${CURRENT_SSH_PORTS[0]}), or allow tcp/$SSH_PORT in your firewall and move sshd${NC}" >&2
+                echo -e "${BRed}afterwards with hardening/ssh/ssh.sh -u $USERNAME -p $SSH_PORT.${NC}" >&2
+                exit 1
+            fi
+            ;;
+        own)
+            echo -e "${BBlue}Firewall: $NFT_CONF was written by this installer and will be updated in place.${NC}"
+            ;;
+        fresh)
+            echo -e "${BBlue}Firewall: none in use; the default-deny nftables ruleset will be installed.${NC}"
+            # A host without packet filtering serves every listening port
+            # today. Those ports stay open, so installing the firewall does
+            # not take running services offline. Nothing is opened when a
+            # default-deny input chain is already loaded.
+            if ! nft list chain inet filter input 2>/dev/null | grep -q 'policy drop'; then
+                find_public_listeners
+                if (( ${#KEPT_TCP_PORTS[@]} + ${#KEPT_UDP_PORTS[@]} > 0 )); then
+                    echo -e "${BYellow}Services are listening on this host. Their ports stay open in the new firewall:${NC}"
+                    if (( ${#KEPT_TCP_PORTS[@]} > 0 )); then
+                        echo -e "${BYellow}  tcp: ${KEPT_TCP_PORTS[*]}${NC}"
+                    fi
+                    if (( ${#KEPT_UDP_PORTS[@]} > 0 )); then
+                        echo -e "${BYellow}  udp: ${KEPT_UDP_PORTS[*]}${NC}"
+                    fi
+                    echo -e "${BYellow}Remove the ones that should not be reachable from $NFT_CONF afterwards.${NC}"
+                fi
+            fi
+            ;;
+    esac
+fi
 
 ###############################################################################
 # BASIC SYSTEM CONFIGURATION
@@ -84,38 +396,56 @@ echo -e "${BBlue}Removing unnecessary users and groups...${NC}"
 groupdel games 2>/dev/null || true
 
 # --- Timezone & Locale (set once) ---
-echo -e "${BBlue}Setting timezone to $TIMEZONE...${NC}"
-ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-echo "$TIMEZONE" > /etc/timezone
-hwclock --systohc --utc || echo -e "${BYellow}Warning: hwclock --systohc failed (RTC unavailable); continuing.${NC}"
+# On a live system (vps-harden) these values are empty unless the caller set
+# them, and the existing timezone, locale and keymap are left as they are.
+if [[ -n "$TIMEZONE" ]]; then
+    echo -e "${BBlue}Setting timezone to $TIMEZONE...${NC}"
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+    echo "$TIMEZONE" > /etc/timezone
+    hwclock --systohc --utc || echo -e "${BYellow}Warning: hwclock --systohc failed (RTC unavailable); continuing.${NC}"
+else
+    echo -e "${BBlue}Keeping the current timezone.${NC}"
+fi
 
-echo -e "${BBlue}Setting up locale to $LOCALE...${NC}"
-sed -i -E "s/^#(${LOCALE//./\\.}[[:space:]])/\1/" /etc/locale.gen
-locale-gen
-echo "LANG=$LOCALE" > /etc/locale.conf
-export LANG="$LOCALE"
+if [[ -n "$LOCALE" ]]; then
+    echo -e "${BBlue}Setting up locale to $LOCALE...${NC}"
+    sed -i -E "s/^#(${LOCALE//./\\.}[[:space:]])/\1/" /etc/locale.gen
+    locale-gen
+    echo "LANG=$LOCALE" > /etc/locale.conf
+    export LANG="$LOCALE"
+else
+    echo -e "${BBlue}Keeping the current locale.${NC}"
+fi
 
-echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
-cat > /etc/vconsole.conf <<VCEOF
+if [[ -n "$KEYMAP" ]]; then
+    echo -e "${BBlue}Setting up console keymap and fonts...${NC}"
+    cat > /etc/vconsole.conf <<VCEOF
 KEYMAP=$KEYMAP
 FONT=lat9w-16
 FONT_MAP=8859-1_to_uni
 VCEOF
+else
+    echo -e "${BBlue}Keeping the current console keymap.${NC}"
+fi
 
 # --- X11 keyboard configuration ---
 # Translate vconsole keymap to X11 layout using systemd's kbd-model-map.
 vconsole_to_x11() {
     local keymap="$1"
-    local layout="" variant="" line
+    local layout="" model="" variant="" line
     local map_file="/usr/share/systemd/kbd-model-map"
 
     if [[ -f "$map_file" ]]; then
-        # Match the first column (console keymap) exactly
-        line=$(awk -v km="$keymap" '$1 == km { print; exit }' "$map_file")
+        # Columns: consolelayout xlayout xmodel xvariant xoptions.
+        # Match the first column (console keymap) exactly.
+        line=$(awk -v km="$keymap" '!/^#/ && $1 == km { print; exit }' "$map_file")
         if [[ -n "$line" ]]; then
-            layout=$(echo "$line" | awk '{print $3}')
-            variant=$(echo "$line" | awk '{print $4}')
-            # kbd-model-map uses "" for empty variant
+            layout=$(awk '{print $2}' <<< "$line")
+            model=$(awk '{print $3}' <<< "$line")
+            variant=$(awk '{print $4}' <<< "$line")
+            # kbd-model-map uses "-" for an empty field
+            [[ "$layout" == "-" ]] && layout=""
+            [[ "$model" == "-" ]] && model=""
             if [[ "$variant" == '""' || "$variant" == "-" ]]; then
                 variant=""
             fi
@@ -144,24 +474,27 @@ vconsole_to_x11() {
         esac
     fi
 
-    echo "$layout" "$variant"
+    # Variant last: it is the only field that may be empty.
+    echo "$layout" "${model:-pc105}" "$variant"
 }
 
-echo -e "${BBlue}Writing X11 keyboard configuration...${NC}"
-read -r X11_LAYOUT X11_VARIANT <<< "$(vconsole_to_x11 "$KEYMAP")"
-install -d /etc/X11/xorg.conf.d
-{
-    echo 'Section "InputClass"'
-    echo '    Identifier "system-keyboard"'
-    echo '    MatchIsKeyboard "on"'
-    echo "    Option \"XkbLayout\" \"$X11_LAYOUT\""
-    echo '    Option "XkbModel" "pc105"'
-    if [[ -n "$X11_VARIANT" ]]; then
-        echo "    Option \"XkbVariant\" \"$X11_VARIANT\""
-    fi
-    echo '    Option "XkbOptions" ""'
-    echo 'EndSection'
-} > /etc/X11/xorg.conf.d/00-keyboard.conf
+if [[ -n "$KEYMAP" ]]; then
+    echo -e "${BBlue}Writing X11 keyboard configuration...${NC}"
+    read -r X11_LAYOUT X11_MODEL X11_VARIANT <<< "$(vconsole_to_x11 "$KEYMAP")"
+    install -d /etc/X11/xorg.conf.d
+    {
+        echo 'Section "InputClass"'
+        echo '    Identifier "system-keyboard"'
+        echo '    MatchIsKeyboard "on"'
+        echo "    Option \"XkbLayout\" \"$X11_LAYOUT\""
+        echo "    Option \"XkbModel\" \"${X11_MODEL:-pc105}\""
+        if [[ -n "$X11_VARIANT" ]]; then
+            echo "    Option \"XkbVariant\" \"$X11_VARIANT\""
+        fi
+        echo '    Option "XkbOptions" ""'
+        echo 'EndSection'
+    } > /etc/X11/xorg.conf.d/00-keyboard.conf
+fi
 
 # --- Hostname ---
 echo -e "${BBlue}Setting hostname...${NC}"
@@ -169,6 +502,23 @@ hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || true
 echo "$HOSTNAME" > /etc/hostname
 
 echo -e "${BBlue}Configuring /etc/hosts...${NC}"
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" && -e /etc/hosts ]]; then
+    # Live system: keep the administrator's entries. Only make sure localhost
+    # and the hostname itself resolve locally.
+    backup_before_change /etc/hosts
+    if ! grep -Eq '^127\.0\.0\.1[[:space:]]' /etc/hosts; then
+        echo "127.0.0.1       localhost" >> /etc/hosts
+    fi
+    if ! grep -Eq '^::1[[:space:]]' /etc/hosts; then
+        echo "::1             localhost ip6-localhost ip6-loopback" >> /etc/hosts
+    fi
+    if ! awk -v host="$HOSTNAME" '
+            !/^[[:space:]]*#/ { for (i = 2; i <= NF; i++) if ($i == host) found = 1 }
+            END { exit found ? 0 : 1 }
+        ' /etc/hosts; then
+        echo "127.0.1.1       $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
+    fi
+else
 cat > /etc/hosts <<EOF
 # Static table lookup for hostnames
 # IPv4
@@ -187,6 +537,7 @@ ff02::2         ip6-allrouters
 0.0.0.0         facebook.com
 0.0.0.0         www.facebook.com
 EOF
+fi
 
 chmod 644 /etc/hosts
 chown root:root /etc/hosts
@@ -196,6 +547,12 @@ chown root:root /etc/hosts
 ###############################################################################
 
 echo -e "${BBlue}Configuring network parameters...${NC}"
+
+# The systemd-networkd profile is only written by the installer. On a live
+# system the network is already configured, and "20-wired.network" with
+# DHCP=yes would sort before (and so replace) a static profile such as
+# 50-static.network at the next boot.
+if [[ "$INSTALL_TYPE_VAL" != "vps-harden" ]]; then
 mkdir -p /etc/systemd/network/
 
 cat > /etc/systemd/network/20-wired.network <<EOF
@@ -213,9 +570,13 @@ DNSOverTLS=no
 IPv6PrivacyExtensions=yes
 
 [DHCPv4]
-UseDNS=no  # Don't accept DNS from DHCP
+# systemd does not allow a comment after a value on the same line: the whole
+# "no  # ..." string is rejected and the setting silently keeps its default.
+# Don't accept DNS from DHCP
+UseDNS=no
 UseDomains=no
-UseNTP=no  # Use our own NTP configuration
+# Use our own NTP configuration
+UseNTP=no
 
 [DHCPv6]
 UseDNS=no
@@ -225,6 +586,9 @@ UseNTP=no
 UseDNS=no
 DHCPv6Client=no
 EOF
+else
+    echo -e "${BBlue}Keeping the existing network profiles (live system).${NC}"
+fi
 
 # Configure NetworkManager with privacy settings (if installed)
 if [ -d /etc/NetworkManager ]; then
@@ -235,8 +599,11 @@ if [ -d /etc/NetworkManager ]; then
 systemd-resolved=true
 
 [connection]
-# VPS typically uses static MAC, but keep privacy for safety
-connection.stable-id=\${CONNECTION}/\${BOOT}
+# No per-boot connection.stable-id on a server: with \${CONNECTION}/\${BOOT}
+# the stable-privacy IPv6 address changes at every reboot, which breaks AAAA
+# records and provider-side source filtering. NetworkManager's default
+# (derived from the connection UUID) is stable across reboots and still does
+# not expose the MAC address.
 EOF
 fi
 
@@ -280,6 +647,10 @@ systemctl daemon-reload 2>/dev/null || true
 if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
     echo -e "${BBlue}Pointing /etc/resolv.conf at the resolved stub...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null || true
+    # Keep the provider's resolver list in case DNS-over-TLS is blocked.
+    if [[ -f /etc/resolv.conf && ! -L /etc/resolv.conf ]]; then
+        backup_before_change /etc/resolv.conf
+    fi
     rm -f /etc/resolv.conf
     ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     systemctl enable --now systemd-resolved
@@ -304,14 +675,104 @@ echo -e "${BBlue}DNS-over-TLS configuration completed!${NC}"
 ###############################################################################
 
 echo -e "${BBlue}Configuring firewall with nftables...${NC}"
-pacman -S --noconfirm nftables
+pacman -S --needed --noconfirm nftables
 
-cat <<'EOF' > /etc/nftables.conf
+# The ruleset is assembled from fragments so that a ruleset written by an
+# earlier run can be brought up to date line by line (see
+# update_installer_ruleset) instead of being replaced.
+
+# Table level: the sets behind the per-source SSH rate limit.
+nft_ssh_set_definitions() {
+    cat <<'EOF'
+    # Per-source SSH connection tracking for the rate limit below. A plain
+    # "limit rate" is ONE bucket shared by every client, so background scan
+    # noise on the SSH port would lock the legitimate admin out.
+    set ssh_ratelimit4 {
+        type ipv4_addr
+        flags dynamic
+        timeout 2m
+        size 65535
+    }
+
+    set ssh_ratelimit6 {
+        type ipv6_addr
+        flags dynamic
+        timeout 2m
+        size 65535
+    }
+EOF
+}
+
+# Input chain: ICMP, ICMPv6 and the DHCPv6 client.
+nft_icmp_rules() {
+    cat <<'EOF'
+        # Allow ICMP & ICMPv6 (Path MTU Discovery, IPv6 Neighbor Discovery, MLD).
+        # "meta l4proto" also matches ICMPv6 behind extension headers, which
+        # "ip6 nexthdr" does not; MLD queries must be answered or switches with
+        # MLD snooping stop forwarding neighbour-discovery multicast to us.
+        meta l4proto icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        meta l4proto ipv6-icmp icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query, mld-listener-report, mld-listener-done, mld2-listener-report } accept
+
+        # DHCPv6 client: server replies go to a link-local address that
+        # conntrack cannot relate to our multicast solicit.
+        ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+EOF
+}
+
+# Input chain: SSH on port $1, rate limited per source address. Any further
+# argument is a port the running sshd still listens on (live systems only):
+# it stays open, tagged, until finish_ssh_port_move removes it again.
+nft_ssh_rules() {
+    local ssh_port="$1" old_port
+    shift
+    cat <<EOF
+        # Allow SSH with per-source rate limiting (burst allows legitimate reconnects)
+        tcp dport ${ssh_port} ct state new add @ssh_ratelimit4 { ip saddr limit rate over 4/minute burst 8 packets } drop
+        tcp dport ${ssh_port} ct state new add @ssh_ratelimit6 { ip6 saddr limit rate over 4/minute burst 8 packets } drop
+        tcp dport ${ssh_port} ct state new accept
+EOF
+    for old_port in "$@"; do
+        echo "        # ${SSH_TRANSITION_TAG}: sshd still listens on port ${old_port}; removed once it has moved to port ${ssh_port}"
+        echo "        tcp dport ${old_port} ct state new accept comment \"${SSH_TRANSITION_TAG}\""
+    done
+}
+
+# Input chain: the services that were reachable before this host had a
+# firewall (live systems only, see find_public_listeners). Prints nothing when
+# there are none.
+nft_kept_service_rules() {
+    local ports
+    (( ${#KEPT_TCP_PORTS[@]} + ${#KEPT_UDP_PORTS[@]} > 0 )) || return 0
+    cat <<'EOF'
+        # Services that were listening when this firewall was installed on the
+        # running system. Remove the ports that should not be reachable.
+EOF
+    if (( ${#KEPT_TCP_PORTS[@]} > 0 )); then
+        ports=$(IFS=,; echo "${KEPT_TCP_PORTS[*]}")
+        echo "        tcp dport { ${ports//,/, } } accept"
+    fi
+    if (( ${#KEPT_UDP_PORTS[@]} > 0 )); then
+        ports=$(IFS=,; echo "${KEPT_UDP_PORTS[*]}")
+        echo "        udp dport { ${ports//,/, } } accept"
+    fi
+}
+
+# The complete installer-owned ruleset. Arguments as for nft_ssh_rules.
+write_nftables_base_ruleset() {
+    local input_rules kept_rules
+    input_rules="$(nft_icmp_rules)"$'\n\n'"$(nft_ssh_rules "$@")"
+    kept_rules=$(nft_kept_service_rules)
+    if [[ -n "$kept_rules" ]]; then
+        input_rules+=$'\n\n'"$kept_rules"
+    fi
+    cat <<EOF
 #!/usr/sbin/nft -f
 
 flush ruleset
 
 table inet filter {
+$(nft_ssh_set_definitions)
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -324,12 +785,7 @@ table inet filter {
         # Drop invalid connections
         ct state invalid drop
 
-        # Allow ICMP & ICMPv6 (Path MTU Discovery & IPv6 Neighbor Discovery)
-        ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
-        ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
-
-        # Allow SSH with rate limiting (burst allows legitimate reconnects)
-        tcp dport $SSH_PORT ct state new limit rate 4/minute burst 8 packets accept
+${input_rules}
 
         # Drop everything else
         counter drop
@@ -344,16 +800,185 @@ table inet filter {
     }
 }
 EOF
+}
 
-sed -i "s/\$SSH_PORT/$SSH_PORT/g" /etc/nftables.conf
+# Port of the installer's own SSH rule in /etc/nftables.conf, in the old
+# shared-bucket "limit rate" form or the per-source form. Empty when ssh.sh
+# has moved sshd since and removed that rule in favour of its managed block.
+nft_installer_ssh_port() {
+    awk '
+        /^# BEGIN AwesomeArchLinux: / { managed = 1 }
+        /^# END AwesomeArchLinux: /   { managed = 0; next }
+        managed { next }
+        /^[[:space:]]*tcp dport [0-9]+ ct state new (limit rate 4\/minute burst 8 packets accept|add @ssh_ratelimit4 )/ {
+            print $3
+            exit
+        }
+    ' "$NFT_CONF"
+}
 
-systemctl enable nftables.service
+# Bring an installer ruleset written by an earlier run up to date
+# (stdin -> stdout). Only lines this installer wrote are replaced: its SSH
+# rule (the old shared-bucket one, or the per-source ones) becomes the
+# per-source rules for port $1, the sets they use are added, and the old ICMP
+# lines are replaced by the current ones. Rules the administrator added and
+# the managed blocks of the hardening scripts pass through byte for byte.
+#   $1 SSH port
+#   $2 port of the installer's SSH rule in the file ("" when it has none:
+#      the SSH rules then live in ssh.sh's managed block and are not touched)
+#   $3... ports the running sshd still listens on (see nft_ssh_rules)
+update_installer_ruleset() {
+    local ssh_port="$1" owned_port="$2" input have_sets=1 upgrade_icmp=0
+    local old_icmp4="ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept"
+    local old_icmp6="ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept"
+    shift 2
+
+    if [[ -n "$owned_port" ]]; then
+        # Tagged rules left over from an interrupted port move are dropped;
+        # the ones that are needed now are written again with the SSH rules.
+        input=$(grep -Fv -- "$SSH_TRANSITION_TAG" || true)
+        if ! grep -Eq '^[[:space:]]*set[[:space:]]+ssh_ratelimit4[[:space:]]' <<< "$input"; then
+            have_sets=0
+        fi
+    else
+        input=$(cat)
+    fi
+    if grep -Fq -- "$old_icmp4" <<< "$input" && grep -Fq -- "$old_icmp6" <<< "$input"; then
+        upgrade_icmp=1
+    fi
+
+    AAL_OWNED_PORT="$owned_port" \
+    AAL_HAVE_SETS="$have_sets" AAL_UPGRADE_ICMP="$upgrade_icmp" \
+    AAL_OLD_ICMP4="$old_icmp4" AAL_OLD_ICMP6="$old_icmp6" \
+    AAL_SETS="$(nft_ssh_set_definitions)" AAL_ICMP="$(nft_icmp_rules)" \
+    AAL_SSH="$(nft_ssh_rules "$ssh_port" "$@")" awk '
+        BEGIN {
+            owned = ENVIRON["AAL_OWNED_PORT"]
+            if (owned != "") {
+                head = "tcp dport " owned " ct state new "
+                ssh_line[head "limit rate 4/minute burst 8 packets accept"] = 1
+                ssh_line[head "add @ssh_ratelimit4 { ip saddr limit rate over 4/minute burst 8 packets } drop"] = 1
+                ssh_line[head "add @ssh_ratelimit6 { ip6 saddr limit rate over 4/minute burst 8 packets } drop"] = 1
+                ssh_line[head "accept"] = 1
+            }
+        }
+        /^# BEGIN AwesomeArchLinux: / { managed = 1 }
+        /^# END AwesomeArchLinux: /   { print; managed = 0; next }
+        managed                        { print; next }
+        {
+            trimmed = $0
+            sub(/^[[:space:]]+/, "", trimmed)
+            sub(/[[:space:]]+$/, "", trimmed)
+        }
+        ENVIRON["AAL_HAVE_SETS"] == "0" && !sets_done && /^table inet filter \{[[:space:]]*$/ {
+            print
+            print ENVIRON["AAL_SETS"]
+            print ""
+            sets_done = 1
+            next
+        }
+        owned != "" && trimmed ~ /^# Allow SSH with (per-source )?rate limiting/ { next }
+        (trimmed in ssh_line) {
+            if (!ssh_done) {
+                print ENVIRON["AAL_SSH"]
+                ssh_done = 1
+            }
+            next
+        }
+        ENVIRON["AAL_UPGRADE_ICMP"] == "1" &&
+            trimmed == "# Allow ICMP & ICMPv6 (Path MTU Discovery & IPv6 Neighbor Discovery)" { next }
+        ENVIRON["AAL_UPGRADE_ICMP"] == "1" &&
+            (trimmed == ENVIRON["AAL_OLD_ICMP4"] || trimmed == ENVIRON["AAL_OLD_ICMP6"]) {
+            if (!icmp_done) {
+                print ENVIRON["AAL_ICMP"]
+                icmp_done = 1
+            }
+            next
+        }
+        { print }
+    ' <<< "$input"
+}
+
+# Install a candidate ruleset as /etc/nftables.conf after "nft -c" accepted it
+# (when nft works on this kernel). The candidate file is consumed.
+install_nftables_conf() {
+    local candidate="$1"
+    if nft list ruleset &>/dev/null && ! nft -c -f "$candidate"; then
+        rm -f -- "$candidate"
+        echo -e "${BRed}ERROR: the generated nftables ruleset did not validate; $NFT_CONF was not changed.${NC}" >&2
+        return 1
+    fi
+    install -m 0644 -o root -g root "$candidate" "$NFT_CONF"
+    rm -f -- "$candidate"
+}
+
+NFT_CONF_CHANGED=false
+case "$FIREWALL_MODE" in
+    install)
+        write_nftables_base_ruleset "$SSH_PORT" > "$NFT_CONF"
+        ;;
+    fresh)
+        # No firewall in use: install the complete ruleset. The port(s) sshd
+        # listens on now stay open until it has moved.
+        backup_before_change "$NFT_CONF"
+        NFT_CANDIDATE=$(mktemp /etc/.nftables.conf.XXXXXX)
+        write_nftables_base_ruleset "$SSH_PORT" "${SSH_TRANSITION_PORTS[@]}" > "$NFT_CANDIDATE"
+        install_nftables_conf "$NFT_CANDIDATE"
+        NFT_CONF_CHANGED=true
+        ;;
+    own)
+        # The installer's ruleset from an earlier run: update it in place.
+        NFT_CANDIDATE=$(mktemp /etc/.nftables.conf.XXXXXX)
+        update_installer_ruleset "$SSH_PORT" "$(nft_installer_ssh_port)" "${SSH_TRANSITION_PORTS[@]}" \
+            < "$NFT_CONF" > "$NFT_CANDIDATE"
+        if cmp -s -- "$NFT_CANDIDATE" "$NFT_CONF"; then
+            rm -f -- "$NFT_CANDIDATE"
+            echo -e "${BBlue}$NFT_CONF is already up to date.${NC}"
+        else
+            backup_before_change "$NFT_CONF"
+            if install_nftables_conf "$NFT_CANDIDATE"; then
+                NFT_CONF_CHANGED=true
+                echo -e "${BBlue}Updated the installer rules in $NFT_CONF; all other rules were kept.${NC}"
+            else
+                # ssh.sh opens the SSH port itself before it reloads sshd, so
+                # the existing ruleset can stay as it is.
+                echo -e "${BYellow}WARNING: $NFT_CONF was left as it is; compare it with the current installer ruleset.${NC}"
+            fi
+        fi
+        ;;
+    keep)
+        # Another firewall is in use (the reasons were printed at the start).
+        # Leave a copy of the installer ruleset for the administrator to compare.
+        write_nftables_base_ruleset "$SSH_PORT" > /root/nftables.conf.awesome-proposed
+        chmod 0600 /root/nftables.conf.awesome-proposed
+        echo -e "${BYellow}Existing firewall kept. The ruleset this installer would use is in /root/nftables.conf.awesome-proposed.${NC}"
+        ;;
+esac
+
 FAIL2BAN_BANACTION="nftables-multiport"
 
-# Start nftables on live systems — may fail on VPS kernels without nf_tables module support
-if nft list ruleset &>/dev/null; then
+if [[ "$FIREWALL_MODE" == "keep" ]]; then
+    if ! nft list ruleset &>/dev/null; then
+        FAIL2BAN_BANACTION="iptables-multiport"
+    fi
+    if ! nft_conf_is_installer_owned; then
+        # Point ssh.sh's ruleset path at a file that does not exist, so that it
+        # neither writes into a ruleset somebody else maintains nor aborts on
+        # one it cannot edit. (The check at the start made sure sshd keeps a
+        # port it already uses.)
+        SSH_HARDEN_ENV=(AAL_NFT_CONFIG=/run/awesomearchlinux/no-installer-ruleset)
+    fi
+elif nft list ruleset &>/dev/null; then
+    systemctl enable nftables.service
+    # Live systems: load the ruleset now. "nft -f" replaces the ruleset in one
+    # transaction, so there is no moment without rules. An unchanged ruleset
+    # is only loaded when it is not active yet.
     if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
-        systemctl start nftables.service
+        if [[ "$NFT_CONF_CHANGED" == true ]] || ! nft list chain inet filter input &>/dev/null; then
+            nft -f "$NFT_CONF"
+            # fail2ban keeps its bans in a table of its own, which the reload flushed.
+            systemctl try-restart fail2ban.service 2>/dev/null || true
+        fi
     fi
     echo -e "${BGreen}Firewall configuration with nftables completed.${NC}"
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
@@ -364,50 +989,164 @@ elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
     rm -f /etc/nftables.conf
     FAIL2BAN_BANACTION="iptables-multiport"
 
-    # Flush existing rules and set default deny
-    iptables -F
-    iptables -X
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
+    # Default-deny input policy for one address family ($1 = iptables or
+    # ip6tables). SSH is limited per source address with hashlimit; a plain
+    # "-m limit" is one bucket shared by every client and lets background
+    # scan noise lock the administrator out.
+    apply_iptables_fallback() {
+        local ipt="$1" icmp_type port
 
-    # Allow loopback
-    iptables -A INPUT -i lo -j ACCEPT
+        # Flush existing rules. The default-deny policies are set last, so a
+        # running system is never without its accept rules.
+        "$ipt" -F
+        "$ipt" -X
 
-    # Allow established connections
-    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        # Allow loopback
+        "$ipt" -A INPUT -i lo -j ACCEPT
 
-    # Drop invalid connections
-    iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+        # Allow established connections
+        "$ipt" -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # Allow essential ICMP (ping, PMTUD)
-    iptables -A INPUT -p icmp -m icmp --icmp-type echo-request -j ACCEPT
-    iptables -A INPUT -p icmp -m icmp --icmp-type destination-unreachable -j ACCEPT
-    iptables -A INPUT -p icmp -m icmp --icmp-type time-exceeded -j ACCEPT
+        # Drop invalid connections
+        "$ipt" -A INPUT -m conntrack --ctstate INVALID -j DROP
 
-    # Allow SSH with rate limiting (matches nftables: 4/min burst 8)
-    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
-        -m limit --limit 4/min --limit-burst 8 -j ACCEPT
-    iptables -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j DROP
+        if [[ "$ipt" == "ip6tables" ]]; then
+            # ICMPv6: errors, ping, neighbour discovery and MLD (130-132, 143)
+            for icmp_type in destination-unreachable packet-too-big time-exceeded parameter-problem \
+                echo-request router-solicitation router-advertisement \
+                neighbour-solicitation neighbour-advertisement 130 131 132 143; do
+                "$ipt" -A INPUT -p ipv6-icmp --icmpv6-type "$icmp_type" -j ACCEPT
+            done
+            # DHCPv6 client replies (link-local, not tracked as related)
+            "$ipt" -A INPUT -s fe80::/10 -p udp --sport 547 --dport 546 -j ACCEPT
+        else
+            # Allow essential ICMP (ping, PMTUD)
+            for icmp_type in echo-request destination-unreachable time-exceeded; do
+                "$ipt" -A INPUT -p icmp -m icmp --icmp-type "$icmp_type" -j ACCEPT
+            done
+        fi
+
+        # Allow SSH with per-source rate limiting (matches nftables: 4/min burst 8)
+        if ! "$ipt" -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW \
+            -m hashlimit --hashlimit-name awesome-ssh-base --hashlimit-mode srcip \
+            --hashlimit-above 4/minute --hashlimit-burst 8 --hashlimit-htable-expire 120000 -j DROP; then
+            echo -e "${BYellow}WARNING: xt_hashlimit is unavailable; SSH port $SSH_PORT is open without a firewall rate limit ($ipt).${NC}"
+        fi
+        "$ipt" -A INPUT -p tcp --dport "$SSH_PORT" -m conntrack --ctstate NEW -j ACCEPT
+
+        # Live systems: the port(s) of the running sshd stay open until it has
+        # moved, and services that were reachable before stay reachable.
+        for port in "${SSH_TRANSITION_PORTS[@]}"; do
+            "$ipt" -A INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW -j ACCEPT
+        done
+        for port in "${KEPT_TCP_PORTS[@]}"; do
+            "$ipt" -A INPUT -p tcp --dport "$port" -j ACCEPT
+        done
+        for port in "${KEPT_UDP_PORTS[@]}"; do
+            "$ipt" -A INPUT -p udp --dport "$port" -j ACCEPT
+        done
+
+        "$ipt" -P INPUT DROP
+        "$ipt" -P FORWARD DROP
+        "$ipt" -P OUTPUT ACCEPT
+    }
+
+    apply_iptables_fallback iptables
 
     # Persist rules
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/iptables.rules
     systemctl enable iptables.service 2>/dev/null || true
 
+    # IPv6 gets the same policy; leaving ip6tables untouched would expose every
+    # service over IPv6.
+    if command -v ip6tables &>/dev/null && ip6tables -L -n &>/dev/null; then
+        apply_iptables_fallback ip6tables
+        ip6tables-save > /etc/iptables/ip6tables.rules
+        systemctl enable ip6tables.service 2>/dev/null || true
+    elif [[ "$SYSCTL_DISABLE_IPV6" != true ]]; then
+        echo -e "${BYellow}WARNING: ip6tables is not functional on this kernel — IPv6 traffic is NOT filtered.${NC}"
+        echo -e "${BYellow}Disable IPv6 or add IPv6 rules manually.${NC}"
+    fi
+
     echo -e "${BGreen}Firewall configured with iptables (legacy fallback).${NC}"
 else
     echo -e "${BYellow}WARNING: Neither nftables nor iptables is functional on this kernel.${NC}"
+    systemctl enable nftables.service
     echo -e "${BYellow}nftables is enabled and will start if the kernel supports it after reboot.${NC}"
     echo -e "${BYellow}You may need to configure firewall rules manually once the system is booted.${NC}"
+    # ssh.sh validates every change to the ruleset with nft, which cannot work
+    # here: keep it away from the file (see the "keep" case above).
+    SSH_HARDEN_ENV=(AAL_NFT_CONFIG=/run/awesomearchlinux/no-installer-ruleset)
 fi
+
+# Live systems: called after ssh.sh has reloaded sshd. Once sshd answers on
+# $SSH_PORT and has left its previous port(s), the tagged rules that kept
+# those ports open are removed from the saved ruleset and from the running one.
+finish_ssh_port_move() {
+    local listening="" port handle candidate
+    [[ "$FIREWALL_MODE" == "fresh" || "$FIREWALL_MODE" == "own" ]] || return 0
+    if (( ${#SSH_TRANSITION_PORTS[@]} == 0 )) &&
+       ! grep -Fq -- "$SSH_TRANSITION_TAG" "$NFT_CONF" 2>/dev/null; then
+        return 0
+    fi
+
+    # Only a listener that is really there counts, not the configured port.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        listening=$(sshd_listen_ports live)
+        if grep -Fqx -- "$SSH_PORT" <<< "$listening"; then
+            break
+        fi
+        sleep 1
+    done
+    if ! grep -Fqx -- "$SSH_PORT" <<< "$listening"; then
+        echo -e "${BYellow}WARNING: could not confirm that sshd listens on port $SSH_PORT. The previous SSH port(s) stay open in the firewall.${NC}"
+        echo -e "${BYellow}Once SSH works on port $SSH_PORT, delete the lines tagged \"$SSH_TRANSITION_TAG\" from $NFT_CONF and reload it.${NC}"
+        return 0
+    fi
+    for port in "${SSH_TRANSITION_PORTS[@]}"; do
+        if grep -Fqx -- "$port" <<< "$listening"; then
+            echo -e "${BYellow}WARNING: sshd still listens on port $port; its firewall rule is kept.${NC}"
+            return 0
+        fi
+    done
+
+    if [[ -f "$NFT_CONF" ]] && grep -Fq -- "$SSH_TRANSITION_TAG" "$NFT_CONF"; then
+        candidate=$(mktemp /etc/.nftables.conf.XXXXXX)
+        grep -Fv -- "$SSH_TRANSITION_TAG" "$NFT_CONF" > "$candidate" || true
+        install_nftables_conf "$candidate" || return 0
+    fi
+    if nft list chain inet filter input &>/dev/null; then
+        while IFS= read -r handle; do
+            [[ "$handle" =~ ^[0-9]+$ ]] || continue
+            nft delete rule inet filter input handle "$handle" 2>/dev/null || true
+        done < <(nft -a list chain inet filter input 2>/dev/null |
+            AAL_MARKER="comment \"${SSH_TRANSITION_TAG}\"" awk '
+                index($0, ENVIRON["AAL_MARKER"]) {
+                    for (i = 1; i <= NF; i++) if ($i == "handle") print $(i + 1)
+                }
+            ' || true)
+    elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null; then
+        for port in "${SSH_TRANSITION_PORTS[@]}"; do
+            iptables -D INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
+            ip6tables -D INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
+        done
+        if [[ -f /etc/iptables/iptables.rules ]]; then
+            iptables-save > /etc/iptables/iptables.rules
+        fi
+        if [[ -f /etc/iptables/ip6tables.rules ]]; then
+            ip6tables-save > /etc/iptables/ip6tables.rules
+        fi
+    fi
+    echo -e "${BGreen}sshd listens on port $SSH_PORT; the previous SSH port(s) are closed in the firewall again.${NC}"
+}
 
 ###############################################################################
 # LOGGING & ENTROPY
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring logrotate...${NC}"
-pacman -S --noconfirm logrotate
+pacman -S --needed --noconfirm logrotate
 cat <<EOF > /etc/logrotate.d/custom
 /var/log/messages /var/log/secure /var/log/auth.log /var/log/boot.log /var/log/sudo.log /var/log/pacman-updates.log {
     daily
@@ -421,21 +1160,21 @@ cat <<EOF > /etc/logrotate.d/custom
 EOF
 
 echo -e "${BBlue}Installing and configuring rng-tools...${NC}"
-pacman -S --noconfirm rng-tools
+pacman -S --needed --noconfirm rng-tools
 systemctl enable rngd
 
 echo -e "${BBlue}Installing file security utility pax-utils & arch-audit...${NC}"
-pacman -S --noconfirm arch-audit pax-utils
+pacman -S --needed --noconfirm arch-audit pax-utils
 
 echo -e "${BBlue}Installing lynis...${NC}"
-pacman -S --noconfirm lynis
+pacman -S --needed --noconfirm lynis
 
 ###############################################################################
 # CLAMAV CONFIGURATION
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring ClamAV...${NC}"
-pacman -S --noconfirm clamav
+pacman -S --needed --noconfirm clamav
 
 echo -e "${BBlue}Configuring ClamAV...${NC}"
 
@@ -453,8 +1192,12 @@ CLAMD_CONF="/etc/clamav/clamd.conf"
 ensure_clamd_option() {
   local KEY="$1"
   local VALUE="$2"
-  if grep -Eq "^#?\s*${KEY}\s" "$CLAMD_CONF"; then
-    sed -i "s|^#\?\s*${KEY}.*|${KEY} ${VALUE}|" "$CLAMD_CONF"
+  # If the key exists, replace it; otherwise, append it. The option name is
+  # matched as a whole word: a bare prefix match let "Bytecode" overwrite the
+  # BytecodeSecurity/BytecodeTimeout lines and "AlertEncrypted" the
+  # AlertEncryptedArchive/AlertEncryptedDoc ones.
+  if grep -Eq "^#?\s*${KEY}(\s|\$)" "$CLAMD_CONF"; then
+    sed -Ei "s|^#?\s*${KEY}(\s.*)?\$|${KEY} ${VALUE}|" "$CLAMD_CONF"
   else
     echo "${KEY} ${VALUE}" >> "$CLAMD_CONF"
   fi
@@ -507,7 +1250,7 @@ echo -e "${BBlue}ClamAV configuration completed!${NC}"
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring rkhunter...${NC}"
-pacman -S --noconfirm rkhunter
+pacman -S --needed --noconfirm rkhunter
 
 cat <<EOF > /etc/systemd/system/rkhunter-check.service
 [Unit]
@@ -533,7 +1276,7 @@ systemctl enable rkhunter-check.timer
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring arpwatch...${NC}"
-pacman -S --noconfirm arpwatch
+pacman -S --needed --noconfirm arpwatch
 
 ###############################################################################
 # NOTE: USBGuard and Bluetooth skipped — not relevant on VPS
@@ -590,7 +1333,7 @@ grep -qxF '* hard core 0' /etc/security/limits.conf 2>/dev/null || echo "* hard 
 ###############################################################################
 
 echo -e "${BBlue}Installing chrony for NTP...${NC}"
-pacman -S --noconfirm chrony
+pacman -S --needed --noconfirm chrony
 install -d -o chrony -g chrony -m 0750 /var/log/chrony
 systemctl enable chronyd
 
@@ -599,11 +1342,11 @@ systemctl enable chronyd
 ###############################################################################
 
 echo -e "${BBlue}Enabling sysstat...${NC}"
-pacman -S --noconfirm sysstat
+pacman -S --needed --noconfirm sysstat
 systemctl enable sysstat
 
 echo -e "${BBlue}Enabling auditd...${NC}"
-pacman -S --noconfirm audit
+pacman -S --needed --noconfirm audit
 configure_audit_rules
 # Loading audit rules here would change the live installer kernel.
 systemctl enable auditd
@@ -651,7 +1394,7 @@ ln -sf /dev/null /etc/systemd/system/systemd-time-wait-sync.service 2>/dev/null 
 ###############################################################################
 
 echo -e "${BBlue}Installing and configuring Fail2ban...${NC}"
-pacman -S --noconfirm fail2ban
+pacman -S --needed --noconfirm fail2ban
 
 install -d -m 0755 /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 cat <<'EOF' > /etc/fail2ban/filter.d/sshd.local
@@ -691,12 +1434,15 @@ echo -e "${BBlue}Hardening sudo...${NC}"
 groupadd -r proc 2>/dev/null || true
 groupadd sudo 2>/dev/null || true
 
-# Write sudoers atomically via private /etc temp file + visudo validation
-SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
-chmod 0440 "$SUDOERS_TMP"
-cat > "$SUDOERS_TMP" << 'SUDOERS_EOF'
-# Hardened sudoers — generated by vps-chroot.sh
+# visudo ships with sudo, which a minimal live image may not have.
+if ! command -v visudo &>/dev/null; then
+    pacman -S --needed --noconfirm sudo
+fi
 
+# The Defaults shared by the installer's /etc/sudoers and by the drop-in used
+# on live systems.
+sudoers_hardening_defaults() {
+    cat << 'SUDOERS_EOF'
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Defaults !rootpw
 Defaults umask=077
@@ -719,21 +1465,94 @@ Defaults insults
 Defaults lecture=once
 Defaults logfile=/var/log/sudo.log
 Defaults log_input, log_output
-
-root ALL=(ALL:ALL) ALL
-%sudo ALL=(ALL:ALL) ALL
-
-@includedir /etc/sudoers.d
+# log_input records everything typed under sudo. Keep passwords entered at
+# prompts of the commands being run (passwd, cryptsetup, ssh, ...) out of
+# /var/log/sudo-io, and cap the number of session logs so they cannot fill /var.
+Defaults !log_passwords
+Defaults maxseq=10000
 SUDOERS_EOF
+}
 
-# Validate before installing
-if visudo -c -f "$SUDOERS_TMP"; then
-    install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers
-    echo -e "${BGreen}Sudoers validated and installed successfully.${NC}"
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" && -f /etc/sudoers ]]; then
+    # Live system: /etc/sudoers keeps the administrator's rules (%wheel,
+    # NOPASSWD entries, aliases). The hardening is added as a drop-in; a file
+    # name with a dot or a trailing "~" would be skipped by sudo.
+    backup_before_change /etc/sudoers
+    install -d -m 0750 -o root -g root /etc/sudoers.d
+    if ! grep -Eq '^[#@]includedir[[:space:]]+/etc/sudoers\.d/?[[:space:]]*$' /etc/sudoers; then
+        SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
+        chmod 0440 "$SUDOERS_TMP"
+        {
+            cat /etc/sudoers
+            printf '\n@includedir /etc/sudoers.d\n'
+        } > "$SUDOERS_TMP"
+        if visudo -c -f "$SUDOERS_TMP" >/dev/null; then
+            install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers
+            echo -e "${BBlue}Added '@includedir /etc/sudoers.d' to /etc/sudoers.${NC}"
+        else
+            echo -e "${BRed}ERROR: could not add '@includedir /etc/sudoers.d' to /etc/sudoers; it was left unchanged.${NC}" >&2
+        fi
+        rm -f "$SUDOERS_TMP"
+    fi
+
+    SUDOERS_DROPIN="/etc/sudoers.d/00-awesome-hardening"
+    SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
+    chmod 0440 "$SUDOERS_TMP"
+    {
+        echo "# sudo hardening — generated by vps-chroot.sh"
+        echo "# Rules in /etc/sudoers and in the other files of this directory still apply."
+        echo
+        sudoers_hardening_defaults
+        echo
+        echo "%sudo ALL=(ALL:ALL) ALL"
+    } > "$SUDOERS_TMP"
+    if visudo -c -f "$SUDOERS_TMP" >/dev/null; then
+        SUDOERS_DROPIN_OLD=""
+        if [[ -f "$SUDOERS_DROPIN" ]]; then
+            SUDOERS_DROPIN_OLD=$(mktemp /etc/.sudoers.XXXXXX)
+            cp -a -- "$SUDOERS_DROPIN" "$SUDOERS_DROPIN_OLD"
+        fi
+        install -m 0440 -o root -g root "$SUDOERS_TMP" "$SUDOERS_DROPIN"
+        # The drop-in must also be valid together with the existing rules.
+        if visudo -c >/dev/null; then
+            echo -e "${BGreen}Sudo hardening installed as $SUDOERS_DROPIN; /etc/sudoers was kept.${NC}"
+        else
+            if [[ -n "$SUDOERS_DROPIN_OLD" ]]; then
+                install -m 0440 -o root -g root "$SUDOERS_DROPIN_OLD" "$SUDOERS_DROPIN"
+            else
+                rm -f -- "$SUDOERS_DROPIN"
+            fi
+            echo -e "${BRed}ERROR: the sudo configuration did not validate with $SUDOERS_DROPIN; the drop-in was removed again.${NC}" >&2
+        fi
+        [[ -z "$SUDOERS_DROPIN_OLD" ]] || rm -f -- "$SUDOERS_DROPIN_OLD"
+    else
+        echo -e "${BRed}ERROR: sudoers validation failed! Keeping the existing sudo configuration.${NC}" >&2
+    fi
+    rm -f "$SUDOERS_TMP"
 else
-    echo -e "${BRed}ERROR: sudoers validation failed! Keeping original file.${NC}" >&2
+    # Write sudoers atomically via private /etc temp file + visudo validation
+    SUDOERS_TMP=$(mktemp /etc/.sudoers.XXXXXX)
+    chmod 0440 "$SUDOERS_TMP"
+    {
+        echo "# Hardened sudoers — generated by vps-chroot.sh"
+        echo
+        sudoers_hardening_defaults
+        echo
+        echo "root ALL=(ALL:ALL) ALL"
+        echo "%sudo ALL=(ALL:ALL) ALL"
+        echo
+        echo "@includedir /etc/sudoers.d"
+    } > "$SUDOERS_TMP"
+
+    # Validate before installing
+    if visudo -c -f "$SUDOERS_TMP"; then
+        install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers
+        echo -e "${BGreen}Sudoers validated and installed successfully.${NC}"
+    else
+        echo -e "${BRed}ERROR: sudoers validation failed! Keeping original file.${NC}" >&2
+    fi
+    rm -f "$SUDOERS_TMP"
 fi
-rm -f "$SUDOERS_TMP"
 
 ###############################################################################
 # ARCH-AUDIT
@@ -750,7 +1569,7 @@ systemctl enable arch-audit.timer
 # Ensure zsh is installed (installed by pacstrap in vps-install.sh, may be missing on live VPS)
 if ! command -v zsh &>/dev/null; then
     echo -e "${BBlue}Installing zsh...${NC}"
-    pacman -S --noconfirm zsh zsh-completions
+    pacman -S --needed --noconfirm zsh zsh-completions
 fi
 
 echo -e "${BBlue}Adding the user $USERNAME...${NC}"
@@ -761,18 +1580,29 @@ if ! id -u "$USERNAME" >/dev/null 2>&1; then
   # tracking in logind and systemd-user. Same root cause as the
   # NixOS GNOME-45 Wayland startup failure reported on Discourse.
   useradd -m -G sudo,wheel,uucp,proc -s /bin/zsh "$USERNAME"
-  chown "$USERNAME:$USERNAME" /home/"$USERNAME"
-  chmod 700 /home/"$USERNAME"                   # Private home (not world-readable)
+  # Use what useradd really created (HOME and USERGROUPS_ENAB can be changed
+  # in /etc/default/useradd and /etc/login.defs on a live system).
+  USER_HOME=$(user_account_entry | cut -d: -f6)
+  USER_GROUP=$(id -gn "$USERNAME")
+  SSH_CONFIG_FILE="$USER_HOME/.ssh/config"
+  SSH_KEY_FILE="$USER_HOME/.ssh/id_$SSH_KEY_TYPE"
+  chown "$USERNAME:$USER_GROUP" "$USER_HOME"
+  chmod 700 "$USER_HOME"                   # Private home (not world-readable)
   echo -e "${BBlue}User $USERNAME created.${NC}"
 else
     echo "User $USERNAME already exists." >&2
+    # An existing administrator keeps the groups, shell and home it has. It is
+    # added to the group the sudo policy above grants ("sudo") and to "proc"
+    # (/proc is mounted with hidepid=2,gid=proc), so sudo keeps working even
+    # when its old access came from a rule this run does not carry over.
+    usermod -aG sudo,proc "$USERNAME"
 fi
 
 # Pre-create private user cache directories (including nano backups)
-install -d -m 0700 -o "$USERNAME" -g "$USERNAME" \
-    "/home/$USERNAME/.cache" \
-    "/home/$USERNAME/.cache/nano" \
-    "/home/$USERNAME/.cache/nano/backups"
+install -d -m 0700 -o "$USERNAME" -g "$USER_GROUP" \
+    "$USER_HOME/.cache" \
+    "$USER_HOME/.cache/nano" \
+    "$USER_HOME/.cache/nano/backups"
 
 # Set passwords
 echo -e "${BBlue}Configuring password policy before setting passwords...${NC}"
@@ -806,6 +1636,10 @@ set -e
 echo -e "${BBlue}Installing nano syntax highlighting...${NC}"
 pacman -S --needed --noconfirm nano-syntax-highlighting 2>/dev/null || true
 
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" && -e "$USER_HOME/.nanorc" ]]; then
+    # Live system: the user's own editor settings are not replaced.
+    echo -e "${BBlue}Keeping the existing $USER_HOME/.nanorc.${NC}"
+else
 {
     cat << 'NANO_EOF'
 set backup
@@ -824,9 +1658,10 @@ NANO_EOF
     if compgen -G '/usr/share/nano-syntax-highlighting/*.nanorc' >/dev/null; then
         echo 'include "/usr/share/nano-syntax-highlighting/*.nanorc"'
     fi
-} > "/home/$USERNAME/.nanorc"
-chown "$USERNAME:$USERNAME" "/home/$USERNAME/.nanorc"
-chmod 600 "/home/$USERNAME/.nanorc"
+} > "$USER_HOME/.nanorc"
+chown "$USERNAME:$USER_GROUP" "$USER_HOME/.nanorc"
+chmod 600 "$USER_HOME/.nanorc"
+fi
 
 ###############################################################################
 # SSH CONFIGURATION
@@ -835,7 +1670,7 @@ chmod 600 "/home/$USERNAME/.nanorc"
 echo -e "${BBlue}Staging SSH access for $USERNAME (authorized_keys first)...${NC}"
 
 configure_ssh() {
-  mkdir -p "/home/$USERNAME/.ssh"
+  mkdir -p "$USER_HOME/.ssh"
 
   if [ ! -f "$SSH_KEY_FILE" ]; then
     echo -e "${BBlue}Generating a new SSH key pair ($SSH_KEY_TYPE)...${NC}"
@@ -844,6 +1679,11 @@ configure_ssh() {
     echo -e "${BBlue}SSH key ($SSH_KEY_FILE) already exists.${NC}"
   fi
 
+  if [[ "$INSTALL_TYPE_VAL" == "vps-harden" && -e "$SSH_CONFIG_FILE" ]]; then
+    # Live system: the user's own client configuration (jump hosts, other
+    # identities) is not replaced.
+    echo -e "${BBlue}Keeping the existing $SSH_CONFIG_FILE.${NC}"
+  else
   echo -e "${BBlue}Configuring SSH client settings in $SSH_CONFIG_FILE...${NC}"
 
   if [ -f "$SSH_CONFIG_FILE" ] && [ ! -f "$SSH_CONFIG_FILE.bak" ]; then
@@ -864,23 +1704,35 @@ Host ${HOSTNAME}
 EOF
 
   echo "SSH client configuration updated."
+  fi
 
   echo -e "${BBlue}Hashing known_hosts file...${NC}"
-  ssh-keygen -H -f "/home/$USERNAME/.ssh/known_hosts" 2>/dev/null || true
+  ssh-keygen -H -f "$USER_HOME/.ssh/known_hosts" 2>/dev/null || true
 
-  touch "/home/$USERNAME/.ssh/authorized_keys"
+  touch "$USER_HOME/.ssh/authorized_keys"
   if [[ -n "$SSH_PUBKEY" ]]; then
-      grep -qxF "$SSH_PUBKEY" "/home/$USERNAME/.ssh/authorized_keys" 2>/dev/null || \
-          printf '%s\n' "$SSH_PUBKEY" >> "/home/$USERNAME/.ssh/authorized_keys"
+      # An existing file may lack its final newline; appending to it as it is
+      # would glue the new key onto the comment of the last one.
+      if [[ -s "$USER_HOME/.ssh/authorized_keys" && -n "$(tail -c 1 "$USER_HOME/.ssh/authorized_keys")" ]]; then
+          echo >> "$USER_HOME/.ssh/authorized_keys"
+      fi
+      grep -qxF "$SSH_PUBKEY" "$USER_HOME/.ssh/authorized_keys" 2>/dev/null || \
+          printf '%s\n' "$SSH_PUBKEY" >> "$USER_HOME/.ssh/authorized_keys"
       echo -e "${BGreen}SSH public key installed for $USERNAME.${NC}"
-  elif [[ -s "/home/$USERNAME/.ssh/authorized_keys" ]]; then
+  elif [[ -s "$USER_HOME/.ssh/authorized_keys" ]]; then
       echo -e "${BGreen}Existing SSH authorized_keys preserved for $USERNAME.${NC}"
   else
       echo -e "${BYellow}No SSH public key provided — add one manually via console before disconnecting.${NC}"
   fi
-  chmod 700 "/home/$USERNAME/.ssh"
-  chmod 600 "/home/$USERNAME/.ssh/authorized_keys"
-  chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
+  chmod 700 "$USER_HOME/.ssh"
+  chmod 600 "$USER_HOME/.ssh/authorized_keys"
+  if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+    # Live system: only the files handled here change owner, not everything
+    # the home directory holds.
+    chown -R "$USERNAME:$USER_GROUP" "$USER_HOME/.ssh"
+  else
+    chown -R "$USERNAME:$USER_GROUP" "$USER_HOME"
+  fi
 }
 
 configure_ssh
@@ -888,15 +1740,21 @@ configure_ssh
 # Harden sshd — defer shredding /ssh.sh until the end of vps-chroot.sh so
 # recovery/resume can retry cleanly if a subsequent step fails.
 echo -e "${BBlue}Hardening sshd on port $SSH_PORT...${NC}"
-if [[ -s "/home/$USERNAME/.ssh/authorized_keys" ]]; then
-    /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
+# The key must be one the hardened sshd accepts, not merely a non-empty file:
+# an authorized_keys with only plain ECDSA keys would lock the user out.
+# SSH_HARDEN_ENV is set in the firewall section.
+if authorized_keys_usable "$USER_HOME/.ssh/authorized_keys"; then
+    env "${SSH_HARDEN_ENV[@]}" /ssh.sh -u "$USERNAME" -p "$SSH_PORT"
 elif [[ "$ALLOW_NO_SSH_KEY" == "true" ]]; then
-    echo -e "${BYellow}Proceeding without authorized_keys because console-only access was explicitly confirmed (-k).${NC}"
-    /ssh.sh -u "$USERNAME" -p "$SSH_PORT" -k
+    echo -e "${BYellow}Proceeding without a usable authorized_keys because console-only access was explicitly confirmed (-k).${NC}"
+    env "${SSH_HARDEN_ENV[@]}" /ssh.sh -u "$USERNAME" -p "$SSH_PORT" -k
 else
-    echo -e "${BRed}ERROR: /home/$USERNAME/.ssh/authorized_keys is empty and console-only override was not confirmed.${NC}" >&2
+    echo -e "${BRed}ERROR: $USER_HOME/.ssh/authorized_keys holds no key the hardened sshd accepts and console-only override was not confirmed.${NC}" >&2
     exit 1
 fi
+
+# Live systems: close the previous sshd port(s) once sshd has really moved.
+finish_ssh_port_move
 
 sleep 1
 
@@ -983,14 +1841,14 @@ EOF
 
 # Keep /root private (0700) without default ACLs, and exclude ~/.cache/{yay,paru}
 # from default ACL inheritance so AUR makepkg builds never create broken packages.
-echo -e "${BBlue}Configuring /root permissions and default ACLs on /home/$USERNAME...${NC}"
+echo -e "${BBlue}Configuring /root permissions and default ACLs on $USER_HOME...${NC}"
 chmod 0700 /root
 setfacl -b -k /root 2>/dev/null || true
-setfacl -d -m u::rwx,g::---,o::--- "/home/$USERNAME"
-mkdir -p "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru" "/home/$USERNAME/.cache/nano/backups"
-chmod 0700 "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/nano" "/home/$USERNAME/.cache/nano/backups"
-setfacl -b -k "/home/$USERNAME/.cache" "/home/$USERNAME/.cache/yay" "/home/$USERNAME/.cache/paru"
-chown -hR "$USERNAME:$USERNAME" "/home/$USERNAME/.cache"
+setfacl -d -m u::rwx,g::---,o::--- "$USER_HOME"
+mkdir -p "$USER_HOME/.cache/yay" "$USER_HOME/.cache/paru" "$USER_HOME/.cache/nano/backups"
+chmod 0700 "$USER_HOME/.cache" "$USER_HOME/.cache/nano" "$USER_HOME/.cache/nano/backups"
+setfacl -b -k "$USER_HOME/.cache" "$USER_HOME/.cache/yay" "$USER_HOME/.cache/paru"
+chown -hR "$USERNAME:$USER_GROUP" "$USER_HOME/.cache"
 
 ###############################################################################
 # GRUB SETUP (NO ENCRYPTION — VPS)
@@ -1040,7 +1898,24 @@ echo -e "${BBlue}Installing GRUB...${NC}"
 mkdir -p /boot/grub
 
 if [ -d "/sys/firmware/efi/efivars" ]; then
-    grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck
+    # Many hypervisors do not keep (or do not accept) UEFI NVRAM entries: the
+    # variable store is lost when the VM is re-created or migrated, and
+    # efibootmgr can fail outright. The removable-media fallback loader at
+    # /efi/EFI/BOOT/BOOTX64.EFI is what such firmware boots, so it is always
+    # installed (as base/bootloader.sh does for bare metal), and a failed NVRAM
+    # registration only aborts the install when the fallback failed as well.
+    GRUB_NVRAM_ENTRY=true
+    grub-install --target=x86_64-efi --bootloader-id=GRUB --efi-directory=/efi --recheck || GRUB_NVRAM_ENTRY=false
+    if grub-install --target=x86_64-efi --efi-directory=/efi --removable --recheck; then
+        if [[ "$GRUB_NVRAM_ENTRY" != true ]]; then
+            echo -e "${BYellow}Warning: the \"GRUB\" UEFI boot entry could not be written; the firmware will start the fallback loader EFI/BOOT/BOOTX64.EFI.${NC}"
+        fi
+    elif [[ "$GRUB_NVRAM_ENTRY" == true ]]; then
+        echo -e "${BYellow}Warning: fallback loader install failed; the UEFI NVRAM entry is the only boot path.${NC}"
+    else
+        echo -e "${BRed}ERROR: GRUB could not be installed to the EFI system partition.${NC}" >&2
+        exit 1
+    fi
 else
     grub-install --target=i386-pc "$DISK" --recheck
 fi
@@ -1103,8 +1978,7 @@ if [[ -f /boot/grub/grub.cfg ]]; then
     chown root:root /boot/grub/grub.cfg
     chmod og-rwx /boot/grub/grub.cfg
 fi
-chown root:root /etc/sudoers.d/
-chmod 750 /etc/sudoers.d
+install -d -m 0750 -o root -g root /etc/sudoers.d
 chown -c root:root /etc/sudoers
 chmod -c 0440 /etc/sudoers
 # Never set the 2000 setgid bit on root-owned binaries or break normal user ping/whereis.
@@ -1129,7 +2003,7 @@ chmod 0644 /etc/login.defs
 ###############################################################################
 
 echo -e "${BBlue}Setting up daily package update checks...${NC}"
-pacman -S --noconfirm pacman-contrib
+pacman -S --needed --noconfirm pacman-contrib
 cat <<'EOF' > /etc/systemd/system/pacman-autoupdate.timer
 [Unit]
 Description=Run package update check daily
@@ -1152,7 +2026,8 @@ Type=oneshot
 # checkupdates syncs a temporary database, leaving pacman's live sync database
 # untouched. Exit 2 means there are no pending updates and is not an error.
 ExecStart=/usr/bin/checkupdates
-StandardOutput=file:/var/log/pacman-updates.log
+# truncate: (not file:) so a shorter list does not keep the tail of an older one.
+StandardOutput=truncate:/var/log/pacman-updates.log
 StandardError=inherit
 SuccessExitStatus=2
 EOF
@@ -1181,14 +2056,14 @@ ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectKernelLogs=no
 ProtectControlGroups=no
-# AF_NETLINK is required for PAM/auditd communication during session setup.
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# RestrictAddressFamilies=, LockPersonality= and RestrictRealtime= are seccomp
+# filters. They are inherited by every process sshd starts, i.e. by each login
+# session, and not even sudo can lift them: tcpdump, nmap, AF_ALG users and
+# setarch would all fail over SSH. They are therefore deliberately not set.
 IPAddressAllow=any
 IPAddressDeny=
 PrivateDevices=no
 DevicePolicy=auto
-LockPersonality=yes
-RestrictRealtime=yes
 Restart=on-failure
 RestartSec=5s
 EOF
@@ -1199,10 +2074,15 @@ mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
 RuntimeDirectory=NetworkManager
+# Keep /run/NetworkManager across a restart: it holds the state NM uses to
+# take its devices over again without tearing the connections down.
+RuntimeDirectoryPreserve=yes
 StateDirectory=NetworkManager
 ProtectSystem=strict
 ReadWritePaths=-/etc/NetworkManager -/etc/resolv.conf
-ProtectHome=yes
+# read-only like the upstream unit, not "yes": 802.1X and VPN profiles
+# commonly reference certificates and keys stored under /home.
+ProtectHome=read-only
 ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectControlGroups=yes
@@ -1255,7 +2135,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes
 LockPersonality=yes
 LimitNOFILE=8192
-TasksMax=16
+# clamd's default MaxThreads is 10, plus the listener, a database-reload
+# thread and helpers; 16 made multi-threaded scans fail to spawn workers.
+TasksMax=64
 Restart=on-failure
 RestartSec=10s
 EOF
@@ -1361,7 +2243,9 @@ for unit in "${SYSTEMD_HARDENING_CANDIDATES[@]}"; do
         SYSTEMD_HARDENED_UNITS+=("$unit")
     fi
 done
-if ! systemd-analyze verify "${SYSTEMD_HARDENED_UNITS[@]}"; then
+# --man=no: the units' Documentation=man: entries are not looked up. A system
+# without man-db (minimal images) would otherwise fail verification here.
+if ! systemd-analyze verify --man=no "${SYSTEMD_HARDENED_UNITS[@]}"; then
     echo -e "${BRed}Systemd unit verification failed; refusing to leave broken service configuration.${NC}" >&2
     exit 1
 fi
@@ -1428,9 +2312,24 @@ if [[ "$INSTALL_TYPE_VAL" != "vps-harden" ]]; then
     ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 fi
 
+if [[ "$INSTALL_TYPE_VAL" == "vps-harden" ]]; then
+    echo -e "${BBlue}Kept as they were: timezone, locale and keymap, the network profiles, the entries of${NC}"
+    echo -e "${BBlue}/etc/hosts, the rules in /etc/sudoers, and an existing .nanorc and .ssh/config of $USERNAME.${NC}"
+    if [[ "$FIREWALL_MODE" == "keep" ]]; then
+        echo -e "${BBlue}The existing firewall was kept as well (see /root/nftables.conf.awesome-proposed).${NC}"
+    fi
+    echo -e "${BBlue}Copies from before this run: <file>.before-awesome.$BACKUP_STAMP next to /etc/hosts, /etc/resolv.conf,${NC}"
+    echo -e "${BBlue}/etc/sudoers and /etc/nftables.conf (where they were changed), and /etc/ssh/sshd_config.bak.<time>.${NC}"
+fi
+
 echo -e "${BGreen}VPS chroot configuration completed! You can reboot the system now.${NC}"
 shred -u /ssh.sh 2>/dev/null || true
 shred -u /nftables.sh 2>/dev/null || true
+# Leave a small permanent record of the install profile. /root/.install-env is
+# removed below (it holds install-time details), and utils/audit-check.sh must
+# not have to guess from "runs in a VM" whether this is a workstation or a VPS.
+printf 'INSTALL_TYPE=%s\n' "$INSTALL_TYPE_VAL" > /etc/awesome-install-profile
+chmod 0644 /etc/awesome-install-profile
 shred -u /root/.install-env 2>/dev/null || true
 [[ -f /vps-chroot.sh ]] && shred -u /vps-chroot.sh 2>/dev/null || true
 exit

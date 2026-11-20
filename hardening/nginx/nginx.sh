@@ -23,7 +23,8 @@
 # What this script does:
 #   1. Installs nginx-mainline + certbot + certbot-nginx
 #   2. Obtains Let's Encrypt certificates via certbot
-#   3. Writes a hardened nginx configuration
+#   3. Writes a hardened nginx configuration (the files it replaces are saved
+#      under /var/backups/nginx-hardening/<timestamp>/ and restored on failure)
 #   4. Sets up automatic certificate renewal via systemd timer
 #   5. Hardens the nginx systemd service with security overrides
 #   6. Verifies configuration and reloads nginx
@@ -61,6 +62,10 @@ NGINX_CONF="/etc/nginx/nginx.conf"
 SECURITY_CONF="/etc/nginx/snippets/security-headers.conf"
 LEGACY_SECURITY_CONF="/etc/nginx/conf.d/security-headers.conf"
 SSL_CONF="/etc/nginx/conf.d/ssl-hardening.conf"
+DEFAULT_SITE="/etc/nginx/sites-enabled/default.conf"
+NGINX_DROPIN="/etc/systemd/system/nginx.service.d/hardening.conf"
+BACKUP_ROOT="/var/backups/nginx-hardening"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
 LOGFILE="/var/log/nginx-hardening-$(date +%Y%m%d-%H%M%S).log"
 
 # --- Usage ---
@@ -161,6 +166,180 @@ info "Webroot: $WEBROOT"
 info "Log: $LOGFILE"
 
 # =============================================================================
+# HELPERS
+# =============================================================================
+
+# --- Backup / rollback of everything this script replaces ---
+# Every run saves the previous version of each managed file below
+# $BACKUP_ROOT/<timestamp>/ (root-only, outside /etc/nginx and any webroot), so
+# a re-run never destroys operator changes and a failed run can be rolled back.
+MANAGED_FILES=(
+    "$NGINX_CONF"
+    "$DEFAULT_SITE"
+    "$SSL_CONF"
+    "$SECURITY_CONF"
+    "$LEGACY_SECURITY_CONF"
+    "$NGINX_DROPIN"
+    /etc/systemd/system/certbot-renew.service
+    /etc/systemd/system/certbot-renew.timer
+)
+
+backup_managed_files() {
+    local f
+    install -d -o root -g root -m 0700 "$BACKUP_ROOT" "$BACKUP_DIR"
+    for f in "${MANAGED_FILES[@]}"; do
+        [[ -f "$f" ]] || continue
+        install -d -m 0700 "$BACKUP_DIR${f%/*}"
+        cp -p -- "$f" "$BACKUP_DIR$f"
+    done
+    info "Previous configuration saved to $BACKUP_DIR"
+}
+
+restore_managed_files() {
+    local f
+    [[ -d "$BACKUP_DIR" ]] || return 0
+    for f in "${MANAGED_FILES[@]}"; do
+        if [[ -f "$BACKUP_DIR$f" ]]; then
+            cp -p -- "$BACKUP_DIR$f" "$f"
+        else
+            rm -f -- "$f"
+        fi
+    done
+    systemctl daemon-reload || true
+    warn "Restored the configuration that was in place before this run"
+}
+
+# Restore the previous configuration, put nginx back on it, and abort.
+rollback_and_die() {
+    local reason="$1"
+    warn "$reason"
+    restore_managed_files
+    if nginx -t &>/dev/null; then
+        if systemctl is-active --quiet nginx; then
+            systemctl reload nginx 2>/dev/null || \
+                warn "Could not reload nginx with the restored configuration"
+        elif [[ "$NGINX_WAS_ACTIVE" == true ]]; then
+            systemctl restart nginx 2>/dev/null || \
+                warn "Could not restart nginx with the restored configuration"
+        fi
+    else
+        warn "The restored configuration does not pass 'nginx -t' either; nginx was left as it is"
+    fi
+    err "$reason (rolled back; previous files are also kept in $BACKUP_DIR)"
+}
+
+# Reload a running nginx (no dropped connections), otherwise start it.
+apply_nginx_config() {
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx
+    else
+        systemctl start nginx
+    fi
+}
+
+# Print the first vhost file other than $DEFAULT_SITE that already declares $1
+# as a server_name on port 80 or the HTTPS port. nginx honours only the first
+# server block per name and listen socket, so declaring such a name again in
+# $DEFAULT_SITE would either shadow that site or be ignored, depending on
+# include order. A vhost on another port (an app on :3000) is not a conflict.
+vhost_claiming() {
+    local domain="$1" f
+    for f in /etc/nginx/sites-enabled/*.conf; do
+        [[ -f "$f" && "$f" != "$DEFAULT_SITE" ]] || continue
+        if DOMAIN_TARGET="$domain" HTTPS_PORT_TARGET="$HTTPS_PORT" awk '
+            function end_block() {
+                # A server block without a listen directive listens on port 80.
+                if (named && (standard || !listens)) {
+                    found = 1
+                }
+                in_server = 0
+                named = 0
+                standard = 0
+                listens = 0
+            }
+            {
+                line = $0
+                sub(/#.*/, "", line)
+                if (!in_server && line ~ /^[[:space:]]*server[[:space:]]*\{/) {
+                    in_server = 1
+                    depth = 0
+                }
+                if (!in_server) {
+                    next
+                }
+                if (line ~ /^[[:space:]]*listen[[:space:]]/) {
+                    listens = 1
+                    port = line
+                    sub(/^[[:space:]]*listen[[:space:]]+/, "", port)
+                    sub(/[[:space:];].*/, "", port)
+                    if (port !~ /^unix:/) {
+                        sub(/^.*:/, "", port)
+                        if (port !~ /^[0-9]+$/) {
+                            port = "80"
+                        }
+                        if (port == "80" || port == ENVIRON["HTTPS_PORT_TARGET"]) {
+                            standard = 1
+                        }
+                    }
+                } else if (line ~ /^[[:space:]]*server_name[[:space:]]/) {
+                    names_line = line
+                    sub(/^[[:space:]]*server_name[[:space:]]+/, "", names_line)
+                    sub(/;.*/, "", names_line)
+                    n = split(names_line, names, /[[:space:]]+/)
+                    for (i = 1; i <= n; i++) {
+                        if (tolower(names[i]) == ENVIRON["DOMAIN_TARGET"]) {
+                            named = 1
+                        }
+                    }
+                }
+                opens = gsub(/\{/, "{", line)
+                closes = gsub(/\}/, "}", line)
+                depth += opens - closes
+                if (depth <= 0) {
+                    end_block()
+                }
+            }
+            END {
+                if (in_server) {
+                    end_block()
+                }
+                exit !found
+            }
+        ' "$f"; then
+            printf '%s\n' "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Print the directory a vhost generated by ../wordpress/wordpress.sh or
+# ../react/react.sh serves /.well-known/acme-challenge/ from (the
+# "# ACME-Webroot:" line in its header).
+vhost_acme_root() {
+    local root
+    root=$(awk '/^# ACME-Webroot:[[:space:]]/ { print $3; exit }' "$1")
+    [[ "$root" =~ ^/[A-Za-z0-9._/-]+$ && -d "$root" ]] || return 1
+    printf '%s\n' "$root"
+}
+
+NGINX_WAS_ACTIVE=false
+if systemctl is-active --quiet nginx 2>/dev/null; then
+    NGINX_WAS_ACTIVE=true
+fi
+
+# A usable certificate from an earlier run means the TLS vhost can stay in place
+# for the whole run instead of being swapped for the HTTP-only ACME bootstrap
+# vhost until certbot has finished.
+CERT_DIR="/etc/letsencrypt/live/$PRIMARY_DOMAIN"
+HAVE_CERT=false
+if [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" ]]; then
+    HAVE_CERT=true
+fi
+[[ "$SKIP_CERTBOT" == false || "$HAVE_CERT" == true ]] || \
+    err "No certificate found in $CERT_DIR. Run without --skip-certbot first."
+
+# =============================================================================
 # 1. INSTALL PACKAGES
 # =============================================================================
 
@@ -178,29 +357,97 @@ info "nginx version: $NGINX_VER"
 # =============================================================================
 
 msg "Preparing web directories..."
+WEBROOT_PREEXISTED=false
+if [[ -d "$WEBROOT" ]]; then
+    WEBROOT_PREEXISTED=true
+fi
 mkdir -p "$WEBROOT/.well-known/acme-challenge"
 # The selected content hierarchy must be traversable so http and certbot can
-# reach the webroot. Ownership changes remain confined to the resolved root.
+# reach the webroot.
 if [[ "$WEBROOT" == /var/www/* ]]; then
     chmod 755 /var/www
 else
     chmod 755 /srv /srv/http
 fi
-chown -R http:http "$WEBROOT"
-chmod -R o+rX "$WEBROOT"
 
-install -d -o http -g http -m 0750 /var/log/nginx
+# Web content is served read-only: the http workers only need to read it, so it
+# stays owned by root (or by whoever deploys it) and is never handed to the
+# worker user. An existing tree is not re-owned or re-moded recursively either:
+# it may hold application-writable directories or files that are deliberately
+# not world-readable (a WordPress wp-config.php, for example).
+if [[ "$WEBROOT_PREEXISTED" == false ]]; then
+    chown -R root:root "$WEBROOT"
+    chmod -R u=rwX,go=rX "$WEBROOT"
+else
+    info "Existing content in $WEBROOT keeps its current ownership and permissions"
+    if ! runuser -u http -- test -r "$WEBROOT/.well-known/acme-challenge" 2>/dev/null; then
+        # Open only what the ACME challenge needs: search permission on the
+        # webroot itself, read + search on the challenge directories.
+        chmod o+x "$WEBROOT"
+        chmod o+rx "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge"
+    fi
+    if ! runuser -u http -- test -r "$WEBROOT/.well-known/acme-challenge" 2>/dev/null; then
+        warn "The http user cannot read $WEBROOT/.well-known/acme-challenge — ACME challenges will fail until its permissions are fixed"
+    fi
+fi
+
+# Log directory: root-owned, as packaged on Arch. The master process runs as
+# root, follows symlinks when it (re)opens a log and then chowns the file to the
+# worker user, so a directory writable by http would let a compromised worker
+# point that open + chown at any file on the system (the CVE-2016-1247 pattern).
+# http owns only the log files themselves, which is also what the packaged
+# logrotate policy ("create 640 http root") produces.
+install -d -o root -g root -m 0755 /var/log/nginx
+for nginx_log in access.log error.log; do
+    if [[ ! -e "/var/log/nginx/$nginx_log" && ! -L "/var/log/nginx/$nginx_log" ]]; then
+        install -o http -g root -m 0640 /dev/null "/var/log/nginx/$nginx_log"
+    fi
+done
+unset nginx_log
+while IFS= read -r nginx_log_link; do
+    warn "Symlink in the nginx log directory: $nginx_log_link -> $(readlink -- "$nginx_log_link") (nginx follows it as root; remove it unless it is intentional)"
+done < <(find /var/log/nginx -maxdepth 1 -type l 2>/dev/null)
+unset nginx_log_link
+
 install -d -o root -g root -m 0755 /var/cache/nginx
 for cache_subdir in client_temp proxy_temp fastcgi_temp uwsgi_temp scgi_temp; do
     install -d -o http -g root -m 0700 "/var/cache/nginx/$cache_subdir"
 done
 install -d -o root -g root -m 0755 /etc/nginx /etc/nginx/conf.d /etc/nginx/sites-enabled /etc/nginx/snippets
 
+# Names that another vhost file already serves stay with that vhost: only the
+# remaining ones are declared in $DEFAULT_SITE. The certificate still covers
+# every requested name; a claimed name is validated through the webroot its own
+# vhost announces, falling back to $WEBROOT.
+declare -a SITE_DOMAINS=()
+declare -a CLAIMING_VHOSTS=()
+declare -A ACME_ROOT=()
+for d in "${DOMAINS[@]}"; do
+    ACME_ROOT["$d"]="$WEBROOT"
+    if claiming_vhost=$(vhost_claiming "$d"); then
+        if [[ " ${CLAIMING_VHOSTS[*]} " != *" $claiming_vhost "* ]]; then
+            CLAIMING_VHOSTS+=("$claiming_vhost")
+        fi
+        if claimed_acme_root=$(vhost_acme_root "$claiming_vhost"); then
+            ACME_ROOT["$d"]="$claimed_acme_root"
+            info "$d is already served by $claiming_vhost — not declaring it in $DEFAULT_SITE (ACME webroot: $claimed_acme_root)"
+        else
+            warn "$d is already served by $claiming_vhost — not declaring it in $DEFAULT_SITE."
+            warn "  That vhost must serve /.well-known/acme-challenge/ from $WEBROOT for issuance and renewal to work."
+        fi
+    else
+        SITE_DOMAINS+=("$d")
+    fi
+done
+unset d claiming_vhost claimed_acme_root
+
 # =============================================================================
-# 3. WRITE PRE-CERTIFICATE NGINX CONFIG (for ACME challenge)
+# 3. WRITE NGINX CONFIG (plus an HTTP-only ACME vhost on first issuance)
 # =============================================================================
 
-msg "Writing initial nginx config for ACME challenge..."
+msg "Writing nginx configuration..."
+
+backup_managed_files
 
 cat > "$NGINX_CONF" <<'NGINX_MAIN'
 # =============================================================================
@@ -251,6 +498,18 @@ http {
     client_max_body_size       10m;
     large_client_header_buffers 4 8k;
 
+    # --- Temp paths ---
+    # Request bodies larger than client_body_buffer_size and buffered upstream
+    # responses are spooled to disk and fail with a 500 when these directories
+    # are not writable. Use the directories nginx.sh creates below
+    # /var/cache/nginx, which the hardened unit (ProtectSystem=strict) keeps
+    # writable, rather than the compiled-in defaults.
+    client_body_temp_path /var/cache/nginx/client_temp;
+    proxy_temp_path       /var/cache/nginx/proxy_temp;
+    fastcgi_temp_path     /var/cache/nginx/fastcgi_temp;
+    uwsgi_temp_path       /var/cache/nginx/uwsgi_temp;
+    scgi_temp_path        /var/cache/nginx/scgi_temp;
+
     # --- Timeouts (mitigate slowloris) ---
     client_body_timeout   12;
     client_header_timeout 12;
@@ -265,12 +524,17 @@ http {
 }
 NGINX_MAIN
 
-# Write a temporary HTTP-only server for ACME challenge
-cat > /etc/nginx/sites-enabled/default.conf <<EOF
+# Write a temporary HTTP-only server for the ACME challenge. Only needed for the
+# first issuance: with a certificate already on disk the existing TLS vhost keeps
+# serving until the refreshed one is written in Step 7.
+if [[ "$HAVE_CERT" == true ]]; then
+    info "Existing certificate found in $CERT_DIR — keeping the current TLS vhost online during this run"
+elif (( ${#SITE_DOMAINS[@]} > 0 )); then
+    cat > "$DEFAULT_SITE" <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name ${DOMAINS[*]};
+    server_name ${SITE_DOMAINS[*]};
 
     # ACME challenge
     location ^~ /.well-known/acme-challenge/ {
@@ -286,6 +550,9 @@ server {
     }
 }
 EOF
+else
+    printf '%s\n' "# Every requested name is served by its own vhost file in this directory." > "$DEFAULT_SITE"
+fi
 
 # Remove any legacy http-level security-headers.conf so plain HTTP never emits HSTS
 rm -f -- "$LEGACY_SECURITY_CONF"
@@ -317,10 +584,12 @@ if [[ -f "$SSL_CONF" ]]; then
     unset SSL_REFS_MISSING ssl_ref_path
 fi
 
-# Test and start nginx
-nginx -t || err "nginx config test failed"
-systemctl enable nginx
-systemctl restart nginx
+# Test and start nginx (first issuance only; see Step 7 for the re-run path)
+if [[ "$HAVE_CERT" == false ]]; then
+    nginx -t || rollback_and_die "nginx config test failed"
+    systemctl enable nginx
+    apply_nginx_config || rollback_and_die "nginx could not be started with the ACME bootstrap configuration"
+fi
 
 # =============================================================================
 # 3b. OPEN FIREWALL PORTS (80/443)
@@ -345,6 +614,13 @@ EOF
     aal_nft_remove_live_rules inet filter input "awesome-nginx-https"
     nft insert rule inet filter input ct state new tcp dport 80 accept comment "awesome-nginx-http"
     nft insert rule inet filter input ct state new tcp dport "$HTTPS_PORT" accept comment "awesome-nginx-https"
+    # The inserts above landed in front of the drop-only guard blocks (Docker
+    # isolation, ...); put those back on top, as in the persisted ruleset.
+    # Guarded: an older copy of the library does not have this helper.
+    if declare -F aal_nft_raise_guard_rules >/dev/null; then
+        aal_nft_raise_guard_rules || \
+            warn "Could not re-order the live guard rules; reload nftables to apply the persisted order."
+    fi
     msg "nftables: ports 80/$HTTPS_PORT opened without replacing the live ruleset."
 elif command -v iptables &>/dev/null && iptables -L -n &>/dev/null 2>&1; then
     install -d -o root -g root -m 0755 /etc/default
@@ -464,16 +740,15 @@ fi
 # 4. OBTAIN CERTIFICATES
 # =============================================================================
 
-CERT_DIR="/etc/letsencrypt/live/$PRIMARY_DOMAIN"
+run_certbot() {
+    local d acme_root prev_root=""
 
-if [[ "$SKIP_CERTBOT" == false ]]; then
     msg "Obtaining Let's Encrypt certificates..."
 
     CERTBOT_ARGS=(
         certonly
         --non-interactive
         --webroot
-        -w "$WEBROOT"
         --cert-name "$PRIMARY_DOMAIN"
         --expand
         --email "$EMAIL"
@@ -483,7 +758,13 @@ if [[ "$SKIP_CERTBOT" == false ]]; then
         --elliptic-curve secp384r1
     )
 
+    # certbot applies each -w to the -d options that follow it.
     for d in "${DOMAINS[@]}"; do
+        acme_root="${ACME_ROOT[$d]}"
+        if [[ "$acme_root" != "$prev_root" ]]; then
+            CERTBOT_ARGS+=(-w "$acme_root")
+            prev_root="$acme_root"
+        fi
         CERTBOT_ARGS+=(-d "$d")
     done
 
@@ -499,8 +780,14 @@ if [[ "$SKIP_CERTBOT" == false ]]; then
     fi
 
     certbot "${CERTBOT_ARGS[@]}"
-else
+}
+
+if [[ "$SKIP_CERTBOT" == true ]]; then
     info "Skipping certbot (--skip-certbot)"
+elif [[ "$HAVE_CERT" == false ]]; then
+    run_certbot || rollback_and_die "certbot could not obtain a certificate for ${DOMAINS[*]}"
+else
+    info "certbot runs after the TLS vhost has been refreshed (Step 7)"
 fi
 
 # Verify certificate exists
@@ -638,12 +925,16 @@ HEADERS
 
 msg "Writing final server block..."
 
-cat > /etc/nginx/sites-enabled/default.conf <<EOF
+if (( ${#SITE_DOMAINS[@]} == 0 )); then
+    printf '%s\n' "# Every requested name is served by its own vhost file in this directory." > "$DEFAULT_SITE"
+    info "No server block written to $DEFAULT_SITE: every requested name already has its own vhost"
+else
+cat > "$DEFAULT_SITE" <<EOF
 # --- HTTP: Redirect all to HTTPS ---
 server {
     listen 80;
     listen [::]:80;
-    server_name ${DOMAINS[*]};
+    server_name ${SITE_DOMAINS[*]};
 
     # ACME challenge (certbot renewal)
     location ^~ /.well-known/acme-challenge/ {
@@ -663,7 +954,7 @@ server {
     listen $HTTPS_PORT ssl;
     listen [::]:$HTTPS_PORT ssl;
     http2 on;
-    server_name ${DOMAINS[*]};
+    server_name ${SITE_DOMAINS[*]};
 
     root $WEBROOT;
     index index.html;
@@ -705,6 +996,20 @@ server {
     }
 }
 EOF
+fi
+
+# Re-run path: the TLS vhost never left service. Validate and load the refreshed
+# configuration first, then let certbot renew or extend the certificate through
+# the port-80 ACME location that is now live.
+if [[ "$HAVE_CERT" == true ]]; then
+    nginx -t || rollback_and_die "nginx configuration test failed"
+    systemctl enable nginx
+    apply_nginx_config || rollback_and_die "nginx could not load the refreshed configuration"
+    if [[ "$SKIP_CERTBOT" == false ]]; then
+        run_certbot || \
+            err "certbot failed. nginx keeps serving the existing certificate in $CERT_DIR; fix the problem reported above and re-run."
+    fi
+fi
 
 # =============================================================================
 # 8. CERTBOT AUTO-RENEWAL
@@ -750,13 +1055,24 @@ systemctl start certbot-renew.timer
 msg "Hardening nginx systemd service..."
 
 install -d -o root -g root -m 0755 /etc/systemd/system/nginx.service.d
-cat > /etc/systemd/system/nginx.service.d/hardening.conf <<'EOF'
+cat > "$NGINX_DROPIN" <<'EOF'
 [Service]
 # Filesystem protection
 ProtectSystem=strict
-ReadWritePaths=/var/log/nginx /var/cache/nginx /run
+# The only path below /run the master writes is its PID file, so /run as a whole
+# stays read-only (a writable /run would let a compromised master drop files
+# into /run/systemd, /run/udev, ...). The file is created outside the sandbox
+# ("+") before every start so it can be bound read-write on its own.
+# Side effects, both harmless: until the master has written its PID systemd may
+# log one informational "Failed to create reference to PID" line per start, and
+# nginx cannot unlink a bind-mounted file, so every stop logs one
+# 'unlink() "/run/nginx.pid" failed' alert (systemd removes the file itself).
+ExecStartPre=+/usr/bin/install -o root -g root -m 0644 /dev/null /run/nginx.pid
+ReadWritePaths=/var/log/nginx /var/cache/nginx -/var/lib/nginx -/run/nginx.pid
 ProtectHome=yes
 PrivateTmp=yes
+# New log files are created 0640, never world-readable
+UMask=0027
 
 # Kernel protection
 ProtectKernelTunables=yes
@@ -796,7 +1112,7 @@ LimitNPROC=4096
 Restart=on-failure
 RestartSec=5s
 EOF
-chmod 0644 /etc/systemd/system/nginx.service.d/hardening.conf
+chmod 0644 "$NGINX_DROPIN"
 
 systemctl daemon-reload
 
@@ -807,12 +1123,12 @@ systemctl daemon-reload
 msg "Applying additional hardening..."
 
 # Restrict config file permissions while keeping snippets readable by http
-chown root:http "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" /etc/nginx/sites-enabled/default.conf
-chmod 0640 "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" /etc/nginx/sites-enabled/default.conf
+chown root:http "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" "$DEFAULT_SITE"
+chmod 0640 "$NGINX_CONF" "$SSL_CONF" "$SECURITY_CONF" "$DEFAULT_SITE"
 
-# Ensure log directory permissions
-chmod 0750 /var/log/nginx
-chown http:http /var/log/nginx
+# Ensure log directory permissions (root-owned, never writable by http; see Step 2)
+chown root:root /var/log/nginx
+chmod 0755 /var/log/nginx
 
 # Remove default nginx welcome page if it exists
 rm -f /etc/nginx/sites-enabled/example* 2>/dev/null || true
@@ -832,7 +1148,7 @@ if [[ ! -f "$WEBROOT/index.html" ]]; then
 </body>
 </html>
 HTML
-    chown http:http "$WEBROOT/index.html"
+    chown root:root "$WEBROOT/index.html"
     chmod 0644 "$WEBROOT/index.html"
 fi
 
@@ -843,14 +1159,15 @@ fi
 msg "Testing nginx configuration..."
 if nginx -t; then
     msg "Configuration test passed"
-    systemctl restart nginx
-    if systemctl is-active --quiet nginx; then
+    # A restart (not a reload) is required for the systemd sandbox to apply.
+    if systemctl restart nginx && systemctl is-active --quiet nginx; then
         msg "nginx restarted and running cleanly under hardened systemd unit"
     else
-        err "nginx failed to stay active after restart! Check: journalctl -u nginx -e"
+        journalctl -u nginx -n 20 --no-pager 2>/dev/null || true
+        rollback_and_die "nginx failed to stay active after the restart (see the journal excerpt above)"
     fi
 else
-    err "nginx configuration test failed! Check $LOGFILE"
+    rollback_and_die "nginx configuration test failed! Check $LOGFILE"
 fi
 
 # =============================================================================
@@ -868,6 +1185,7 @@ echo -e "${C_BLUE}Web Root:${C_NC}      $WEBROOT"
 echo -e "${C_BLUE}SSL Config:${C_NC}    $SSL_CONF"
 echo -e "${C_BLUE}Headers:${C_NC}       $SECURITY_CONF"
 echo -e "${C_BLUE}Certificates:${C_NC}  $CERT_DIR/"
+echo -e "${C_BLUE}Backup:${C_NC}        $BACKUP_DIR/ (configuration replaced by this run)"
 echo -e "${C_BLUE}Log:${C_NC}           $LOGFILE"
 echo
 echo -e "${C_BLUE}SSL/TLS Features:${C_NC}"
@@ -902,5 +1220,11 @@ echo "  4. Submit for HSTS preload (after confirming everything works):"
 echo "     https://hstspreload.org/?domain=$PRIMARY_DOMAIN"
 echo "  5. Certificate auto-renewal is active via systemd timer."
 echo "     Check: systemctl list-timers certbot-renew.timer"
+if (( ${#CLAIMING_VHOSTS[@]} > 0 )); then
+    echo "  6. Some requested names are served by their own vhost file, which this script"
+    echo "     does not rewrite. Re-run the script that generated it (e.g. ../wordpress/wordpress.sh"
+    echo "     or ../react/react.sh) so the vhost picks up the certificate:"
+    printf '       %s\n' "${CLAIMING_VHOSTS[@]}"
+fi
 echo
 echo -e "${C_GREEN}Done.${C_NC}"

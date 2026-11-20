@@ -1,8 +1,8 @@
 # FireHOL Blocklist Firewall
 
 Installs FireHOL and its `update-ipsets` utility from the AUR package, enables
-the selected FireHOL aggregate list plus `fullbogons`, and creates a default-deny
-iptables policy.
+the selected FireHOL aggregate list (together with the lists it is merged from)
+plus `fullbogons`, and creates a default-deny iptables policy.
 
 FireHOL is an alternative firewall backend. It must not be stacked on the
 installer-owned nftables `inet filter` chains or enabled alongside
@@ -32,9 +32,9 @@ sudo ./firehol.sh --update-only --allow-ssh 22
 
 | Option | Meaning |
 |---|---|
-| `-l LEVEL` | FireHOL aggregate level 1, 2, or 3 (default: 1) |
+| `-l LEVEL` | FireHOL aggregate level 1, 2, or 3 (default: 1). Each level is its own list; level 2 does not include level 1 |
 | `-u`, `--update-only` | Skip package installation |
-| `--allow-ssh PORT` | Allow inbound SSH on the specified TCP port |
+| `--allow-ssh PORT` | Allow inbound SSH on the specified TCP port (decimal; a leading zero is ignored) |
 | `--allow-http` | Allow inbound TCP 80 |
 | `--allow-https` | Allow inbound TCP 443 |
 | `--no-inbound` | Explicitly allow no inbound services |
@@ -75,10 +75,60 @@ The script writes `/etc/firehol/firehol.conf` with:
 
 - `firehol_level1`, `firehol_level2`, or `firehol_level3`;
 - `fullbogons`;
-- both blacklists declared before the first interface, as FireHOL requires;
+- both blacklists declared before the first interface, as FireHOL requires,
+  each with the exceptions described below;
 - a default-drop inbound policy;
+- IPv6 neighbour discovery, router advertisements and multicast listener
+  reports (`ipv6neigh`, `ipv6router`, `ipv6mld`). These ICMPv6 messages are not
+  connection-tracked, so the outbound client rule does not cover them and IPv6
+  would stop working without them. The lines are wrapped in a test of
+  FireHOL's `ENABLE_IPV6`, so they are skipped on hosts where FireHOL runs
+  IPv4-only (no IPv6 in the kernel, or no usable `ip6tables`);
 - unrestricted outbound client traffic;
 - only the inbound services explicitly selected on the command line.
+
+### Aggregate levels and their source lists
+
+A `firehol_levelN` list is a merge that `update-ipsets` builds locally from
+other lists, and it only merges the ones that are enabled themselves. The
+script therefore enables the source lists of the selected level as well. Their
+names are read from the installed `update-ipsets`; in FireHOL 3.1.8 they are:
+
+| Level | Source lists |
+|---|---|
+| 1 | `dshield`, `feodo`, `fullbogons`, `spamhaus_drop` |
+| 2 | `blocklist_de`, `dshield_1d`, `greensnow` |
+| 3 | `bruteforceblocker`, `ciarmy`, `dshield_30d`, `myip`, `vxvault` |
+
+`dshield_1d` and `dshield_30d` are history views derived from `dshield`, which
+is enabled for them. A source list that cannot be downloaded is left out of
+the merge with a warning from `update-ipsets`. If the aggregate list or
+`fullbogons` ends up missing or empty, the script stops before the firewall is
+changed. Installations made with an earlier version of this script had only
+the bogons in `firehol_level1`; re-run with `--update-only` to enable the
+missing source lists.
+
+### Blacklist exceptions
+
+`blacklist full` is stateless and bidirectional: packets from a listed address
+are dropped and packets to one are rejected, before any interface rule is
+consulted. `fullbogons` (also part of `firehol_level1`) lists every
+special-purpose range, including the private networks. The generated
+blacklists therefore carry an `except src "..."` clause:
+
+- always: `169.254.0.0/16` (link-local: DHCP servers, cloud metadata service),
+  `224.0.0.0/4` (multicast: IGMP, mDNS) and `255.255.255.255` (DHCP broadcast).
+  These never cross a router, so filtering them as bogons protects nothing;
+- when the host itself has a global-scope address in private or carrier-grade
+  NAT space (LAN, cloud VPC, VPN, container bridge): `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16` and `100.64.0.0/10`. Without this the host
+  loses its gateway's DNS, its LAN peers and SSH from the LAN the moment
+  FireHOL starts.
+
+The exception only skips the blacklist; the interface policy still decides
+what is accepted. The decision is made when the configuration is generated:
+re-run `sudo ./firehol.sh --update-only ...` after the host's addressing
+changes. The script prints the excepted ranges.
 
 The daily `/etc/cron.d/firehol-ipsets` job sets explicit `SHELL=/usr/bin/bash`
 and `PATH`, ensures `/run/firehol-tmp` (`0700`) exists, and reloads the active

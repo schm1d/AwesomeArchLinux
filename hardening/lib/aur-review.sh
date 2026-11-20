@@ -54,7 +54,24 @@ _aal_aur_show_review() {
     printf '\nCommit metadata (control characters escaped):\n'
     git -C "$builddir" show --no-patch --format=fuller "$commit" | cat -vET
 
-    if grep -Eq '^[[:space:]]*(b2|md5|sha[0-9]+)sums[^=]*=.*SKIP' "$builddir/PKGBUILD"; then
+    # .SRCINFO lists one checksum per line, so a SKIP there is unambiguous. The
+    # PKGBUILD is scanned as well (a stale .SRCINFO must not hide it), following
+    # checksum arrays across lines: 'SKIP' is usually not on the "sums=(" line.
+    if grep -Eq '^[[:space:]]*(b2|ck|md5|sha[0-9]+)sums(_[A-Za-z0-9_]+)?[[:space:]]*=[[:space:]]*SKIP[[:space:]]*$' \
+            "$builddir/.SRCINFO" ||
+       awk '
+            function has_skip(s) { return s ~ /(^|[^A-Za-z0-9_])SKIP([^A-Za-z0-9_]|$)/ }
+            /^[[:space:]]*(b2|ck|md5|sha[0-9]+)sums[A-Za-z0-9_]*\+?=/ {
+                if (has_skip($0)) found = 1
+                in_array = ($0 ~ /=\(/ && $0 !~ /\)/)
+                next
+            }
+            in_array {
+                if (has_skip($0)) found = 1
+                if ($0 ~ /\)/) in_array = 0
+            }
+            END { exit !found }
+       ' "$builddir/PKGBUILD"; then
         printf '\nWARNING: PKGBUILD contains at least one SKIP checksum.\n'
     fi
 
@@ -138,9 +155,9 @@ aal_aur_install_reviewed() (
     local package=${1:-} pkgbase=${2:-${1:-}}
     local tmpdir="" builddir="" build_user="" commit="" confirmation=""
     local review_fd="" selected_package="" package_sha256="" installed_version=""
-    local package_file resolved_file built_name
+    local package_file resolved_file built_name passthrough_var kill_wait=0
     local build_user_created=false
-    local -a package_files=() selected_packages=() build_groups=()
+    local -a package_files=() selected_packages=() build_groups=() build_env=()
 
     [[ $# -ge 1 && $# -le 2 ]] || {
         _aal_aur_error "Usage: aal_aur_install_reviewed PACKAGE [PACKAGE_BASE]"
@@ -293,15 +310,37 @@ aal_aur_install_reviewed() (
     fi
     rm -f -- "$tmpdir/pubkeys.root.gpg" "$tmpdir/pubkeys.user.gpg"
 
+    # The recipe runs with a scrubbed environment and no terminal input: root's
+    # (or the sudo caller's) exported variables may hold tokens, agent sockets,
+    # or session-bus addresses that a build has no business seeing. PATH is
+    # kept as-is because builds rely on profile.d additions such as the perl
+    # and JVM directories; proxy settings are passed through when set.
+    build_env=(
+        "PATH=$PATH"
+        "HOME=$builddir/.home"
+        "TMPDIR=$builddir/.tmp"
+        "USER=$build_user"
+        "LOGNAME=$build_user"
+        "SHELL=/bin/bash"
+        "LANG=${LANG:-C.UTF-8}"
+        "TERM=${TERM:-dumb}"
+        "PKGDEST=$builddir"
+    )
+    for passthrough_var in http_proxy https_proxy ftp_proxy rsync_proxy all_proxy no_proxy \
+                           HTTP_PROXY HTTPS_PROXY FTP_PROXY RSYNC_PROXY ALL_PROXY NO_PROXY; do
+        if [[ -n "${!passthrough_var:-}" ]]; then
+            build_env+=("$passthrough_var=${!passthrough_var}")
+        fi
+    done
+
     _aal_aur_info "Building reviewed commit $commit as disposable user $build_user."
     (
         cd "$builddir"
-        export PKGDEST="$builddir"
-        runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" \
-            makepkg --cleanbuild --noconfirm PKGDEST="$builddir"
+        runuser -u "$build_user" -- env -i "${build_env[@]}" \
+            makepkg --cleanbuild --noconfirm PKGDEST="$builddir" </dev/null
         mapfile -t package_files < <(
-            runuser -u "$build_user" -- env HOME="$builddir/.home" TMPDIR="$builddir/.tmp" \
-                makepkg --packagelist PKGDEST="$builddir"
+            runuser -u "$build_user" -- env -i "${build_env[@]}" \
+                makepkg --packagelist PKGDEST="$builddir" </dev/null
         )
         (( ${#package_files[@]} > 0 )) || {
             _aal_aur_error "makepkg produced no package paths."
@@ -313,6 +352,11 @@ aal_aur_install_reviewed() (
     # Terminate any recipe-spawned background process before root examines the
     # package archive, then revoke the disposable build identity.
     pkill -KILL -u "$build_user" 2>/dev/null || true
+    # SIGKILL is delivered asynchronously and userdel refuses to remove an
+    # account that still owns a process, so give the kernel a moment to reap.
+    while pgrep -u "$build_user" >/dev/null 2>&1 && (( kill_wait++ < 50 )); do
+        sleep 0.1
+    done
     userdel "$build_user"
     build_user_created=false
 

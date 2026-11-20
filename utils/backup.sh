@@ -44,6 +44,9 @@ RESTORE_ARCHIVE=""
 RESTORE_TARGET=""
 LOGFILE="/var/log/borg-backup.log"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+# Root-owned copy the timer executes, so the unattended root job never runs a
+# script from a checkout another user can modify.
+INSTALLED_SCRIPT="/usr/local/sbin/awesome-borg-backup"
 
 resolve_hostname() {
     if [[ -n "${HOSTNAME:-}" ]]; then
@@ -73,6 +76,7 @@ Modes (at least one required):
   --list              List all archives in the repository
   --restore ARCHIVE   Restore a specific archive
   --restore-dir DIR   Extraction directory for --restore
+                      (default: a new private /tmp/borg-restore.XXXXXX)
 
 Other:
   -h, --help          Show this help
@@ -283,7 +287,8 @@ if [[ "$DO_LIST" == true ]]; then
 
     load_passphrase
 
-    borg list --format '{archive:<40} {time} {size:>12}{NL}' "$REPO"
+    # Archive listings only know archive-level keys (no per-archive size).
+    borg list --format '{archive:<40} {time}{NL}' "$REPO"
 fi
 
 # =============================================================================
@@ -299,9 +304,16 @@ if [[ "$DO_RESTORE" == true ]]; then
 
     load_passphrase
 
-    RESTORE_DIR="${RESTORE_TARGET:-/tmp/borg-restore/${RESTORE_ARCHIVE}}"
-    mkdir -p -m 0700 "$RESTORE_DIR"
-    chmod 0700 "$RESTORE_DIR"
+    if [[ -n "$RESTORE_TARGET" ]]; then
+        RESTORE_DIR="$RESTORE_TARGET"
+        [[ ! -L "$RESTORE_DIR" ]] || err "--restore-dir must not be a symbolic link: $RESTORE_DIR"
+        # An existing directory keeps its mode (it may be / or a live tree).
+        [[ -d "$RESTORE_DIR" ]] || mkdir -p -m 0700 "$RESTORE_DIR"
+    else
+        # Never extract root-readable data into a predictable path below
+        # world-writable /tmp: mktemp -d creates a new 0700 directory or fails.
+        RESTORE_DIR="$(mktemp -d /tmp/borg-restore.XXXXXX)"
+    fi
 
     if command -v findmnt >/dev/null 2>&1; then
         restore_mnt_opts="$(findmnt -n -o OPTIONS -T "$RESTORE_DIR" 2>/dev/null || true)"
@@ -331,13 +343,31 @@ fi
 
 msg "Setting up systemd timer for daily backups..."
 
-if [[ "$(stat -c '%u' "$SCRIPT_PATH" 2>/dev/null || echo 0)" != "0" ]]; then
-    warn "$SCRIPT_PATH is not owned by root; copy backup.sh to /usr/local/sbin/backup.sh (0755 root:root) before relying on unattended root execution."
+# Quote one ExecStart= argument for systemd (not for a shell): double quotes
+# with C-style escapes, and %% / $$ so specifiers and variables stay literal.
+systemd_quote() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//%/%%}"
+    s="${s//\$/\$\$}"
+    printf '"%s"' "$s"
+}
+
+if [[ "$REPO" == *$'\n'* || "$PASSPHRASE_FILE" == *$'\n'* ]]; then
+    err "Repository and passphrase paths must not contain newlines."
 fi
 
-printf -v Q_SCRIPT '%q' "$SCRIPT_PATH"
-printf -v Q_REPO   '%q' "$REPO"
-printf -v Q_PASS   '%q' "$PASSPHRASE_FILE"
+if [[ ! "$SCRIPT_PATH" -ef "$INSTALLED_SCRIPT" ]]; then
+    install -d -m 0755 "$(dirname "$INSTALLED_SCRIPT")"
+    install -m 0755 "$SCRIPT_PATH" "$INSTALLED_SCRIPT"
+    chown root:root "$INSTALLED_SCRIPT"
+    msg "Installed $INSTALLED_SCRIPT (0755 root:root) for the backup timer"
+    info "Re-run --init after editing $SCRIPT_PATH so the timer uses the new copy."
+fi
+
+Q_REPO="$(systemd_quote "$REPO")"
+Q_PASS="$(systemd_quote "$PASSPHRASE_FILE")"
 
 cat > /etc/systemd/system/borg-backup.service <<EOF
 [Unit]
@@ -348,7 +378,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 UMask=0077
-ExecStart=${Q_SCRIPT} -r ${Q_REPO} -p ${Q_PASS} -k ${KEEP_DAILY} -K ${KEEP_WEEKLY} -M ${KEEP_MONTHLY} --backup --prune
+ExecStart=${INSTALLED_SCRIPT} -r ${Q_REPO} -p ${Q_PASS} -k ${KEEP_DAILY} -K ${KEEP_WEEKLY} -M ${KEEP_MONTHLY} --backup --prune
 Nice=19
 IOSchedulingClass=idle
 PrivateTmp=false

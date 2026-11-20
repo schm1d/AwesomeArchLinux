@@ -94,7 +94,8 @@ by `--encrypt-user`.
 ## Usage
 
 ```
-sudo ./fscrypt.sh [--setup] [--encrypt-user USER] [--status] [--uninstall] [-h]
+sudo ./fscrypt.sh [--setup] [--encrypt-user USER [--allow-ssh-key-lockout]]
+                  [--status] [--uninstall] [-h]
 ```
 
 ### `--setup` (default)
@@ -132,9 +133,17 @@ What happens:
 
 1. `root`, system accounts (`UID < 1000`), and invocations from `alice`'s own
    `sudo` / `logind` session are refused up front before anything is touched.
+   The session check also looks at the script's own cgroup, so a root shell
+   reached through `sudo su -`, `su -`, `doas`, or a tmux pane that still lives
+   in `user-<uid>.slice` is refused as well.
    The actual home filesystem and root filesystem are checked and their
    metadata prepared before any sessions are terminated or data moved.
    Symlink homes and homes that are themselves mount points are refused.
+   If `alice` has `~/.ssh/authorized_keys`, the effective sshd configuration
+   (`sshd -T`) is checked: when sshd only accepts public keys for her and the
+   keys exist only inside the home, the script refuses, because she would be
+   locked out of SSH (see [SSH logins](#ssh-logins)). `--allow-ssh-key-lockout`
+   overrides this when console access is guaranteed.
 2. An empty sibling directory is created (mode 700, owner `alice`) and
    encrypted by root with `--user=alice --source=pam_passphrase`. This selects
    Alice's login password while allowing metadata directories to remain writable
@@ -161,6 +170,43 @@ sudo rm -rf /home/alice.pre-encrypt
 
 The old unencrypted copy is **deliberately not deleted** so there is a
 rollback path if anything goes wrong.
+
+### SSH logins
+
+`pam_fscrypt` unlocks a home only when the login hands it the account
+password. For SSH that means:
+
+- **`PasswordAuthentication yes` (with `UsePAM yes`)** unlocks automatically.
+  Upstream fscrypt documents that `KbdInteractiveAuthentication` does **not**
+  (an sshd limitation), even when it asks for the same password.
+- **Public-key logins never unlock.** The user gets a shell in a locked home
+  and has to run `fscrypt unlock "$HOME"` (login password or recovery
+  passphrase) themselves.
+- **`~/.ssh/authorized_keys` is inside the encrypted home.** While the home is
+  locked sshd cannot read it, so a public-key login is rejected unless another
+  session already unlocked the home. Directly after `--encrypt-user` the new
+  home is also empty, so the file does not exist at all until it is copied
+  back.
+
+On a host that only accepts public keys (for example after
+`hardening/ssh/ssh.sh` or `hardening/totp/totp.sh`), encrypting a home
+therefore locks that user out of SSH. `--encrypt-user` refuses in that case.
+Before encrypting, keep the keys outside the home:
+
+```bash
+# /etc/ssh/sshd_config (or a drop-in that sorts first)
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys
+
+sudo install -d -m 0755 -o root -g root /etc/ssh/authorized_keys
+sudo install -m 0644 -o root -g root /home/alice/.ssh/authorized_keys /etc/ssh/authorized_keys/alice
+sudo sshd -t && sudo systemctl reload sshd
+```
+
+Root-owned key files are a trade-off: the user can no longer add or remove
+keys without an administrator. With the keys in place a public-key login
+works again, but the home still has to be unlocked with
+`fscrypt unlock "$HOME"` after logging in. `--allow-ssh-key-lockout` skips the
+refusal for machines where the user always has console access.
 
 ### `--status`
 
@@ -291,10 +337,14 @@ The `encrypt` ext4 feature itself stays enabled (there is no in-place
 
 ## Known issues and caveats
 
-- **Login managers:** `pam_fscrypt` is well-tested with `login` (console),
-  `sshd`, and `lightdm`. `sddm` and `gdm` have historically needed care
+- **Login managers:** `pam_fscrypt` is well-tested with `login` (console)
+  and `lightdm`. `sddm` and `gdm` have historically needed care
   around the session stack. Test your target DM before rolling out
   broadly.
+- **SSH:** only password logins (`PasswordAuthentication`) unlock a home;
+  public-key and keyboard-interactive logins do not, and keys stored in the
+  encrypted home are unreadable while it is locked. See
+  [SSH logins](#ssh-logins).
 - **NFS / CIFS home directories:** **Not supported.** fscrypt is an ext4
   kernel feature; network-mounted homes cannot be fscrypt-encrypted from
   the client.

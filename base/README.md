@@ -75,10 +75,11 @@ Note: `/boot` resides inside the encrypted `root` logical volume (there is no se
    - Logical volume sizes (`swap`, `root`, optional `var` — remaining space goes to `home`)
    - Username and hostname
    - Timezone, locale, and console keymap (with live preview via `loadkeys`)
-   - SSH public key (password SSH authentication is disabled)
+   - SSH public key (password SSH authentication is disabled). Only key types the hardened `sshd` accepts are taken: `ssh-ed25519`, `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`, or `ssh-rsa`. Plain `ecdsa-sha2-*` keys are rejected at the prompt instead of locking you out after the first boot.
    - Sysctl profile (`workstation`, `strict`, or `performance`) and IPv6 policy
    - Optional NVIDIA tensor-core unlock ([`Zagitta/gpu-unlock`](https://github.com/Zagitta/gpu-unlock), disabled by default; supports `gpu_unlock.targets=all` or specific PCI BDFs on GeForce RTX 20/30/40)
-   - LUKS2 passphrase — **copy `recovery.key` and `luks-header-backup.img` to external off-machine storage when prompted** (live-ISO copies are shredded during final cleanup)
+   - Explicit confirmation of the target disk: the installer refuses a disk with mounted filesystems, active swap, or open LUKS/LVM devices, and nothing is written until you type the disk name
+   - LUKS2 passphrase — **copy `recovery.key` and `luks-header-backup.img` to external off-machine storage when prompted** (the installer keeps them in a private RAM-backed directory under `/run` and prints the full path; the live-ISO copies are destroyed during final cleanup)
 
 5. After partitioning and `pacstrap`, the installer stages `chroot.sh`, `bootloader.sh`, `lib/chroot-security.sh`, `board-health.sh`, `gpu-unlock.sh` (`/usr/local/sbin/awesome-gpu-unlock`), `ssh.sh`, `nftables.sh`, the composable sysctl bundle, and the `/root` post-install bundle, then enters `arch-chroot`.
 
@@ -95,7 +96,7 @@ Note: `/boot` resides inside the encrypted `root` logical volume (there is no se
 
 - Timezone, locale, X11 keyboard mapping, hostname, `/etc/hosts`
 - DNS-over-TLS via native `systemd-resolved` (with `iwd` + NetworkManager integration)
-- `nftables` firewall (default-drop input, ICMPv4/ICMPv6 allowances, SSH rate limiting)
+- `nftables` firewall (default-drop input, ICMPv4/ICMPv6 and DHCPv6-client allowances, per-source SSH rate limiting so scan noise cannot use up the allowance of legitimate clients)
 - `rng-tools`, `fwupd` metadata refresh (plus signed `fwupdx64.efi` in the `uki` profile), `smartmontools` + `nvme-cli` alerting, and pure-Bash EC thermal monitoring (`board-health.sh`) on supported boards
 - `usbguard` with safe first-boot initial policy generation (`usbguard-initial-policy`)
 - ClamAV (`clamd` + `freshclam`), `rkhunter` daily timer (with `--propupd` finalized after all package and permission changes), `arch-audit` daily vulnerability timer, `lynis`, and `arpwatch`
@@ -135,7 +136,9 @@ Note: `/boot` resides inside the encrypted `root` logical volume (there is no se
    ./vps-install.sh
    ```
 
-3. The script auto-detects UEFI vs BIOS, validates your SSH public key (requiring an SSH public key unless you explicitly confirm out-of-band console access), and configures the selected sysctl profile and IPv6 policy inside chroot.
+3. The script auto-detects UEFI vs BIOS, validates your SSH public key (requiring an SSH public key unless you explicitly confirm out-of-band console access), and configures the selected sysctl profile and IPv6 policy inside chroot. Accepted key types are `ssh-ed25519`, `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`, and `ssh-rsa`; plain `ecdsa-sha2-*` keys are rejected because the hardened `sshd` refuses them.
+
+4. As on bare metal, the installer refuses a target disk that has mounted filesystems, active swap, or open LUKS/LVM devices, and nothing is written until you type the disk name.
 
 ### Differences from Bare-Metal
 
@@ -178,14 +181,18 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 ### CLI Options
 
 ```
-  -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
-              or 25 when the root disk is at least 1 TB)
+  -t SIZE     tmpfs size for /tmp in GB (minimum: 1). tmpfs is backed by RAM
+              and swap. Automatic default: half of the installed memory, but
+              at most 10 GB (25 GB when the root disk is at least 1 TB)
   -v SIZE     /var loop image size in GB, if using loop device (default: 10)
   -u USER     Non-root username for vps-chroot.sh (prompted if not given)
   -H HOST     Hostname to set (prompted if not given)
-  -p PORT     SSH port for vps-chroot.sh (default: 22)
+  -p PORT     SSH port for vps-chroot.sh (default: the port sshd uses now,
+              22 if that cannot be determined)
   --ssh-key KEY
-              SSH public key to install for USER
+              SSH public key to install for USER (ssh-ed25519, ssh-rsa,
+              sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com;
+              plain ECDSA keys are rejected)
   -k, --allow-no-ssh-key
               Allow disabling SSH password auth without an authorized_keys entry
               (ONLY if you have verified out-of-band VPS console access)
@@ -195,6 +202,9 @@ sudo ./vps-harden.sh --skip-var --skip-sw
               Select workstation, strict, or performance (default: workstation)
   --disable-ipv6
               Install the explicit IPv6-disable sysctl overlay
+  --ref REF   Branch, tag or commit of the repository that components are
+              downloaded from when the script runs without a local checkout
+              (default: main). Pass a tag or commit to pin what is run.
   --dry-run   Show planned changes without executing
   -h, --help  Show help
 ```
@@ -204,7 +214,13 @@ sudo ./vps-harden.sh --skip-var --skip-sw
 - `--dry-run` previews all planned actions without modifying the system
 - `mount -a --fake` validates `/etc/fstab` after every edit and automatically restores the backup on failure
 - Auto-generated rollback script at `/root/undo-vps-harden.sh`
-- Refuses to disable SSH password authentication unless `authorized_keys` is non-empty, `--ssh-key` / interactive key is supplied, or `-k` / console confirmation is explicitly given
+- Refuses to disable SSH password authentication unless `authorized_keys` holds a key the hardened `sshd` accepts, `--ssh-key` / interactive key is supplied, or `-k` / console confirmation is explicitly given
+- The SSH port is not moved unless you ask for it: the default is the port `sshd` uses now. When it does move, the old port stays open until `sshd` listens on the new one
+- An existing firewall that this project did not write is left untouched; the ruleset the installer would use is saved as `/root/nftables.conf.awesome-proposed` for review. With no firewall at all, the base ruleset is installed and ports that are already listening stay open
+- Existing `/etc/sudoers`, timezone, locale, keymap, `/etc/hosts` entries, network configuration and user dotfiles are kept; `/etc/hosts`, `/etc/resolv.conf`, `/etc/sudoers` and `/etc/nftables.conf` get a `<file>.before-awesome.<time>` copy before they are changed
+- Components next to the script are used only when every file and parent directory belongs to root or the script's owner and is not group- or world-writable; otherwise the script refuses, and without a checkout it downloads them and logs their SHA-256
+- Packages are resolved and downloaded before the first change, so a missing package or a network failure stops the run early
+- The plan still sets new user and root passwords, writes the hostname and switches DNS to `systemd-resolved` with DNS-over-TLS, and the sysctl profile switches IP forwarding off: review the plan (`--dry-run`) before running it on a router, VPN hub or container host
 - `/var` is never copied or cut over while the OS is running; device-specific rescue commands are written to `/root/MIGRATE_VAR_OFFLINE.txt`
 
 ---
@@ -221,9 +237,11 @@ Interactive menu options:
 1. Show current `/mnt` mounts, active LVM logical volumes, and open `/dev/mapper` containers
 2. Safely deactivate swap (`swapoff`), recursively unmount `/mnt` (`umount -R /mnt`), deactivate LVM, and close LUKS
 3. Unlock LUKS + activate LVM + mount `root`, `home`, optional `var`, optional `tmp`, and `/efi` (or mount an unencrypted 2-partition VPS root + swapfile)
-4. Resume an interrupted `chroot.sh` or `vps-chroot.sh` run
+4. Resume an interrupted `chroot.sh` or `vps-chroot.sh` run. On success the staged installer scripts are removed from the target; for the `uki` profile the tool prints the `cryptsetup luksKillSlot` command for the temporary install-session key slot, which a resumed run cannot remove on its own
 5. Enter an interactive `arch-chroot` shell at `/mnt` for manual repair
 6. Exit
+
+A failing action (wrong LUKS passphrase, busy mount, missing files) stops at its first error and returns to the menu instead of ending the session.
 
 ---
 
@@ -232,9 +250,16 @@ Interactive menu options:
 - **`uki` boot profile (recommended for Secure Boot)**: Secure Boot keys and signing hooks are already provisioned with `sbctl` during installation. Use `sudo awesome-secureboot status`, `sudo awesome-secureboot enroll-keys`, `sudo awesome-secureboot bind-tpm`, and `sudo awesome-secureboot refresh`.
 - **Manual `PK`/`KEK`/`db` provisioning (`secureBoot.sh`)**: For custom non-`sbctl` UEFI setups (refuses to run if `sbctl` already manages Secure Boot):
   ```bash
-  sudo ./secureBoot.sh [-d KEY_DIR] [-p EFI_MOUNT] [-k KEY_SIZE] [-v VALID_DAYS] [-o] [-h]
+  sudo ./secureBoot.sh [-d KEY_DIR] [-p EFI_MOUNT] [-k KEY_SIZE] [-v VALID_DAYS] [-o | -s] [-m] [-G] [-y] [-h]
   ```
   Generates `PK`, `KEK`, and `db` keys (leaving vendor `dbx` revocations intact), backs up existing efivars, signs candidate bootloaders/kernels/UKIs atomically via temporary files first, and enrolls keys in strict `db` -> `KEK` -> `PK` order.
+
+  - The firmware must be in **Setup Mode** (clear the Platform Key in the firmware setup first); the script checks this before it generates or changes anything.
+  - `-m` keeps the certificates currently enrolled in the firmware `db`/`KEK` (normally Microsoft's and the hardware vendor's) next to your own. Without `-m`, `db` holds only your certificate: vendor-signed option ROMs (graphics, network, storage) are then refused, which on some machines means no display output at all. The script warns and asks for confirmation (`-y` to accept non-interactively).
+  - An existing key set in `KEY_DIR` is never overwritten; it is moved to `previous-keys-<timestamp>/`.
+  - GRUB (the `grub` boot profile) is rebuilt with `--disable-shim-lock --modules=tpm`, because a stock `grub-install` refuses to load a kernel under Secure Boot without shim. This needs a TPM; `-G` skips the rebuild if your GRUB is already prepared.
+  - `-o` re-signs with the existing keys and enrolls them only if the firmware is in Setup Mode; `-s` only signs. The script installs itself as `/usr/local/sbin/awesome-efi-resign` with a pacman hook, so kernels are re-signed after every kernel update.
+  - The firmware side of this script (key enrollment, GRUB under Secure Boot) can only be exercised on real UEFI firmware or OVMF. Try it in a VM, or make sure you know how to reset Secure Boot keys in your firmware setup, before relying on it.
 
 ---
 

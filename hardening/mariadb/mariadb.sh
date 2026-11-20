@@ -78,6 +78,10 @@ Examples:
   sudo $0                           # Defaults: port 3306, local-only
   sudo $0 -p 3307 --ssl             # Custom port with TLS
   sudo $0 --ssl --no-local          # TLS + accept remote connections
+
+Re-runs: stop mariadb.service first. The script refuses to run beside a live
+server because it starts a temporary instance on the same data directory; it
+starts MariaDB again when it finishes.
 EOF
     exit 0
 }
@@ -152,7 +156,7 @@ msg "Starting an isolated MariaDB instance for security hardening..."
 # the risk of sharing the data directory, an unqualified client could connect
 # to the production socket and the cleanup path could stop the wrong process.
 if systemctl is-active --quiet mariadb.service; then
-    err "MariaDB is already running. Stop mariadb.service before running this hardening script."
+    err "MariaDB is already running. Schedule a maintenance window, run 'systemctl stop mariadb.service', then re-run this script (it starts MariaDB again when it finishes)."
 fi
 
 for server_name in mariadbd mysqld mysqld_safe; do
@@ -277,6 +281,22 @@ EOSQL
 
 msg "Security hardening applied"
 
+# Log rotation reopens the logs through mariadb-admin as the unix_socket
+# authenticated mysql@localhost account (mariadb-install-db --user=mysql creates
+# it; an older or customised data directory may lack it). FLUSH PRIVILEGES above
+# re-enabled authentication, so this connection needs the root password; pass it
+# through the environment rather than argv. Non-fatal: a failure here only
+# affects log rotation and must not abort the hardening run.
+if MYSQL_PWD="$ROOT_PASS" mariadb --no-defaults --protocol=socket --socket="$MARIADB_SOCKET" -u root <<'EOSQL'
+CREATE USER IF NOT EXISTS 'mysql'@'localhost' IDENTIFIED VIA unix_socket;
+GRANT RELOAD ON *.* TO 'mysql'@'localhost';
+EOSQL
+then
+    info "Log rotation account mysql@localhost (unix_socket, RELOAD) is present"
+else
+    warn "Could not verify the mysql@localhost unix_socket account; logrotate may not be able to reopen MariaDB logs"
+fi
+
 # Save root password securely
 if [[ "$REUSED_ROOT_PASS" == false ]]; then
     (
@@ -381,16 +401,35 @@ if [[ "$ENABLE_SSL" == true ]]; then
         msg "SSL certificates generated in $SSL_DIR"
     fi
 
-    # Set permissions (0600 on private keys, 0644 on certificates)
-    chown -R mysql:mysql "$SSL_DIR"
-    chmod 0750 "$SSL_DIR"
-    for ssl_key in "$SSL_DIR"/*-key.pem; do
-        [[ -f "$ssl_key" ]] && chmod 0600 "$ssl_key"
+    # Set permissions (0600 on private keys, 0644 on certificates). mysqld only
+    # needs its own key: the CA key (which can sign new certificates) and the
+    # client key stay root-only instead of belonging to the mysql user. Anything
+    # else in the directory loses group/other access before the directories are
+    # opened up, so clients running as other users can read ca-cert.pem and
+    # client-cert.pem without exposing unrelated files.
+    for ssl_file in "$SSL_DIR"/*; do
+        [[ -f "$ssl_file" && ! -L "$ssl_file" ]] || continue
+        case "${ssl_file##*/}" in
+            ca-cert.pem|server-cert.pem|client-cert.pem)
+                chown root:root "$ssl_file"
+                chmod 0644 "$ssl_file"
+                ;;
+            server-key.pem)
+                chown mysql:mysql "$ssl_file"
+                chmod 0600 "$ssl_file"
+                ;;
+            ca-key.pem|client-key.pem)
+                chown root:root "$ssl_file"
+                chmod 0600 "$ssl_file"
+                ;;
+            *)
+                chmod go-rwx "$ssl_file"
+                ;;
+        esac
     done
-    for ssl_cert in "$SSL_DIR"/*-cert.pem; do
-        [[ -f "$ssl_cert" ]] && chmod 0644 "$ssl_cert"
-    done
-    unset ssl_key ssl_cert
+    unset ssl_file
+    chown root:root /etc/mysql "$SSL_DIR"
+    chmod 0755 /etc/mysql "$SSL_DIR"
 fi
 
 # =============================================================================
@@ -430,7 +469,6 @@ local-infile            = 0
 skip-symbolic-links
 secure-file-priv        = /var/lib/mysql-files
 sql-mode                = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
-log-raw                 = OFF
 
 EOF
 
@@ -578,11 +616,22 @@ cat > /etc/logrotate.d/mariadb <<'EOF'
     missingok
     notifempty
     create 640 mysql mysql
+    # /var/log/mysql belongs to mysql: rotate as that user, never as root.
+    su mysql mysql
     sharedscripts
     postrotate
-        # Signal MariaDB main process to reopen log files
+        # Reopen the logs through the client. MariaDB has no SIGUSR1 handler
+        # (the signal's default action terminates mariadbd), and SIGHUP also
+        # flushes tables and reloads grants. logrotate runs this script as
+        # root even with "su", and root@localhost uses password authentication
+        # after hardening, so connect as the unix_socket authenticated
+        # mysql@localhost account (needs only RELOAD).
         if systemctl is-active --quiet mariadb.service; then
-            systemctl kill -s USR1 --kill-who=main mariadb.service 2>/dev/null || true
+            runuser -u mysql -- /usr/bin/mariadb-admin --local \
+                flush-error-log flush-engine-log flush-general-log flush-slow-log \
+                >/dev/null 2>&1 || \
+                logger -p daemon.warning -t logrotate-mariadb \
+                    "mariadb-admin flush failed; MariaDB keeps writing to the rotated log files"
         fi
     endscript
 }
@@ -667,7 +716,7 @@ echo "  Test database:        removed"
 echo "  LOAD DATA LOCAL:      disabled"
 echo "  Symbolic links:       disabled"
 echo "  Strict SQL mode:      enabled"
-echo "  Plaintext log:        OFF (log-raw = OFF)"
+echo "  Statement logging:    general log disabled (only slow queries are logged)"
 
 if [[ "$ENABLE_SSL" == true ]]; then
     echo
@@ -676,7 +725,8 @@ if [[ "$ENABLE_SSL" == true ]]; then
     echo "  Server certificate:   /etc/mysql/ssl/server-cert.pem"
     echo "  Server key:           /etc/mysql/ssl/server-key.pem"
     echo "  Client certificate:   /etc/mysql/ssl/client-cert.pem"
-    echo "  Client key:           /etc/mysql/ssl/client-key.pem"
+    echo "  Client key:           /etc/mysql/ssl/client-key.pem (root-only; copy it to the client that needs it)"
+    echo "  CA key:               /etc/mysql/ssl/ca-key.pem (root-only; move it offline once certificates are issued)"
     echo "  TLS versions:         TLSv1.2, TLSv1.3"
     echo "  Require secure:       ON"
 fi

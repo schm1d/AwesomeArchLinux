@@ -26,12 +26,12 @@ sudo ./proxy.sh -n 192.168.1.0/24 --dry-run
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-n CIDR` | LAN network CIDR | *required* |
-| `-p PORT` | HTTP intercept port | `3128` |
-| `-P PORT` | HTTPS intercept port | `3129` |
+| `-p PORT` | HTTP intercept port (decimal; a leading zero is ignored) | `3128` |
+| `-P PORT` | HTTPS intercept port (decimal; a leading zero is ignored) | `3129` |
 | `-c SIZE_MB` | Disk cache size in MB | `10000` |
 | `-e EMAIL` | Admin email | `admin@hostname` |
 | `--ssl-bump` | Enable HTTPS interception (peek-and-splice) | |
-| `--dns-filter` | Enable DNS-level ad/malware blocking via dnsmasq | |
+| `--dns-filter` | Enable DNS-level blocking of the same blocklists via dnsmasq | |
 | `--dry-run` | Preview planned configuration and firewall rules without modifying the system | |
 | `-h` | Show help | |
 
@@ -95,8 +95,13 @@ Traffic from the configured network is transparently redirected to Squid via nft
 
 ### Domain Blocklists
 
-- **Ads + tracking**: StevenBlack unified hosts (100K+ domains)
-- **Malware + fakenews**: StevenBlack extended list
+- **`ads.txt` — ads, malware, tracking**: [StevenBlack unified hosts](https://github.com/StevenBlack/hosts) (100K+ domains)
+- **`malware.txt` — the unified list plus fake news, gambling and adult content**: StevenBlack `alternates/fakenews-gambling-porn`. The file name is historical; this list is a content filter, not a malware feed, so gambling and adult sites are blocked for every client as well
+- **Choosing other lists**: the updater reads `AAL_ADS_BLOCKLIST_URL` and `AAL_MALWARE_BLOCKLIST_URL` (any hosts-format list). For example, to block fake news only, without the gambling and adult categories:
+  ```bash
+  sudo AAL_MALWARE_BLOCKLIST_URL=https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews/hosts ./proxy.sh -n 192.168.1.0/24
+  sudo systemctl edit squid-blocklist-update.service   # add the same value as [Service] Environment=AAL_MALWARE_BLOCKLIST_URL=... for the daily timer
+  ```
 - **Whitelist**: Custom destination overrides, evaluated only after the client matches the trusted LAN or localhost ACL
 - **Auto-update**: systemd timer runs daily at 03:00 using `/usr/local/bin/awesome-squid-blocklist-update`
 - **Failure safety**: both downloads are staged and size-checked before any Squid or dnsmasq list is replaced; parse or reload failure restores the previous files, reapplies them to the daemons, and fails the unit visibly
@@ -118,8 +123,10 @@ When `--dns-filter` is enabled:
 - **dnsmasq** provides DNS-level blocking using the same blocklists (`conf-dir=/etc/dnsmasq.d/,*.conf`, `no-resolv`)
 - Blocks domains at the DNS layer before HTTP requests are made
 - Upstream resolvers: Quad9 (`9.9.9.9` and `149.112.112.112`)
-- Handles systemd-resolved conflict automatically
-- systemd hardening applied to dnsmasq (`/run/dnsmasq/dnsmasq.pid` under `ProtectSystem=strict`)
+- Handles systemd-resolved conflict automatically: the stub listener is disabled through `/etc/systemd/resolved.conf.d/disable-stub.conf` so dnsmasq can bind port 53
+- systemd hardening applied to dnsmasq (`/run/dnsmasq/dnsmasq.pid` under `ProtectSystem=strict`). The capability set keeps `CAP_NET_RAW`, which dnsmasq requires at start-up when it runs with `--enable-dbus`
+- dnsmasq is restarted on every run, so configuration changes apply to an instance that is already running. If it does not start, the script re-enables the resolved stub listener (so the host keeps resolving names) and stops with an error
+- Re-running the script **without** `--dns-filter` removes the filter again: the two `proxy-*.conf` files and the dnsmasq hardening drop-in are deleted, dnsmasq is stopped and disabled when nothing else is configured in `/etc/dnsmasq.d`, and the resolved stub listener is re-enabled
 
 ### Cache
 
@@ -301,7 +308,7 @@ TPROXY preserves the original client source IP (the origin server sees the real 
 |------|-------------|
 | `/etc/squid/squid.conf` | Main Squid configuration |
 | `/etc/squid/blocklists/ads.txt` | Ads/tracking blocklist |
-| `/etc/squid/blocklists/malware.txt` | Malware blocklist |
+| `/etc/squid/blocklists/malware.txt` | Extended blocklist (unified list + fake news, gambling, adult content) |
 | `/etc/squid/blocklists/whitelist.txt` | Custom whitelist |
 | `/etc/squid/ssl/squid-ca.{pem,key}` | SSL bump CA (if enabled) |
 | `/etc/squid/ssl/dhparam.pem` | DH parameters (if SSL bump) |
@@ -312,6 +319,7 @@ TPROXY preserves the original client source IP (the origin server sees the real 
 | `/etc/logrotate.d/squid` | Log rotation (14 days) |
 | `/etc/dnsmasq.d/proxy-{blocklist,dns}.conf` | DNS filtering (if enabled) |
 | `/etc/systemd/system/dnsmasq.service.d/hardening.conf` | dnsmasq hardening (if enabled) |
+| `/etc/systemd/resolved.conf.d/disable-stub.conf` | Disables the systemd-resolved stub listener (if DNS filtering is enabled and resolved was using port 53) |
 
 ## References
 

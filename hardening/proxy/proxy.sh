@@ -7,7 +7,9 @@
 #                - Transparent HTTP interception via nftables REDIRECT
 #                - Optional SSL bump (peek-and-splice HTTPS inspection)
 #                - Optional DNS filtering via dnsmasq blocklists
-#                - Domain blocklists (ads, malware, tracking) with auto-update
+#                - Domain blocklists with auto-update: ads/malware/tracking
+#                  (StevenBlack unified hosts) plus the fake-news, gambling
+#                  and adult-content extensions of the same project
 #                - Information disclosure prevention (header stripping)
 #                - Connection limits and rate limiting
 #                - SSD-friendly rock cache store
@@ -31,7 +33,8 @@
 #   1.  Installs squid, openssl, nftables (and dnsmasq if --dns-filter)
 #   2.  Creates squid directories and verifies the proxy user
 #   3.  Generates SSL bump CA certificate (if --ssl-bump)
-#   4.  Downloads and formats domain blocklists (ads, malware)
+#   4.  Downloads and formats the domain blocklists (see the README for the
+#       categories and how to select different lists)
 #   5.  Writes hardened /etc/squid/squid.conf (transparent intercept mode)
 #   6.  Appends SSL bump configuration (if --ssl-bump)
 #   7.  Configures DNS filtering via dnsmasq (if --dns-filter)
@@ -95,7 +98,7 @@ Optional:
   -c SIZE_MB    Disk cache size in MB (default: $CACHE_SIZE_MB)
   -e EMAIL      Admin email for cache manager
   --ssl-bump    Enable SSL bump (HTTPS interception with peek-and-splice)
-  --dns-filter  Enable DNS-level ad/malware filtering via dnsmasq
+  --dns-filter  Enable DNS-level filtering of the same blocklists via dnsmasq
   --dry-run     Preview planned configuration and firewall rules without modifying the system
   -h            Show this help
 
@@ -146,11 +149,15 @@ if [[ "$SSL_BUMP" == true ]] && (( 10#$HTTP_PORT == 10#$HTTPS_PORT )); then
 fi
 [[ "$CACHE_SIZE_MB" =~ ^[0-9]+$ ]] && (( 10#$CACHE_SIZE_MB >= 1 )) \
     || err "Invalid cache size: $CACHE_SIZE_MB"
+# Canonical decimal form: nft reads a leading zero as octal ("03128" would
+# redirect to port 1624), Squid reads it as decimal.
+HTTP_PORT=$((10#$HTTP_PORT))
+HTTPS_PORT=$((10#$HTTPS_PORT))
 
 LOCAL_MGR_PORT=3127
-if (( 10#$HTTP_PORT == 3127 || 10#$HTTPS_PORT == 3127 )); then
+if (( HTTP_PORT == 3127 || HTTPS_PORT == 3127 )); then
     LOCAL_MGR_PORT=3126
-    if (( 10#$HTTP_PORT == 3126 || 10#$HTTPS_PORT == 3126 )); then
+    if (( HTTP_PORT == 3126 || HTTPS_PORT == 3126 )); then
         LOCAL_MGR_PORT=3125
     fi
 fi
@@ -346,6 +353,11 @@ umask 022
 
 readonly BLOCKLIST_DIR="${AAL_SQUID_BLOCKLIST_DIR:-/etc/squid/blocklists}"
 readonly MIN_ENTRIES="${AAL_MIN_BLOCKLIST_ENTRIES:-1000}"
+# ads.txt: StevenBlack unified hosts (adware, malware, tracking).
+# malware.txt: despite its historical name this is the unified list plus the
+# fake-news, gambling and adult-content extensions, so those categories are
+# blocked as well. Point AAL_MALWARE_BLOCKLIST_URL at another hosts-format
+# list (for example .../alternates/fakenews/hosts) to change that.
 readonly ADS_URL="${AAL_ADS_BLOCKLIST_URL:-https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts}"
 readonly MALWARE_URL="${AAL_MALWARE_BLOCKLIST_URL:-https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-porn/hosts}"
 readonly CURL_BIN="${AAL_CURL_BIN:-/usr/bin/curl}"
@@ -516,13 +528,59 @@ printf 'Squid blocklists updated successfully.\n'
 BLOCKLIST_UPDATE
 chmod 0755 /usr/local/bin/awesome-squid-blocklist-update
 
+readonly RESOLVED_STUB_DROPIN="/etc/systemd/resolved.conf.d/disable-stub.conf"
+readonly DNSMASQ_HARDENING_DROPIN="/etc/systemd/system/dnsmasq.service.d/hardening.conf"
+
+# The drop-in is recognised by its marker line, or by the exact two lines
+# older versions of this script wrote.
+resolved_stub_dropin_is_ours() {
+    [[ -f "$RESOLVED_STUB_DROPIN" ]] || return 1
+    if grep -Fq 'AwesomeArchLinux' "$RESOLVED_STUB_DROPIN"; then
+        return 0
+    fi
+    [[ "$(<"$RESOLVED_STUB_DROPIN")" == $'[Resolve]\nDNSStubListener=no' ]]
+}
+
+# Gives port 53 back to systemd-resolved. /etc/resolv.conf normally points at
+# its stub listener, so without it (and without dnsmasq) the host cannot
+# resolve names at all.
+restore_resolved_stub() {
+    resolved_stub_dropin_is_ours || return 0
+    rm -f -- "$RESOLVED_STUB_DROPIN"
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+    info "Re-enabled the systemd-resolved stub listener"
+}
+
 if [[ "$DNS_FILTER" == false ]]; then
+    # A previous run with --dns-filter left dnsmasq serving port 53, its
+    # hardening drop-in and the disabled resolved stub behind. Undo all of it,
+    # not only the two configuration files.
     if [[ -e /etc/dnsmasq.d/proxy-dns.conf || -e /etc/dnsmasq.d/proxy-blocklist.conf ]]; then
         rm -f /etc/dnsmasq.d/proxy-dns.conf /etc/dnsmasq.d/proxy-blocklist.conf
         info "Removed stale /etc/dnsmasq.d/proxy-{dns,blocklist}.conf (DNS filter disabled)"
-        if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-            systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+        if [[ -f "$DNSMASQ_HARDENING_DROPIN" ]]; then
+            rm -f -- "$DNSMASQ_HARDENING_DROPIN"
+            rmdir --ignore-fail-on-non-empty -- "$(dirname "$DNSMASQ_HARDENING_DROPIN")" 2>/dev/null || true
+            systemctl daemon-reload
         fi
+        shopt -s nullglob
+        other_dnsmasq_conf=(/etc/dnsmasq.d/*.conf)
+        shopt -u nullglob
+        if (( ${#other_dnsmasq_conf[@]} == 0 )); then
+            # dnsmasq was only here for the filter: stop it and hand port 53
+            # back to systemd-resolved.
+            systemctl disable --now dnsmasq 2>/dev/null || true
+            info "Stopped and disabled dnsmasq (it was only used for DNS filtering)"
+            restore_resolved_stub
+        else
+            warn "Other configuration remains in /etc/dnsmasq.d; dnsmasq keeps running without the proxy filter"
+            if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+                systemctl restart dnsmasq 2>/dev/null || true
+            fi
+        fi
+        unset other_dnsmasq_conf
     fi
 fi
 
@@ -776,11 +834,13 @@ if [[ "$DNS_FILTER" == true ]]; then
             warn "systemd-resolved is bound to port 53"
             info "Disabling resolved stub listener for dnsmasq..."
             install -d -m 0755 /etc/systemd/resolved.conf.d
-            cat > /etc/systemd/resolved.conf.d/disable-stub.conf <<'EOF'
+            cat > "$RESOLVED_STUB_DROPIN" <<'EOF'
+# Written by AwesomeArchLinux hardening/proxy/proxy.sh (--dns-filter):
+# dnsmasq answers on port 53 instead of the resolved stub listener.
 [Resolve]
 DNSStubListener=no
 EOF
-            chmod 0644 /etc/systemd/resolved.conf.d/disable-stub.conf
+            chmod 0644 "$RESOLVED_STUB_DROPIN"
             systemctl restart systemd-resolved 2>/dev/null || true
         fi
     fi
@@ -858,8 +918,8 @@ EOF
     fi
 
     # systemd hardening for dnsmasq
-    install -d -m 0755 /etc/systemd/system/dnsmasq.service.d
-    cat > /etc/systemd/system/dnsmasq.service.d/hardening.conf <<'EOF'
+    install -d -m 0755 "$(dirname "$DNSMASQ_HARDENING_DROPIN")"
+    cat > "$DNSMASQ_HARDENING_DROPIN" <<'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dnsmasq -k --enable-dbus --user=dnsmasq --pid-file=/run/dnsmasq/dnsmasq.pid
@@ -882,11 +942,14 @@ DevicePolicy=closed
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RuntimeDirectory=dnsmasq
+# CAP_NET_RAW is required: with --enable-dbus dnsmasq insists on having it in
+# its permitted set and exits with "process is missing required capability
+# NET_RAW" otherwise. It drops to the dnsmasq user right after start-up.
 CapabilityBoundingSet=
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN
 ReadWritePaths=-/run/dnsmasq /var/log/dnsmasq.log
 EOF
-    chmod 0644 /etc/systemd/system/dnsmasq.service.d/hardening.conf
+    chmod 0644 "$DNSMASQ_HARDENING_DROPIN"
 
     msg "DNS filtering configured"
 else
@@ -965,6 +1028,9 @@ if [[ "$DNS_FILTER" == true ]]; then
     nft insert rule inet filter input ip saddr "$NETWORK" ct state new udp dport 53 accept comment "awesome-squid-dns-udp"
     nft insert rule inet filter input ip saddr "$NETWORK" ct state new tcp dport 53 accept comment "awesome-squid-dns-tcp"
 fi
+# The accepts above were inserted at the top of the chain. Put drop-only
+# blocks of other scripts (container isolation) back above them.
+aal_nft_raise_guard_rules || warn "Could not re-order the live isolation rules; they apply again after 'systemctl reload nftables'."
 
 msg "nftables transparent interception configured"
 
@@ -1145,13 +1211,18 @@ msg "Starting services..."
 
 systemctl daemon-reload
 
-# Start dnsmasq first if DNS filtering is enabled
+# Start dnsmasq first if DNS filtering is enabled. "restart" (not "enable
+# --now") so that a re-run applies the new configuration and drop-in to an
+# instance that is already running.
 if [[ "$DNS_FILTER" == true ]]; then
-    systemctl enable --now dnsmasq
-    if systemctl is-active --quiet dnsmasq; then
+    systemctl enable dnsmasq
+    if systemctl restart dnsmasq && systemctl is-active --quiet dnsmasq; then
         msg "dnsmasq is running"
     else
-        warn "dnsmasq failed to start — check: journalctl -u dnsmasq -e"
+        # Squid and the host itself now depend on dnsmasq for DNS. Do not leave
+        # port 53 unanswered: give it back to systemd-resolved before stopping.
+        restore_resolved_stub
+        err "dnsmasq failed to start; the systemd-resolved stub listener was restored. Check: journalctl -u dnsmasq -e"
     fi
 fi
 
@@ -1218,7 +1289,8 @@ echo -e "${C_BLUE}Security features:${C_NC}"
 echo "  Headers stripped:      Via, X-Forwarded-For, X-Cache, Server"
 echo "  Version suppressed:    httpd_suppress_version_string on"
 echo "  Unsafe ports blocked:  CONNECT restricted to SSL ports"
-echo "  Domain blocklists:     Ads, malware, tracking (auto-updated daily)"
+echo "  Domain blocklists:     Ads, malware, tracking, fake news, gambling, adult content"
+echo "                         (StevenBlack hosts, auto-updated daily)"
 echo "  Connection limits:     64 max per IP, delay pools enabled"
 echo "  Cache:                 ${CACHE_SIZE_MB} MB rock store (SSD-friendly)"
 echo "  Collapsed forwarding:  Enabled (deduplicates concurrent requests)"

@@ -1,12 +1,13 @@
 name: ShellCheck
 
 on:
+  # '**.rules': tests/test_chroot_security.sh validates utils/auditd-attack.rules.
   push:
     branches: [main]
-    paths: ['**.sh', '.github/workflows/shellcheck.yml']
+    paths: ['**.sh', '**.rules', '.shellcheckrc', '.github/workflows/shellcheck.yml']
   pull_request:
     branches: [main]
-    paths: ['**.sh', '.github/workflows/shellcheck.yml']
+    paths: ['**.sh', '**.rules', '.shellcheckrc', '.github/workflows/shellcheck.yml']
 
 jobs:
   shellcheck:
@@ -17,8 +18,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # gdisk (sgdisk), uuid-runtime (uuidgen), openssl, tzdata and acl are
+      # used by the test fixtures; linux-libc-dev provides the kernel syscall
+      # tables (asm/unistd_64.h, unistd_32.h) the audit-rule test checks
+      # syscall names against. A test that would skip for a missing tool
+      # fails in CI instead (see skips_are_failures in tests/lib.sh).
       - name: Install ShellCheck and test dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck gdisk acl
+        run: sudo apt-get update && sudo apt-get install -y shellcheck gdisk acl uuid-runtime openssl tzdata linux-libc-dev
 
       - name: Find and lint all shell scripts
         shell: bash
@@ -48,4 +54,6 @@ jobs:
 
       - name: Run pure-Bash regression test suite
         shell: bash
+        env:
+          TESTS_NO_SKIP: "1"
         run: ./tests/run-tests.sh

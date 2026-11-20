@@ -37,7 +37,8 @@
 #   5.  Configures Postfix main.cf as a full MX with DANE, postscreen, milters
 #   6.  Configures Postfix master.cf with submission (587), SMTPS (465), postscreen
 #   7.  Creates header privacy rules for submission ports
-#   8.  Sets up virtual mailbox mapping
+#   8.  Sets up virtual mailbox mapping and role-address aliases (root, abuse,
+#       dmarc-reports, tls-reports)
 #   9.  Configures optional SMTP relay with SASL credentials
 #  10.  Generates DKIM keys and configures OpenDKIM
 #  11.  Configures Dovecot (IMAP, LMTP, TLS, encryption at rest, Sieve)
@@ -56,6 +57,8 @@ umask 022
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1090,SC1091
 source "$SCRIPT_DIR/../lib/nftables.sh"
+# shellcheck disable=SC1090,SC1091
+source "$SCRIPT_DIR/../lib/validation.sh"
 
 # --- Colors ---
 readonly C_BLUE='\033[1;34m'
@@ -144,32 +147,23 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$DOMAIN" ]] || err "Domain is required (-d). Use -h for help."
 
+# These values are written into main.cf, DNS records and file paths. The
+# shared validators check the complete string (a value with an embedded
+# newline used to pass, because only its first line was examined) and accept
+# ASCII letters only, whatever the locale.
 valid_dns_name() {
-    local name="$1" label
-    local -a labels
-
-    (( ${#name} <= 253 )) || return 1
-    [[ "$name" != .* && "$name" != *. && "$name" == *.* ]] || return 1
-    IFS='.' read -r -a labels <<< "$name"
-    for label in "${labels[@]}"; do
-        (( ${#label} >= 1 && ${#label} <= 63 )) || return 1
-        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
-    done
+    aal_valid_fqdn "$1"
 }
 
 valid_email() {
-    local address="$1" local_part domain_part
+    local address="$1"
 
-    [[ "$address" == *@* && "$address" != *@*@* ]] || return 1
-    local_part="${address%@*}"
-    domain_part="${address##*@}"
-    (( ${#local_part} >= 1 && ${#local_part} <= 64 )) || return 1
-    [[ "$local_part" =~ ^[A-Za-z0-9_%+-]+([.][A-Za-z0-9_%+-]+)*$ ]] || return 1
-    valid_dns_name "$domain_part"
+    aal_valid_email "$address" && [[ "${address##*@}" == *.* ]]
 }
 
 valid_dns_name "$DOMAIN" || err "Invalid mail domain: $DOMAIN"
-[[ "$DKIM_SELECTOR" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || \
+# A selector is a single DNS label.
+[[ "$DKIM_SELECTOR" != *.* ]] && aal_valid_hostname "$DKIM_SELECTOR" || \
     err "Invalid DKIM selector: $DKIM_SELECTOR"
 
 # Derive defaults
@@ -181,8 +175,11 @@ valid_email "$ADMIN_EMAIL" || err "Invalid admin email address: $ADMIN_EMAIL"
 
 if [[ -n "$RELAY_HOST" ]]; then
     valid_dns_name "$RELAY_HOST" || err "Invalid relay hostname: $RELAY_HOST"
-    [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] && (( RELAY_PORT >= 1 && RELAY_PORT <= 65535 )) || \
+    [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] && (( 10#$RELAY_PORT >= 1 && 10#$RELAY_PORT <= 65535 )) || \
         err "Invalid relay port: $RELAY_PORT (must be 1-65535)"
+    # Canonical decimal form: "0587" must not be read as octal or written to
+    # main.cf and the credential map with its leading zero.
+    RELAY_PORT=$((10#$RELAY_PORT))
 fi
 
 if [[ -n "$RELAY_SPF_INCLUDE" ]]; then
@@ -219,8 +216,25 @@ if [[ -n "$RELAY_USER" || -n "$RELAY_PASS" ]]; then
         err "Authenticated relay mode requires both -u USER and --relay-password-file FILE"
 fi
 
+# Outbound TLS policy. For direct delivery, DANE (opportunistic TLS when the
+# destination publishes no TLSA records) is the right default. A relay that is
+# sent a password, or that speaks implicit TLS on port 465, needs mandatory,
+# authenticated TLS: for a relay without TLSA records "dane" degrades to
+# opportunistic TLS, so a man-in-the-middle could strip STARTTLS or present
+# any certificate and collect the relay credentials.
+SMTP_TLS_LEVEL="dane"
+if [[ -n "$RELAY_HOST" ]] && [[ -n "$RELAY_USER" || "$RELAY_PORT" == 465 ]]; then
+    if [[ "$RELAY_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # A certificate name cannot be matched against an IP address.
+        SMTP_TLS_LEVEL="encrypt"
+    else
+        SMTP_TLS_LEVEL="secure"
+    fi
+fi
+
 readonly DOMAIN MAIL_HOSTNAME DKIM_SELECTOR ADMIN_EMAIL DRY_RUN
 readonly RELAY_HOST RELAY_PORT RELAY_USER RELAY_PASSWORD_FILE RELAY_SPF_INCLUDE
+readonly SMTP_TLS_LEVEL
 readonly CERT_DIR="/etc/letsencrypt/live/$MAIL_HOSTNAME"
 readonly VMAIL_UID=5000
 readonly VMAIL_GID=5000
@@ -259,7 +273,10 @@ info "Domain:        $DOMAIN"
 info "Hostname:      $MAIL_HOSTNAME"
 info "DKIM selector: $DKIM_SELECTOR"
 info "Admin email:   $ADMIN_EMAIL"
-[[ -n "$RELAY_HOST" ]] && info "Relay host:    [$RELAY_HOST]:$RELAY_PORT"
+[[ -n "$RELAY_HOST" ]] && info "Relay host:    [$RELAY_HOST]:$RELAY_PORT (smtp_tls_security_level = $SMTP_TLS_LEVEL)"
+if [[ "$SMTP_TLS_LEVEL" == encrypt ]]; then
+    warn "The relay is given as an IP address: TLS is mandatory but its certificate cannot be verified. Use the relay's hostname with -r."
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     echo
@@ -267,7 +284,7 @@ if [[ "$DRY_RUN" == true ]]; then
     info "Packages to install: postfix postfix-lmdb dovecot valkey clamav s-nail pigeonhole rspamd opendkim perl"
     info "TLS certificate dir: $CERT_DIR"
     info "Files that would be configured:"
-    info "  - /etc/postfix/{main.cf,master.cf,header_checks,header_checks_submission,vmailbox,aliases}"
+    info "  - /etc/postfix/{main.cf,master.cf,header_checks,header_checks_submission,vmailbox,valiases,aliases}"
     [[ -n "$RELAY_USER" ]] && info "  - /etc/postfix/sasl_passwd{,.lmdb} (mode 0600)"
     info "  - /etc/dovecot/{dovecot.conf,users,mail-crypt.key,mail-crypt.pub}"
     info "  - /etc/opendkim/{opendkim.conf,KeyTable,SigningTable,TrustedHosts,keys/$DOMAIN/}"
@@ -483,6 +500,8 @@ mynetworks = 127.0.0.0/8 [::1]/128
 virtual_mailbox_domains = ${DOMAIN}
 virtual_mailbox_base = ${MAIL_DIR}
 virtual_mailbox_maps = lmdb:/etc/postfix/vmailbox
+# Role addresses without a mailbox (root@, abuse@, DMARC/TLS report addresses)
+virtual_alias_maps = lmdb:/etc/postfix/valiases
 virtual_minimum_uid = 1000
 virtual_uid_maps = static:${VMAIL_UID}
 virtual_gid_maps = static:${VMAIL_GID}
@@ -501,8 +520,11 @@ smtpd_tls_exclude_ciphers = aNULL, MD5, DES, 3DES, RC4, eNULL
 tls_high_cipherlist = ${TLS_CIPHERS}
 smtpd_tls_loglevel = 1
 
-# --- TLS outbound (smtp) — DANE when usable TLSA records exist ---
-smtp_tls_security_level = dane
+# --- TLS outbound (smtp) ---
+# dane:    DANE when usable TLSA records exist, opportunistic TLS otherwise
+# secure:  mandatory TLS, relay certificate verified against the relay name
+# encrypt: mandatory TLS, certificate not verified (relay given as IP address)
+smtp_tls_security_level = ${SMTP_TLS_LEVEL}
 smtp_dns_support_level = dnssec
 smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
 smtp_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
@@ -516,7 +538,10 @@ smtpd_forbid_bare_newline_exclusions = \$mynetworks
 
 # --- Postscreen (connection-level screening) ---
 postscreen_access_list = permit_mynetworks
-postscreen_dnsbl_sites = zen.spamhaus.org*3, bl.spamcop.net*2, b.barracudacentral.org*2
+# The "=reply" filters matter: a list that refuses the query (Spamhaus does so
+# for public and ISP resolvers) answers 127.255.255.x, and without a filter
+# postscreen counts ANY answer as a listing and rejects every client.
+postscreen_dnsbl_sites = zen.spamhaus.org=127.0.0.[2..11]*3, bl.spamcop.net=127.0.0.2*2, b.barracudacentral.org=127.0.0.2*2
 postscreen_dnsbl_threshold = 3
 postscreen_dnsbl_action = enforce
 postscreen_greet_action = enforce
@@ -533,9 +558,12 @@ smtpd_milters = unix:/run/opendkim/opendkim.sock, inet:127.0.0.1:11332
 non_smtpd_milters = unix:/run/opendkim/opendkim.sock, inet:127.0.0.1:11332
 
 # --- SASL authentication (via Dovecot) ---
+# Off by default so that AUTH is not offered on the MX port (25), where it
+# only invites password guessing. The submission (587) and smtps (465)
+# services turn it on in master.cf.
 smtpd_sasl_type = dovecot
 smtpd_sasl_path = private/auth
-smtpd_sasl_auth_enable = yes
+smtpd_sasl_auth_enable = no
 
 # --- Restrictions (strict, ordered) ---
 smtpd_helo_required = yes
@@ -573,11 +601,21 @@ if [[ -n "$RELAY_HOST" ]]; then
 # --- Outbound relay (hybrid setup) ---
 relayhost = [${RELAY_HOST}]:${RELAY_PORT}
 EOF
+    if [[ "$RELAY_PORT" == 465 ]]; then
+        cat >> /etc/postfix/main.cf <<'EOF'
+# Port 465 is implicit TLS (RFC 8314): the session starts encrypted and there
+# is no STARTTLS. Without wrapper mode Postfix waits for a plaintext greeting
+# and all outbound mail is deferred.
+smtp_tls_wrappermode = yes
+EOF
+    fi
     if [[ -n "$RELAY_USER" && -n "$RELAY_PASS" ]]; then
         cat >> /etc/postfix/main.cf <<'EOF'
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = lmdb:/etc/postfix/sasl_passwd
-smtp_sasl_security_options = noanonymous
+# Never send the relay password over an unencrypted session. Inside TLS the
+# plaintext mechanisms (PLAIN/LOGIN), which most providers require, are fine.
+smtp_sasl_security_options = noanonymous, noplaintext
 smtp_sasl_tls_security_options = noanonymous
 EOF
     fi
@@ -728,6 +766,47 @@ chown root:root /etc/postfix/vmailbox /etc/postfix/vmailbox.lmdb
 chmod 0644 /etc/postfix/vmailbox /etc/postfix/vmailbox.lmdb
 
 msg "Virtual mailbox map updated (existing mailboxes preserved)"
+
+# --- Role addresses ---
+# myorigin is the mail domain, so local mail to "root" (cron, systemd, smartd)
+# is addressed to root@DOMAIN. DOMAIN is a virtual mailbox domain: alias_maps
+# is not consulted for it and an address without a mailbox bounces. The same
+# applies to the report addresses published in the DMARC and TLS-RPT records
+# below. Map these role addresses to the administrator.
+msg "Updating /etc/postfix/valiases..."
+
+if [[ ! -f /etc/postfix/valiases ]]; then
+    install -o root -g root -m 0644 /dev/null /etc/postfix/valiases
+fi
+
+postfix_map_has_key() {
+    awk -v addr="$2" '
+        /^[[:space:]]*(#|$)/ { next }
+        tolower($1) == tolower(addr) { found = 1; exit }
+        END { exit !found }
+    ' "$1"
+}
+
+for role in root abuse dmarc-reports tls-reports; do
+    role_address="${role}@${DOMAIN}"
+    # A real mailbox, an alias that is already present (possibly edited by
+    # the administrator) or the administrator's own address is left alone.
+    if [[ "${role_address,,}" == "${ADMIN_EMAIL,,}" ]] ||
+        postfix_map_has_key /etc/postfix/vmailbox "$role_address" ||
+        postfix_map_has_key /etc/postfix/valiases "$role_address"; then
+        continue
+    fi
+    printf '%s    %s\n' "$role_address" "$ADMIN_EMAIL" >> /etc/postfix/valiases
+    info "Added virtual alias: $role_address → $ADMIN_EMAIL"
+done
+unset role role_address
+unset -f postfix_map_has_key
+
+postmap lmdb:/etc/postfix/valiases
+chown root:root /etc/postfix/valiases /etc/postfix/valiases.lmdb
+chmod 0644 /etc/postfix/valiases /etc/postfix/valiases.lmdb
+
+msg "Virtual alias map updated (existing aliases preserved)"
 
 # =============================================================================
 # 9. SASL PASSWORD (optional relay)
@@ -1129,7 +1208,12 @@ use_domain = "header";
 path = "${RSPAMD_ARC_KEY}";
 selector = "${DKIM_SELECTOR}";
 EOF
-        chmod 640 /etc/rspamd/local.d/arc.conf
+        # World-readable on purpose: the file holds a path and a selector, no
+        # secret. rspamd runs as the unprivileged "rspamd" user and treats an
+        # include it cannot open as a fatal configuration error, so a
+        # root-only file keeps the daemon from starting.
+        chown root:root /etc/rspamd/local.d/arc.conf
+        chmod 0644 /etc/rspamd/local.d/arc.conf
     fi
 
     # Antivirus (ClamAV)
@@ -1405,6 +1489,9 @@ if command -v nft &>/dev/null && nft list chain inet filter input &>/dev/null; t
         nft insert rule inet filter input ct state new tcp dport "$port" accept \
             comment "awesome-postfix-$port"
     done
+    # The accepts above were inserted at the top of the chain; put the
+    # drop-only blocks of other scripts back above them.
+    aal_nft_raise_guard_rules || warn "Could not re-order the live guard rules; reload nftables to apply the persisted order."
     msg "nftables rules added for ports ${MAIL_PORTS[*]} without replacing the live ruleset"
 elif command -v iptables &>/dev/null && command -v ip6tables &>/dev/null && \
     iptables -L INPUT -n &>/dev/null && ip6tables -L INPUT -n &>/dev/null; then
@@ -1429,39 +1516,58 @@ postfix check && msg "Postfix config is valid" || err "Postfix config has errors
 doveconf -n &>/dev/null && msg "Dovecot config is valid" || err "Dovecot config has errors"
 if command -v rspamadm &>/dev/null; then
     rspamadm configtest && msg "rspamd config is valid" || err "rspamd config has errors"
+    # The test above ran as root, which can read everything. The daemon runs
+    # as "rspamd" and fails on an include it cannot open, so repeat the test
+    # with its identity. This is a hint only; the start check below decides.
+    if getent passwd rspamd &>/dev/null && command -v setpriv &>/dev/null; then
+        setpriv --reuid rspamd --regid rspamd --init-groups rspamadm configtest &>/dev/null || \
+            warn "rspamd config test failed as user rspamd although it passes as root; check permissions under /etc/rspamd"
+    fi
 fi
 
 msg "Starting services in dependency order..."
 
-# 1. Valkey (Redis-compatible rspamd backend)
+# "enable --now" leaves a daemon that is already running untouched. On a
+# re-run it would keep the previous configuration and the previous systemd
+# sandbox while this script reports success, so the daemons whose files were
+# rewritten above are restarted explicitly.
+enable_and_restart() {
+    systemctl enable "$1"
+    systemctl restart "$1"
+}
+
+# 1. Valkey (Redis-compatible rspamd backend; this script does not change its
+#    configuration, so a running instance is left alone)
 systemctl enable --now valkey
 systemctl is-active --quiet valkey && msg "valkey is running" || \
     err "valkey failed after startup; rspamd persistence is unavailable"
 
 # 2. ClamAV
-systemctl enable --now clamav-freshclam
+enable_and_restart clamav-freshclam
 systemctl is-active --quiet clamav-freshclam || \
     err "clamav-freshclam failed after startup; virus definitions will not stay current"
-systemctl enable --now clamav-daemon
+enable_and_restart clamav-daemon
 systemctl is-active --quiet clamav-daemon || \
     err "clamav-daemon failed after startup; refusing to leave antivirus scanning unavailable"
 
 # 3. OpenDKIM
 if [[ "$DKIM_CONFIGURED" == true ]]; then
-    systemctl enable --now opendkim
+    enable_and_restart opendkim
     systemctl is-active --quiet opendkim && msg "opendkim is running" || \
         err "opendkim failed after startup; refusing to leave outbound mail unsigned"
 fi
 
 # 4. rspamd
 if command -v rspamd &>/dev/null; then
-    systemctl enable --now rspamd
+    enable_and_restart rspamd
+    # Give a daemon that cannot load its configuration time to exit.
+    sleep 2
     systemctl is-active --quiet rspamd && msg "rspamd is running" || \
         err "rspamd failed after startup; refusing to leave mail filtering unavailable"
 fi
 
 # 5. Dovecot
-systemctl enable --now dovecot
+enable_and_restart dovecot
 systemctl is-active --quiet dovecot && msg "dovecot is running" || \
     err "dovecot failed after startup; refusing an incomplete mail service"
 
@@ -1470,6 +1576,7 @@ systemctl enable postfix
 systemctl restart postfix
 sleep 2
 systemctl is-active --quiet postfix && msg "postfix is running" || err "postfix failed to start: journalctl -u postfix -e"
+unset -f enable_and_restart
 
 # =============================================================================
 # 18. DNS RECORD GENERATION
@@ -1540,7 +1647,11 @@ if [[ -f "$CERT_DIR/cert.pem" ]]; then
             echo
         fi
         if [[ -n "$TLSA_TA_HASH" ]]; then
-            echo "# DANE-TA (TLSA 2 1 1) — pins issuing CA SPKI from chain.pem (survives leaf key rotation):"
+            echo "# DANE-TA (TLSA 2 1 1) — pins the CA key that issued the CURRENT certificate (from chain.pem)."
+            echo "# It survives a leaf key change, but NOT a change of issuing CA: Let's Encrypt issues from"
+            echo "# several intermediates and may use a different one at any renewal. Publish these only in"
+            echo "# addition to the 3 1 1 records above (a client needs just one matching record), or publish a"
+            echo "# 2 1 1 record for every active intermediate listed at https://letsencrypt.org/certificates/"
             for port in 25 465 587; do
                 echo "_${port}._tcp.${MAIL_HOSTNAME}.  IN TLSA  2 1 1 ${TLSA_TA_HASH}"
             done
@@ -1549,7 +1660,8 @@ if [[ -f "$CERT_DIR/cert.pem" ]]; then
         warn "IMPORTANT: TLSA 3 1 1 pins the leaf certificate key. Without 'certbot --reuse-key'"
         warn "           ('reuse_key = True' in /etc/letsencrypt/renewal/${MAIL_HOSTNAME}.conf),"
         warn "           Let's Encrypt renewals rotate the key and BREAK inbound DANE mail!"
-        warn "           Use 'certbot --reuse-key' or publish TLSA 2 1 1 alongside/instead."
+        warn "           Use 'certbot --reuse-key'. TLSA 2 1 1 on its own is not a substitute: it stops"
+        warn "           matching as soon as a renewal is issued by a different intermediate."
         echo -e "${C_YELLOW}NOTE: DANE requires DNSSEC on your domain. Verify: dig +dnssec ${DOMAIN} SOA${C_NC}"
         echo
     fi
@@ -1591,6 +1703,7 @@ echo "  Postfix main.cf:        /etc/postfix/main.cf"
 echo "  Postfix master.cf:      /etc/postfix/master.cf"
 echo "  Header checks:          /etc/postfix/header_checks_submission"
 echo "  Virtual mailboxes:      /etc/postfix/vmailbox"
+echo "  Virtual aliases:        /etc/postfix/valiases"
 echo "  Aliases:                /etc/postfix/aliases"
 echo "  Dovecot:                /etc/dovecot/dovecot.conf"
 echo "  Mail encryption key:    $MAIL_CRYPT_PRIVATE_KEY (back this up)"
@@ -1603,9 +1716,14 @@ echo
 
 echo -e "${C_BLUE}Security features:${C_NC}"
 echo "  TLS:                    1.2+ only, ECDHE/AEAD ciphers"
-echo "  Outbound TLS:           DANE with valid TLSA; opportunistic otherwise"
+case "$SMTP_TLS_LEVEL" in
+    secure)  echo "  Outbound TLS:           Mandatory; relay certificate verified against $RELAY_HOST" ;;
+    encrypt) echo "  Outbound TLS:           Mandatory; relay certificate NOT verified (relay is an IP address)" ;;
+    *)       echo "  Outbound TLS:           DANE with valid TLSA; opportunistic otherwise" ;;
+esac
 echo "  SMTP smuggling:         Protected (smtpd_forbid_bare_newline)"
 echo "  Postscreen:             DNSBL + deep protocol tests"
+echo "  SMTP AUTH:              Submission (587) and SMTPS (465) only; not offered on port 25"
 echo "  DKIM:                   RSA 2048, OversignHeaders From"
 echo "  SPF/DMARC/ARC:          Via rspamd"
 echo "  Spam filtering:         rspamd with Bayes + phishing detection"
@@ -1618,6 +1736,29 @@ echo "  VRFY:                   Disabled"
 echo "  systemd:                Core mail daemons hardened"
 echo
 
+# Spamhaus refuses DNSBL queries that arrive through public or ISP resolvers
+# (Cloudflare, Google, Quad9, ...) and answers them with 127.255.255.x. The
+# "=127.0.0.[2..11]" filter in main.cf ignores those codes, so mail keeps
+# flowing, but the list then never matches. 127.0.0.2 is its standard test
+# entry and must always be listed.
+DNSBL_PROBE=$(getent ahostsv4 2.0.0.127.zen.spamhaus.org 2>/dev/null | awk '{ print $1; exit }' || true)
+case "$DNSBL_PROBE" in
+    127.0.0.*)
+        info "Spamhaus DNSBL is usable through this host's resolver (test entry answered $DNSBL_PROBE)"
+        ;;
+    127.255.255.*)
+        warn "Spamhaus refuses DNSBL queries from this host's resolver (answer $DNSBL_PROBE)."
+        warn "postscreen ignores that answer, so zen.spamhaus.org currently blocks nothing."
+        warn "Use a local recursive resolver (for example unbound) or a Spamhaus DQS key."
+        ;;
+    *)
+        warn "The Spamhaus DNSBL test entry (2.0.0.127.zen.spamhaus.org) did not resolve;"
+        warn "zen.spamhaus.org currently blocks nothing. Check DNS, or use a local recursive resolver."
+        ;;
+esac
+unset DNSBL_PROBE
+echo
+
 echo -e "${C_YELLOW}IMPORTANT — Next steps:${C_NC}"
 echo "  1. Add the DNS records shown above to your domain"
 echo "  2. Create Dovecot users:"
@@ -1626,6 +1767,8 @@ echo "       printf '%s:%s::::::\\n' \"user@${DOMAIN}\" \"\$HASH\" >> /etc/dovec
 echo "  3. Add virtual mailboxes:"
 echo "       echo 'user@${DOMAIN} ${DOMAIN}/user/Maildir/' >> /etc/postfix/vmailbox"
 echo "       postmap lmdb:/etc/postfix/vmailbox"
+echo "     root@, abuse@, dmarc-reports@ and tls-reports@${DOMAIN} are forwarded to"
+echo "     ${ADMIN_EMAIL} by /etc/postfix/valiases (edit it, then: postmap lmdb:/etc/postfix/valiases)"
 echo "  4. Set PTR record to ${MAIL_HOSTNAME}"
 echo "  5. Upgrade DMARC to p=reject after 2-4 weeks"
 echo "  6. Set up MTA-STS policy file at https://mta-sts.${DOMAIN}/.well-known/mta-sts.txt"

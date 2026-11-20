@@ -36,6 +36,7 @@ usage() {
     cat <<EOF
 Usage: sudo $0 [--size EXPR] [--disable] [--status] [-h]
 Default size expression: "ram / 2". Disk-backed swap is kept.
+EXPR is a zram-generator.conf(5) zram-size expression, e.g. "min(ram / 2, 8192)".
 EOF
     exit 0
 }
@@ -44,7 +45,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --size)
             [[ $# -ge 2 && -n "${2:-}" ]] || err "--size needs an expression"
-            [[ "$2" != *$'\n'* && "$2" != *$'\r'* && "$2" =~ ^[a-zA-Z0-9_.+/*()\ -]+$ ]] || err "Invalid --size expression: $2"
+            [[ "$2" != *$'\n'* && "$2" != *$'\r'* && "$2" =~ ^[a-zA-Z0-9_.+/*()\ ,^%-]+$ ]] || err "Invalid --size expression: $2"
             SIZE_EXPR="$2"
             shift 2
             ;;
@@ -118,8 +119,18 @@ EOF
 chmod 644 "$CONF"
 msg "Wrote $CONF"
 systemctl daemon-reload
-if systemctl start systemd-zram-setup@zram0.service 2>/dev/null; then
-    msg "Started systemd-zram-setup@zram0.service"
+ZRAM_UNIT="systemd-zram-setup@zram0.service"
+if systemctl is-active --quiet "$ZRAM_UNIT" 2>/dev/null; then
+    # "start" is a no-op on an active unit, so a changed size would silently
+    # wait for the next boot. Restarting swaps zram0 off and back on.
+    info "zram0 is already active; restarting it to apply $CONF"
+    if systemctl restart "$ZRAM_UNIT" 2>/dev/null; then
+        msg "Restarted $ZRAM_UNIT"
+    else
+        warn "Could not restart the zram unit live. The new settings apply after reboot."
+    fi
+elif systemctl start "$ZRAM_UNIT" 2>/dev/null; then
+    msg "Started $ZRAM_UNIT"
 else
     warn "Could not start the zram unit live. It will appear after reboot."
 fi

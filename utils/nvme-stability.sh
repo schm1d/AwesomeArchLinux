@@ -399,7 +399,8 @@ preflight() {
     done
 
     local fstype="" opts=""
-    read -r fstype opts < <(run_cmd findmnt -n -r -M "$ESP_DIR" -o FSTYPE,OPTIONS 2>/dev/null || true)
+    # read returns 1 at EOF (ESP not mounted); let the explicit check below report it.
+    read -r fstype opts < <(run_cmd findmnt -n -r -M "$ESP_DIR" -o FSTYPE,OPTIONS 2>/dev/null || true) || true
     if [[ "$fstype" != "vfat" || ",${opts}," != *,rw,* ]]; then
         die "${ESP_DIR} must be a mounted, writable FAT EFI system partition"
     fi

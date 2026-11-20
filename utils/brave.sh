@@ -60,6 +60,10 @@ Options:
   --status            Check Brave paths, permissions, ACLs, hook, and sandbox health
   -h, --help          Show this help
 
+brave-bin is an AUR recipe. It is built through the reviewed builder in
+hardening/lib/aur-review.sh: the recipe is shown first and a typed confirmation
+on the terminal is required, so the install step cannot run unattended.
+
 Note: Never uses 777. System files stay root:root (0755/0644, 4755 for sandbox),
 user profile directories stay USER:GROUP (0700 dirs, go-rwx files with u+x preserved).
 EOU
@@ -416,7 +420,6 @@ apply_policy() {
   "HardwareAccelerationModeEnabled": true,
   "HttpsOnlyMode": "force_enabled",
   "BlockThirdPartyCookies": true,
-  "DefaultCookiesSetting": 4,
   "SitePerProcess": true,
   "RemoteDebuggingAllowed": false,
   "BrowserSignin": 0,
@@ -451,65 +454,42 @@ EOP
     msg "Enterprise policy and uBlock Origin Lite installed for Brave (mode 0644)"
 }
 
+# Review-gated AUR builder shared with the installer (base stages a copy as
+# /root/aur-review.sh on installed systems).
+find_aur_review_lib() {
+    local script_dir candidate
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    for candidate in "$script_dir/../hardening/lib/aur-review.sh" "$script_dir/aur-review.sh" /root/aur-review.sh; do
+        if [[ -r "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 install_brave() {
     if pacman -Qi brave-bin &>/dev/null || pacman -Qi brave &>/dev/null; then
         msg "Brave is already installed ($(pacman -Q brave-bin 2>/dev/null || pacman -Q brave))."
         return 0
     fi
 
-    [[ "$REAL_USER" != "root" ]] || err "Cannot build AUR package brave-bin without a non-root user account."
-
     sanitize_aur_cache_acls
     install_pacman_hook
 
-    info "Installing brave-bin from AUR..."
+    # AUR recipes are mutable, user-submitted build instructions. Instead of
+    # `yay/paru --noconfirm` or a bare makepkg, the reviewed builder shows the
+    # exact recipe commit, waits for a typed confirmation on the terminal and
+    # builds as a disposable unprivileged user.
+    local aur_lib
+    aur_lib="$(find_aur_review_lib)" \
+        || err "hardening/lib/aur-review.sh not found. Run utils/brave.sh from a full checkout of the repository."
 
-    local helper="" h
-    for h in yay paru; do
-        if command -v "$h" &>/dev/null; then
-            helper="$h"
-            break
-        fi
-    done
-
-    if [[ -n "$helper" ]]; then
-        info "Building brave-bin with $helper..."
-        as_user mkdir -p -m 0700 "$REAL_HOME/.cache/$helper" "$REAL_HOME/.cache/brave-tmp"
-        if command -v setfacl >/dev/null 2>&1; then
-            sudo_run setfacl -b -k "$REAL_HOME/.cache/$helper" "$REAL_HOME/.cache/brave-tmp" 2>/dev/null || true
-        fi
-        as_user env TMPDIR="$REAL_HOME/.cache/brave-tmp" "$helper" -S --needed --noconfirm brave-bin
-        rm -rf -- "$REAL_HOME/.cache/brave-tmp" 2>/dev/null || true
-    else
-        local script_dir aur_lib
-        script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-        aur_lib="$script_dir/../hardening/lib/aur-review.sh"
-        if [[ "$(id -u)" -eq 0 && -r "$aur_lib" && -t 0 ]]; then
-            info "No AUR helper found; using reviewed unprivileged AUR builder..."
-            # shellcheck disable=SC1090,SC1091
-            source "$aur_lib"
-            aal_aur_install_reviewed brave-bin
-        else
-            info "No AUR helper found. Building manually with makepkg in $REAL_HOME/.cache..."
-            sudo_run pacman -S --needed --noconfirm base-devel git
-            as_user mkdir -p -m 0700 "$REAL_HOME/.cache"
-            local b_tmp
-            b_tmp="$(as_user mktemp -d "$REAL_HOME/.cache/brave-build.XXXXXX")"
-            if command -v setfacl >/dev/null 2>&1; then
-                sudo_run setfacl -b -k "$b_tmp" 2>/dev/null || true
-            fi
-            as_user mkdir -p -m 0700 "$b_tmp/tmp"
-            if ! (
-                as_user git clone https://aur.archlinux.org/brave-bin.git "$b_tmp/brave-bin"
-                cd "$b_tmp/brave-bin"
-                as_user env TMPDIR="$b_tmp/tmp" makepkg -si --noconfirm
-            ); then
-                rm -rf -- "$b_tmp"
-                err "Failed to build and install brave-bin"
-            fi
-            rm -rf -- "$b_tmp"
-        fi
-    fi
+    info "Installing brave-bin from the AUR (the recipe is shown for review first)..."
+    sudo_run pacman -S --needed --noconfirm base-devel git
+    # shellcheck disable=SC2016
+    sudo_run bash -c 'set -euo pipefail; source "$1"; aal_aur_install_reviewed "$2"' _ "$aur_lib" brave-bin \
+        || err "brave-bin was not installed (review declined, no terminal, or the build failed)."
 
     msg "brave-bin installation finished."
 }

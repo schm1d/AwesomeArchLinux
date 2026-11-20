@@ -423,9 +423,19 @@ php_admin_value[open_basedir] = $OPEN_BASEDIR
 php_admin_flag[allow_url_fopen] = off
 
 ; --- Logging ---
+; The access log records duration (ms), peak memory (kB) and CPU for every
+; request, so slow requests can be found here.
 access.log = /var/log/php/fpm-access.log
-slowlog = /var/log/php/fpm-slow.log
-request_slowlog_timeout = 5
+access.format = "%R - %u %t \"%m %r%Q%q\" %s %f %{milli}d %{kilo}M %C%%"
+
+; The slow log is off: to write a backtrace the FPM master has to ptrace() the
+; worker, which the systemd hardening of php-fpm.service forbids
+; (SystemCallFilter=@system-service has no ptrace; kernel.yama.ptrace_scope may
+; forbid it as well). Enabled, it would only log
+; "failed to ptrace(ATTACH) child: Operation not permitted" for each slow request.
+; See the README ("Slow Log") for a temporary profiling override.
+;slowlog = /var/log/php/fpm-slow.log
+request_slowlog_timeout = 0
 
 ; --- File Extension Security ---
 security.limit_extensions = .php
@@ -447,8 +457,22 @@ msg "Creating log and session directories..."
 # Webroot base directory (ensures /var/www exists for systemd ReadWritePaths)
 install -d -m 0755 /var/www
 
-# PHP error and FPM log directory
-install -d -o "$POOL_USER" -g "$POOL_GROUP" -m 0750 /var/log/php
+# PHP error and FPM log directory. Root-owned: the FPM master opens its logs as
+# root, so a pool user able to create or replace entries here could redirect
+# those writes through a symlink. The pool user only gets the log files it has
+# to append to, pre-created.
+install -d -o root -g "$POOL_GROUP" -m 0750 /var/log/php
+PHP_LOG_SYMLINKS=$(find /var/log/php -maxdepth 1 -type l 2>/dev/null) || PHP_LOG_SYMLINKS=""
+if [[ -n "$PHP_LOG_SYMLINKS" ]]; then
+    warn "Symbolic links found in /var/log/php (the directory used to be writable by $POOL_USER); review and remove them:"
+    warn "$PHP_LOG_SYMLINKS"
+fi
+if [[ ! -e /var/log/php/error.log && ! -L /var/log/php/error.log ]]; then
+    install -o "$POOL_USER" -g "$POOL_GROUP" -m 0640 /dev/null /var/log/php/error.log
+elif [[ -f /var/log/php/error.log && ! -L /var/log/php/error.log ]]; then
+    chown "$POOL_USER:$POOL_GROUP" /var/log/php/error.log
+    chmod 0640 /var/log/php/error.log
+fi
 
 # PHP session directory
 install -d -m 0755 /var/lib/php
@@ -638,6 +662,8 @@ fi
 
 msg "Creating logrotate configuration..."
 
+# No "su" directive: /var/log/php is root-owned and not group-writable, so
+# logrotate rotates as root and re-creates the logs for the pool user.
 install -d -m 0755 /etc/logrotate.d
 if [[ "$WITH_FPM" == true ]]; then
     cat > /etc/logrotate.d/php <<EOF
@@ -651,7 +677,6 @@ if [[ "$WITH_FPM" == true ]]; then
     compress
     delaycompress
     notifempty
-    su $POOL_USER $POOL_GROUP
     create 640 $POOL_USER $POOL_GROUP
     sharedscripts
     postrotate
@@ -673,7 +698,6 @@ else
     compress
     delaycompress
     notifempty
-    su $POOL_USER $POOL_GROUP
     create 640 $POOL_USER $POOL_GROUP
 }
 EOF
@@ -727,7 +751,7 @@ if [[ "$WITH_NGINX" == true ]]; then
     echo "  nginx PHP security:   /etc/nginx/conf.d/php-security.conf.sample"
 fi
 echo "  Logrotate:            /etc/logrotate.d/php"
-echo "  Log directory:        /var/log/php/"
+echo "  Log directory:        /var/log/php/ (root:$POOL_GROUP 0750; log files owned by $POOL_USER)"
 echo "  Session directory:    /var/lib/php/sessions/"
 echo
 
@@ -753,7 +777,8 @@ if [[ "$WITH_FPM" == true ]]; then
     echo "  - Process manager: dynamic (5 start, 2-10 spare, 25 max)"
     echo "  - Max requests per child: 500 (prevent memory leaks)"
     echo "  - Request timeout: 60s"
-    echo "  - Slow log threshold: 5s"
+    echo "  - Access log with request duration, memory and CPU (/var/log/php/fpm-access.log)"
+    echo "  - Slow log disabled (needs ptrace, which the systemd sandbox blocks; see README)"
     echo "  - security.limit_extensions = .php"
     echo "  - clear_env = yes"
     echo "  - Core dumps disabled (rlimit_core = 0)"
@@ -789,8 +814,11 @@ echo "     systemctl status php-fpm"
 echo "     journalctl -u php-fpm -f"
 echo "  6. Monitor FPM status page (from localhost only):"
 echo "     curl http://localhost/fpm-status"
-echo "  7. Check the slow log for performance issues:"
-echo "     tail -f /var/log/php/fpm-slow.log"
+echo "  7. Find slow requests in the access log (third field from the end is the duration in ms):"
+echo "     tail -f /var/log/php/fpm-access.log"
+echo "  8. open_basedir is set in php.ini, so it also applies to the PHP CLI (composer,"
+echo "     wp-cli, artisan). For a trusted admin command outside those paths:"
+echo "     php -d open_basedir= /path/to/tool ..."
 echo
 
 echo -e "${C_GREEN}Done.${C_NC}"

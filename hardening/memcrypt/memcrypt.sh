@@ -71,10 +71,17 @@ vendor() {
 }
 
 sme_active() {
-    if dmesg 2>/dev/null | grep -qiE 'AMD Memory Encryption Features active:.*SME'; then
+    # Current kernels log "Memory Encryption Features active: AMD SME"; older
+    # ones logged "AMD Memory Encryption Features active: SME". The log is
+    # captured first because grep -q on a pipe can SIGPIPE the producer, which
+    # pipefail would turn into a false "not active".
+    local re='Memory Encryption Features active:.*SME' log
+    log=$(dmesg 2>/dev/null || true)
+    if grep -qiE "$re" <<< "$log"; then
         return 0
     fi
-    journalctl -k -b 0 --no-pager 2>/dev/null | grep -qiE 'AMD Memory Encryption Features active:.*SME'
+    log=$(journalctl -k -b 0 --no-pager 2>/dev/null || true)
+    grep -qiE "$re" <<< "$log"
 }
 
 probe() {
@@ -180,20 +187,36 @@ update_uki() {
     local cmdline="/etc/kernel/cmdline"
     [[ -f "$cmdline" ]] && has_uki_preset || return 1
 
-    local current updated
-    current=$(tr '\n' ' ' < "$cmdline" | awk '{$1=$1; print}')
+    # mkinitcpio embeds only the lines that do not start with '#'. Folding a
+    # comment into the parameter line would turn the whole line into a comment
+    # and build a UKI with an empty command line, so comments are kept apart
+    # and written back unchanged above the single parameter line.
+    local current updated comments backup
+    comments=$(grep '^[[:space:]]*#' "$cmdline" || true)
+    current=$({ grep -v '^[[:space:]]*#' "$cmdline" || true; } | tr '\n' ' ' | awk '{$1=$1; print}')
     updated=$(update_cmdline_params "$current" "$action")
 
     if [[ "$updated" != "$current" ]]; then
-        cp -a "$cmdline" "${cmdline}.bak.$(date +%Y%m%d-%H%M%S)"
-        printf '%s\n' "$updated" > "$cmdline"
+        backup="${cmdline}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -a "$cmdline" "$backup"
+        {
+            [[ -z "$comments" ]] || printf '%s\n' "$comments"
+            printf '%s\n' "$updated"
+        } > "$cmdline"
         chmod 0600 "$cmdline"
-        mkinitcpio -P
+        # This function is called from an `if` condition, where errexit is
+        # suspended: a failed rebuild or signing run must be checked here or it
+        # would be reported as success.
+        if ! mkinitcpio -P; then
+            err "mkinitcpio -P failed after updating $cmdline (previous file: $backup). Fix the build and re-run mkinitcpio -P before rebooting."
+        fi
         if command -v sbctl >/dev/null 2>&1 && [[ \
             -d /var/lib/sbctl/keys || -f /var/lib/sbctl/GUID || \
             -d /usr/share/secureboot/keys || -f /usr/share/secureboot/GUID || \
             -f /etc/awesome-secureboot.conf ]]; then
-            sbctl sign-all
+            if ! sbctl sign-all; then
+                err "sbctl sign-all failed: the rebuilt UKIs are not signed and will not boot with Secure Boot enforced. Fix signing and re-run sbctl sign-all before rebooting."
+            fi
             msg "Re-signed Secure Boot UKIs via sbctl"
         fi
         msg "Updated UKI cmdline ($cmdline) and rebuilt UKIs"
@@ -261,7 +284,10 @@ update_grub() {
         if [[ -d /efi/grub && ! -d /boot/grub ]]; then
             grub_cfg="/efi/grub/grub.cfg"
         fi
-        grub-mkconfig -o "$grub_cfg"
+        # Called from an `if` condition (errexit suspended): check explicitly.
+        if ! grub-mkconfig -o "$grub_cfg"; then
+            err "grub-mkconfig failed after updating $grub; $grub_cfg was not regenerated. Fix it and re-run grub-mkconfig -o $grub_cfg."
+        fi
         if [[ -f "$grub_cfg" ]]; then
             chown root:root "$grub_cfg"
             chmod 0600 "$grub_cfg"

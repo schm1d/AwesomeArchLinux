@@ -21,7 +21,7 @@ sudo ./crowdsec.sh --with-nginx --with-nftables
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--with-nginx` | Add nginx log acquisition and nginx bouncer | off |
+| `--with-nginx` | Add nginx log acquisition, install the nginx bouncer and register an API key for it (the key must be added to the bouncer configuration by hand, see [Integration with nginx](#integration-with-nginx)) | off |
 | `--with-nftables` | Install nftables firewall bouncer for IP blocking | off |
 | `-h` | Show help | |
 
@@ -53,7 +53,7 @@ The reviewed packages are:
 |---------|-------------|
 | `crowdsec` | CrowdSec engine (agent + LAPI) |
 | `crowdsec-firewall-bouncer-nftables` | nftables bouncer (with `--with-nftables`) |
-| `crowdsec-nginx-bouncer` | nginx bouncer (with `--with-nginx`) |
+| `crowdsec-nginx-bouncer` | nginx bouncer (with `--with-nginx`; installed and registered, not configured) |
 
 ### 2. Log Acquisition
 
@@ -242,6 +242,33 @@ If you prefer CrowdSec to use your existing nftables table instead of creating i
 ## Integration with nginx
 
 When using `--with-nginx`, CrowdSec monitors nginx logs for web-based attacks. The nginx bouncer can block malicious requests at the application level before they reach your backend.
+
+Detection works as soon as the script finishes. Blocking in nginx does not:
+the script installs `crowdsec-nginx-bouncer` and registers a bouncer named
+`nginx-bouncer` with the local API, but it does not edit the bouncer or nginx
+configuration. The generated API key is saved to
+`/root/.crowdsec-nginx-bouncer-key` (mode `0600`). To finish the setup:
+
+```bash
+# 1. Locate the bouncer configuration shipped by the package
+#    (upstream default: /etc/crowdsec/bouncers/crowdsec-nginx-bouncer.conf)
+pacman -Ql crowdsec-nginx-bouncer | grep -E '\.conf$'
+
+# 2. Set API_KEY in that file to the content of the key file
+sudo cat /root/.crowdsec-nginx-bouncer-key
+
+# 3. Reload nginx and check that the bouncer has authenticated
+sudo nginx -t && sudo systemctl reload nginx
+sudo cscli bouncers list
+
+# 4. Remove the key file
+sudo rm /root/.crowdsec-nginx-bouncer-key
+```
+
+On a re-run the bouncer is already registered and no new key is issued. If the
+key was lost, delete the registration with `sudo cscli bouncers delete
+nginx-bouncer` and run the script again. With `--with-nftables`, banned
+addresses are dropped by the firewall bouncer regardless of the nginx bouncer.
 
 The detected attack types include:
 

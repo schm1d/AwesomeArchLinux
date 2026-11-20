@@ -108,19 +108,22 @@ test_staged_transactions_and_rollback() {
     trap 'trap - RETURN EXIT; [[ -n "${tmp:-}" ]] && rm -rf -- "$tmp"' RETURN EXIT
     setup_tx_fixture "$tmp"
 
-    # 1. Build failure leaves boot files untouched
-    local rc=0
-    NVME_STABILITY_CMDLINE="$tmp/cmdline" \
+    # 1. Build failure leaves boot files untouched. The stub fails the build
+    #    with status 1; any other status (bash's 127 for a missing command, a
+    #    crash in the script) is not the failure under test.
+    local rc=0 err_out
+    err_out="$(NVME_STABILITY_CMDLINE="$tmp/cmdline" \
     NVME_STABILITY_PRESET="$tmp/linux.preset" \
     NVME_STABILITY_ESP="$tmp/esp" \
     NVME_STABILITY_STATE="$tmp/state" \
     bash -c '
         set -euo pipefail
         source "$1"
-        run_cmd() { return 1; }
+        run_cmd() { echo "RUN_CMD $*" >&2; return 1; }
         install_command_line "$(with_workaround "$(cat "$CMDLINE_FILE")")"$'\''\n'\''
-    ' _ "$NVME_SCRIPT" >/dev/null 2>&1 || rc=$?
-    assert_ne "$rc" "0" "build failure returns non-zero"
+    ' _ "$NVME_SCRIPT" 2>&1 >/dev/null)" || rc=$?
+    assert_eq "$rc" "1" "build failure returns 1"
+    assert_contains "$err_out" "RUN_CMD " "the failing step was the stubbed build command"
     assert_tx_unchanged "$tmp"
 
     # 2. Staged signature failure uses temporary ESP dir, cleans up, and keeps boot files untouched
@@ -134,9 +137,61 @@ test_staged_transactions_and_rollback() {
         }
         verify_staged_signature "$ESP_DIR/EFI/Linux/arch-linux.efi"
     ' _ "$NVME_SCRIPT" >/dev/null 2>&1 || rc=$?
-    assert_ne "$rc" "0" "staged signature failure returns non-zero"
+    # 99 would mean verify_signature was pointed outside the staging directory.
+    assert_eq "$rc" "1" "staged signature failure returns 1"
     assert_eq "$(find "$tmp/esp" -maxdepth 1 -name '.nvme-verify-*' | wc -l | tr -d ' ')" "0" "temp ESP verify dir cleaned"
     assert_tx_unchanged "$tmp"
+}
+
+# preflight with the ESP lookup (findmnt, via run_cmd) answering $2.
+run_preflight_with_findmnt() {
+    local tmp="$1" findmnt_out="$2"
+    NVME_STABILITY_PRESET="$tmp/missing.preset" \
+    NVME_STABILITY_ESP="$tmp/esp" \
+    FINDMNT_OUT="$findmnt_out" \
+    bash -c '
+        set -euo pipefail
+        source "$1"
+        id() { echo 0; }
+        command() {
+            if [[ "${1:-}" == "-v" ]]; then return 0; fi
+            builtin command "$@"
+        }
+        run_cmd() {
+            if [[ "$1" == findmnt ]]; then
+                if [[ -n "$FINDMNT_OUT" ]]; then printf "%s\n" "$FINDMNT_OUT"; fi
+                return 0
+            fi
+            "$@"
+        }
+        preflight
+    ' _ "$NVME_SCRIPT"
+}
+
+test_preflight_reports_unmounted_or_readonly_esp() {
+    local tmp rc out
+    tmp="$(mktemp -d)"
+    trap 'trap - RETURN EXIT; [[ -n "${tmp:-}" ]] && rm -rf -- "$tmp"' RETURN EXIT
+    mkdir -p "$tmp/esp"
+
+    # ESP not mounted: findmnt prints nothing and read hits EOF. That used to
+    # end the script through errexit with no message at all.
+    rc=0
+    out="$(run_preflight_with_findmnt "$tmp" "" 2>&1)" || rc=$?
+    assert_eq "$rc" "1"
+    assert_contains "$out" "must be a mounted, writable FAT EFI system partition" "unmounted ESP is explained"
+
+    rc=0
+    out="$(run_preflight_with_findmnt "$tmp" "vfat ro,relatime" 2>&1)" || rc=$?
+    assert_eq "$rc" "1"
+    assert_contains "$out" "must be a mounted, writable FAT EFI system partition" "read-only ESP is explained"
+
+    # A writable FAT ESP passes this check; preflight then stops at the next one.
+    rc=0
+    out="$(run_preflight_with_findmnt "$tmp" "vfat rw,relatime" 2>&1)" || rc=$?
+    assert_eq "$rc" "1"
+    assert_not_contains "$out" "EFI system partition"
+    assert_contains "$out" "missing.preset"
 }
 
 test_full_apply_idempotence_and_mid_deploy_rollback() {
@@ -218,6 +273,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     run_test "cmdline quoting, deduplication, and validation" test_cmdline_rewriting_and_validation
     run_test "sbctl JSON signature parser rejects unsigned entries" test_unsigned_sbctl_json_is_rejected
     run_test "staged verification and failure cleanup" test_staged_transactions_and_rollback
+    run_test "preflight explains an unmounted or read-only ESP instead of exiting silently" test_preflight_reports_unmounted_or_readonly_esp
     run_test "full apply, mid-deploy rollback, and idempotent repeat" test_full_apply_idempotence_and_mid_deploy_rollback
     finish_test_file "test_nvme_stability.sh"
 fi

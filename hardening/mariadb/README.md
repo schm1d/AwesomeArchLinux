@@ -42,6 +42,17 @@ sudo ./mariadb.sh -p 3307 --ssl
 sudo ./mariadb.sh --ssl --no-local
 ```
 
+### Re-running on an existing server
+
+The script refuses to run while `mariadb.service` (or any `mariadbd`/`mysqld` process) is active: it applies the account hardening through a temporary, socket-only `--skip-grant-tables` instance on the same data directory, and never starts that beside a live server. To re-apply the hardening, plan a short maintenance window:
+
+```bash
+sudo systemctl stop mariadb.service
+sudo ./mariadb.sh [options]      # starts MariaDB again when it finishes
+```
+
+The existing root password in `/root/.mariadb-root-pass` and existing certificates are reused unless `--rotate-root-password` / `--rotate-ssl` is passed. The previous `hardening.cnf` is kept as `hardening.cnf.bak.<timestamp>`.
+
 ## What It Does
 
 ### 1. Package Installation
@@ -57,6 +68,7 @@ Synchronizes package databases and installs `mariadb` and `logrotate` (`pacman -
 | Remote root login | Restricted to `localhost`, `127.0.0.1`, `::1` only |
 | Test database | Dropped, along with any test database privileges |
 | Privileges | Flushed after all changes |
+| Log rotation account | Ensures `mysql@localhost` exists (`unix_socket` authentication, created by `mariadb-install-db`) and holds `RELOAD`, so logrotate can reopen the logs without a password |
 
 ### 3. Hardened Configuration (`/etc/my.cnf.d/hardening.cnf`)
 
@@ -80,7 +92,6 @@ Synchronizes package databases and installs `mariadb` and `logrotate` (`pacman -
 | `skip-symbolic-links` | enabled | Prevent symlink-based attacks |
 | `secure-file-priv` | `/var/lib/mysql-files` | Restrict LOAD DATA / SELECT INTO OUTFILE |
 | `sql-mode` | `STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION` | Strict data validation |
-| `log-raw` | `OFF` | Never log passwords in plaintext |
 
 #### SSL/TLS Settings (with `--ssl`)
 
@@ -139,7 +150,9 @@ Synchronizes package databases and installs `mariadb` and `logrotate` (`pacman -
 
 ### 5. Log Rotation
 
-Weekly rotation of all logs in `/var/log/mysql/`, keeping 12 compressed archives. MariaDB is signaled to reopen log files after rotation.
+Weekly rotation of all logs in `/var/log/mysql/`, keeping 12 compressed archives. Rotation runs as the `mysql` user (`su mysql mysql`).
+
+After rotation the logs are reopened through the client, not with a signal: `runuser -u mysql -- mariadb-admin --local flush-error-log flush-engine-log flush-general-log flush-slow-log`. MariaDB has no `SIGUSR1` handler (the default action of that signal terminates `mariadbd`), and `SIGHUP` would also flush tables and reload grants. The command authenticates as `mysql@localhost` over the Unix socket, so it needs that account to keep `unix_socket` authentication and the `RELOAD` privilege; if the flush fails, a warning is written to the journal (`journalctl -t logrotate-mariadb`) and MariaDB keeps writing to the rotated file until the next restart.
 
 ## Creating Application Users and Databases
 
@@ -190,9 +203,11 @@ sudo cp ca-cert.pem /etc/mysql/ssl/ca-cert.pem
 sudo cp server-cert.pem /etc/mysql/ssl/server-cert.pem
 sudo cp server-key.pem /etc/mysql/ssl/server-key.pem
 
-# 3. Set permissions
-sudo chown mysql:mysql /etc/mysql/ssl/*.pem
-sudo chmod 600 /etc/mysql/ssl/*.pem
+# 3. Set permissions (certificates are public; only mysqld may read its key)
+sudo chown root:root /etc/mysql/ssl/ca-cert.pem /etc/mysql/ssl/server-cert.pem
+sudo chmod 644 /etc/mysql/ssl/ca-cert.pem /etc/mysql/ssl/server-cert.pem
+sudo chown mysql:mysql /etc/mysql/ssl/server-key.pem
+sudo chmod 600 /etc/mysql/ssl/server-key.pem
 
 # 4. Restart MariaDB
 sudo systemctl restart mariadb
@@ -497,7 +512,7 @@ For example, a 4-core server with 1 SSD: `(4 * 2) + 1 = 9` connections per appli
 | `/etc/logrotate.d/mariadb` | Log rotation configuration |
 | `/var/log/mysql/` | Error, slow query, and general logs |
 | `/var/lib/mysql-files/` | Restricted file operations directory |
-| `/etc/mysql/ssl/` | SSL certificates (if `--ssl` was used) |
+| `/etc/mysql/ssl/` | SSL certificates (if `--ssl` was used): certificates are world-readable (`0644`) so local clients can verify the server; `server-key.pem` is `mysql:mysql 0600`; `ca-key.pem` and `client-key.pem` are `root:root 0600` (copy the client key to the client that needs it, and move the CA key offline) |
 
 ## References
 

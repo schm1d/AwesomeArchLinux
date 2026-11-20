@@ -17,7 +17,7 @@ sudo ./nginx.sh -d example.com -d www.example.com -e admin@example.com
 |------|-------------|---------|
 | `-d DOMAIN` | Domain name (repeat for multiple) | *required* |
 | `-e EMAIL` | Let's Encrypt notification email | `webmaster@DOMAIN` |
-| `-w PATH` | Web root directory | `/var/www/html` |
+| `-w PATH` | Web root directory (below `/var/www/` or `/srv/http/`). An existing directory keeps its ownership and permissions | `/var/www/html` |
 | `-p PORT` | HTTPS port (must not be `80`) | `443` |
 | `--dry-run` | Use Let's Encrypt staging server | off |
 | `--skip-certbot` | Skip certificate issuance | off |
@@ -28,6 +28,16 @@ sudo ./nginx.sh -d example.com -d www.example.com -e admin@example.com
 ```bash
 sudo ./nginx.sh -d example.com --dry-run
 ```
+
+### Re-running on a configured server
+
+The script can be run again at any time (new domain, changed options, updated defaults):
+
+- **Backups.** Every run first copies the files it is about to replace (`nginx.conf`, `sites-enabled/default.conf`, `conf.d/ssl-hardening.conf`, `snippets/security-headers.conf`, the systemd drop-in and the certbot units) to `/var/backups/nginx-hardening/<timestamp>/` (root-only, outside `/etc/nginx` and any web root). Changes you made to those files are replaced by the generated versions, so re-apply them from the backup.
+- **Rollback.** If `nginx -t`, the nginx start/reload or the first certificate issuance fails, the saved files are restored, nginx is put back on them and the script exits with an error. A broken configuration is never left in place.
+- **No TLS downtime.** When a certificate for the primary domain already exists, the running HTTPS configuration stays in service for the whole run: the refreshed vhost is validated and reloaded first, and certbot renews or extends the certificate afterwards. The temporary HTTP-only ACME vhost is only used for the very first issuance.
+- **Names served by another vhost.** A domain that another file in `/etc/nginx/sites-enabled/` already declares on port 80 or the HTTPS port (for example a site set up by `../wordpress/wordpress.sh` or `../react/react.sh`) stays with that vhost and is not declared again in `default.conf`; nginx would otherwise ignore one of the two blocks. The certificate still covers the name. Its ACME challenge is validated through the web root that vhost announces in its `# ACME-Webroot:` header line, or through `-w PATH` when there is none.
+- **Web content.** A web root that already exists is not re-owned or re-moded; only the `.well-known/acme-challenge` path is opened for the `http` user if needed. A web root created by the script is owned by `root` and world-readable: the workers only read it.
 
 ## What It Does
 
@@ -77,11 +87,15 @@ All six graded headers are set, plus OWASP-recommended Cross-Origin headers (inc
 - **Dotfile blocking** (except `.well-known`)
 - **Sensitive file blocking** (`.sql`, `.bak`, `.log`, `.sh`, etc.)
 - **Unprivileged worker** process (`http` user)
+- **Root-owned log directory**: `/var/log/nginx` is `root:root 0755` as packaged by Arch, and only the log files belong to `http` (`0640`). The master process opens and chowns logs as root, so a log directory writable by the worker user would let a compromised worker redirect that through a symlink (the CVE-2016-1247 pattern). The script warns about symlinks it finds there.
+- **Explicit temp paths**: request bodies larger than `client_body_buffer_size` and buffered upstream responses are spooled to `/var/cache/nginx/{client,proxy,fastcgi,uwsgi,scgi}_temp` (`http`-owned, `0700`), which stay writable under the systemd sandbox. Large uploads up to `client_max_body_size` work without further changes.
 
 ### 5. systemd Service Hardening
 
 The nginx unit gets a security override with:
 - `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`
+- Write access limited to `/var/log/nginx`, `/var/cache/nginx`, `/var/lib/nginx` and the single file `/run/nginx.pid`. The rest of `/run` is read-only for nginx (the PID file is created before each start by an `ExecStartPre=+` step so it can be bound read-write on its own). Side effects: systemd may log one informational `Failed to create reference to PID` line per start (the file is still empty for a moment), nginx cannot unlink a bind-mounted file, so each stop logs one harmless `unlink() "/run/nginx.pid" failed` alert, and the in-place binary upgrade via `USR2` (which renames the PID file) is not available; use `systemctl restart nginx` after package updates
+- `UMask=0027`: files nginx creates (new logs, temp files) are never world-readable
 - Kernel module/tunable/log protection
 - Capability bounding reset (`CapabilityBoundingSet=`) then restricted to `CAP_NET_BIND_SERVICE`, `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID`, and `CAP_KILL` (so the root master process can signal `http` workers on `systemctl reload nginx`, with no `AmbientCapabilities` inherited by workers)
 - Native-only syscall filtering
@@ -110,6 +124,8 @@ certbot renew --dry-run
 | `/etc/letsencrypt/live/<domain>/` | Let's Encrypt certificates |
 | `/etc/systemd/system/certbot-renew.timer` | Auto-renewal timer |
 | `/etc/systemd/system/nginx.service.d/hardening.conf` | systemd security override |
+| `/var/backups/nginx-hardening/<timestamp>/` | The configuration each run replaced (`0700`, root) |
+| `/var/cache/nginx/*_temp/` | Request body and upstream buffer spool directories |
 | `/etc/systemd/system/awesome-nginx-firewall.service` | Idempotent iptables fallback, when nftables is unavailable |
 
 ## Customization

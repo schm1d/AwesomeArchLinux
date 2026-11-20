@@ -16,7 +16,8 @@
 #                - Plugin and skill registry lockdown
 #                - Secure logging with sensitive data redaction
 #                - File permissions and credential isolation
-#                - Hardened systemd user service with drop-in overrides
+#                - Root-owned hardened systemd system service (runs as the
+#                  dedicated user) with drop-in overrides
 #                - nftables firewall rules (optional)
 #                - AppArmor confinement profile (optional)
 #                - Workspace git initialization for rollback
@@ -54,7 +55,8 @@
 #   15. Sets up log rotation via logrotate
 #   16. Locks down all file permissions (700/600 principle)
 #   17. Creates a secure environment file for credentials
-#   18. Creates a hardened systemd user service
+#   18. Creates a root-owned systemd system service that runs as the user
+#       (and migrates away from the old user-level units)
 #   19. Creates a systemd hardening drop-in with full sandboxing
 #   20. Writes nftables firewall rules for loopback-only access (optional)
 #   21. Creates an AppArmor confinement profile (optional)
@@ -134,7 +136,11 @@ done
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ -n "$OC_USER" ]] || err "Username is required (-u USERNAME)"
 [[ "$OC_USER" != "root" ]] || err "OpenClaw must NOT run as root. Specify a non-root user."
+# The user name becomes part of root-owned unit file names
+# (openclaw-gateway-<user>.service), so it is limited to unit-name-safe
+# characters and the 32-character login name limit.
 [[ "$OC_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || err "Invalid username: $OC_USER"
+[[ ${#OC_USER} -le 32 ]] || err "Invalid username (longer than 32 characters): $OC_USER"
 
 # Validate port is numeric
 if ! [[ "$OC_PORT" =~ ^[0-9]+$ ]] || [[ "$OC_PORT" -lt 1 ]] || [[ "$OC_PORT" -gt 65535 ]]; then
@@ -269,6 +275,143 @@ OC_ENV_FILE="$OC_DIR/.env"
 OC_SESSIONS_GLOB="$OC_DIR/agents/*/sessions"
 OC_EXEC_APPROVALS="$OC_DIR/exec-approvals.json"
 
+# -----------------------------------------------------------------------------
+# Service-account tree: root never dereferences a path the account controls
+# -----------------------------------------------------------------------------
+# Everything under $OC_HOME can be rearranged by the service account (symlinks,
+# renames), and the agent has read/write access to $OC_DIR by design. A
+# root-side write, chmod or chown on such a path can be redirected to any file
+# on the system, and re-running this script is a supported flow. So every
+# create/write/chmod/mkdir below $OC_HOME runs as $OC_USER; root only streams
+# content to it and inspects ownership with checks that do not follow links.
+
+# Paths embedded in root-owned unit files and the AppArmor profile must not
+# carry whitespace, quotes, specifiers (%), variables ($) or glob characters.
+is_safe_path() {
+    [[ "$1" =~ ^(/[A-Za-z0-9._+@-]+)+$ && "$1/" != */../* && "$1/" != */./* ]]
+}
+
+# Run a command as the service account, from a directory it can always reach.
+oc_run() {
+    runuser -u "$OC_USER" -- env -C / HOME="$OC_HOME" "$@"
+}
+
+# oc_mkdir MODE DIR...: create (or tighten) directories as the service account.
+# An existing path that is a symlink, not a directory, or not owned by the
+# account is refused instead of being followed or "repaired" by root.
+oc_mkdir() {
+    local mode="$1"
+    shift
+    oc_run bash -c '
+        set -euo pipefail
+        mode=$1
+        shift
+        for dir in "$@"; do
+            if [[ -L "$dir" ]] || { [[ -e "$dir" ]] && [[ ! -d "$dir" || ! -O "$dir" ]]; }; then
+                printf "Refusing %s: symlink, not a directory, or not owned by the service account\n" "$dir" >&2
+                exit 1
+            fi
+            mkdir -p -- "$dir"
+            chmod -- "$mode" "$dir"
+        done
+    ' _ "$mode" "$@" || err "Could not prepare directory as $OC_USER: $*"
+}
+
+# oc_write_file MODE DEST: write stdin to DEST as the service account. The
+# content lands in a temporary file in the same directory and is renamed over
+# DEST, so an existing symlink at DEST is replaced, never followed.
+oc_write_file() {
+    local mode="$1" dest="$2"
+    oc_run bash -c '
+        set -euo pipefail
+        umask 077
+        mode=$1 dest=$2
+        tmp=$(mktemp -- "${dest%/*}/.${dest##*/}.XXXXXX")
+        if ! { cat > "$tmp" && chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dest"; }; then
+            rm -f -- "$tmp"
+            exit 1
+        fi
+    ' _ "$mode" "$dest" || err "Could not write $dest as $OC_USER"
+}
+
+# oc_file_state PATH: print "missing", "regular" (a plain file owned by the
+# account) or "other" (symlink, directory, FIFO, foreign-owned, ...) as seen by
+# the service account, without following a final symlink.
+oc_file_state() {
+    local rc=0
+    oc_run bash -c '
+        [[ -e "$1" || -L "$1" ]] || exit 10
+        [[ ! -L "$1" && -f "$1" && -O "$1" ]] && exit 11
+        exit 12
+    ' _ "$1" || rc=$?
+    case "$rc" in
+        10) echo missing ;;
+        11) echo regular ;;
+        *)  echo other ;;
+    esac
+}
+
+# oc_chmod_file MODE FILE...: chmod plain files as the service account. Missing
+# paths are skipped; a planted symlink or foreign-owned entry is reported and
+# left untouched.
+oc_chmod_file() {
+    local mode="$1" file
+    shift
+    for file in "$@"; do
+        case "$(oc_file_state "$file")" in
+            regular)
+                if oc_run chmod -- "$mode" "$file"; then
+                    info "  $file -> $mode"
+                else
+                    warn "  Could not chmod $file as $OC_USER"
+                fi
+                ;;
+            other)
+                warn "  NOT TOUCHED: $file is a symlink, not a regular file, or not owned by $OC_USER — inspect it"
+                ;;
+        esac
+    done
+}
+
+# Talk to the account's own user manager (only used to retire legacy units).
+run_user_systemctl() {
+    systemctl --machine="${OC_USER}@" --user "$@" 2>/dev/null || \
+        runuser -u "$OC_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/${USER_UID}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${USER_UID}/bus" \
+            systemctl --user "$@" 2>/dev/null
+}
+
+# Refuse a home or .openclaw that root could be tricked through. stat and -L
+# look at the entry itself, never at a symlink target.
+is_safe_path "$OC_HOME" || \
+    err "Home directory '$OC_HOME' contains characters that cannot be embedded safely in systemd units and AppArmor rules."
+[[ ! -L "$OC_HOME" ]] || \
+    err "Home directory $OC_HOME is a symbolic link; point the account at the real directory before hardening it."
+[[ "$(stat -c %u -- "$OC_HOME")" == "$USER_UID" ]] || \
+    err "Home directory $OC_HOME is not owned by '$OC_USER'; refusing to manage an OpenClaw tree inside it."
+if [[ -L "$OC_DIR" ]]; then
+    err "$OC_DIR is a symbolic link; refusing to follow it. Inspect it, remove it and re-run."
+elif [[ -e "$OC_DIR" ]]; then
+    [[ -d "$OC_DIR" ]] || err "$OC_DIR exists but is not a directory; refusing to continue."
+    [[ "$(stat -c %u -- "$OC_DIR")" == "$USER_UID" ]] || \
+        err "$OC_DIR is not owned by '$OC_USER'; refusing to continue. Root does not change ownership inside the service account's tree."
+fi
+
+# Root-private scratch space (mode 0700 under /run). Content that needs
+# root-side variables is built here and streamed to oc_write_file.
+ROOT_TMP=$(mktemp -d /run/openclaw-hardening.XXXXXX)
+trap 'rm -rf -- "$ROOT_TMP"' EXIT
+
+# Root-owned helpers and per-user system units (see Phase 9).
+SYSTEMD_SYSTEM_DIR="/etc/systemd/system"
+GATEWAY_UNIT="openclaw-gateway-$OC_USER.service"
+AUDIT_UNIT="openclaw-audit-$OC_USER.service"
+AUDIT_TIMER="openclaw-audit-$OC_USER.timer"
+OC_LIBEXEC_DIR="/usr/local/lib/openclaw-hardening"
+OC_ENV_LAUNCHER="$OC_LIBEXEC_DIR/openclaw-env-exec"
+AUDIT_SCRIPT="$OC_LIBEXEC_DIR/openclaw-security-audit"
+
 # Resolve the CLI before changing any OpenClaw state. The generated config is
 # validated with this exact binary before it replaces the live configuration.
 OPENCLAW_BIN=""
@@ -281,7 +424,31 @@ elif [[ -x "$OC_HOME/.local/bin/openclaw" ]]; then
 else
     err "OpenClaw CLI not found. Install OpenClaw before running this script."
 fi
+is_safe_path "$OPENCLAW_BIN" || \
+    err "OpenClaw binary path '$OPENCLAW_BIN' contains characters that cannot be embedded safely in a systemd unit."
 info "OpenClaw binary: $OPENCLAW_BIN"
+
+# Paths the AppArmor profile will name are resolved and checked here, before
+# any state changes, so a rejected path cannot leave a unit that references a
+# profile which was never written.
+APPARMOR_DIR="/etc/apparmor.d"
+if [[ "$WITH_APPARMOR" == true ]]; then
+    NODE_BIN=$(command -v node 2>/dev/null || echo "/usr/bin/node")
+    NODE_BIN_REAL=$(realpath "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")
+    OPENCLAW_BIN_REAL=$(realpath "$OPENCLAW_BIN" 2>/dev/null || echo "$OPENCLAW_BIN")
+    for apparmor_path in "$NODE_BIN" "$NODE_BIN_REAL" "$OPENCLAW_BIN_REAL"; do
+        is_safe_path "$apparmor_path" || \
+            err "Path '$apparmor_path' contains characters that cannot be embedded safely in an AppArmor profile."
+    done
+
+    # The profile name is shared, but its rules name one account's paths.
+    # Replacing it would re-confine another account's running gateway with the
+    # wrong paths now that the profile is actually enforced.
+    if [[ -f "$APPARMOR_DIR/openclaw-gateway" ]] && \
+       ! grep -qF -- "$OC_DIR/" "$APPARMOR_DIR/openclaw-gateway"; then
+        err "$APPARMOR_DIR/openclaw-gateway was generated for a different account. Only one account per host can use --with-apparmor; remove that profile first or run without --with-apparmor."
+    fi
+fi
 
 # The system Docker group grants control of the root-owned Docker daemon and is
 # therefore equivalent to host root. Sandbox mode requires a rootless daemon
@@ -304,8 +471,8 @@ if [[ "$WITH_SANDBOX" == true ]]; then
     msg "Rootless Docker sandbox verified for '$OC_USER'"
 fi
 
-# Ensure OpenClaw directories exist
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0700 "$OC_DIR" "$OC_WORKSPACE" "$OC_CREDENTIALS"
+# Ensure OpenClaw directories exist (created by the account itself)
+oc_mkdir 0700 "$OC_DIR" "$OC_WORKSPACE" "$OC_CREDENTIALS"
 
 echo
 
@@ -322,13 +489,24 @@ echo -e "${C_BLUE}--- Phase 2: Gateway Hardening ---${C_NC}"
 msg "Step 3: Configuring gateway authentication token..."
 
 GATEWAY_TOKEN=""
-if [[ -f "$OC_ENV_FILE" ]]; then
-    GATEWAY_TOKEN=$(awk -F= '/^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/ {
+ENV_FILE_STATE=$(oc_file_state "$OC_ENV_FILE")
+[[ "$ENV_FILE_STATE" != other ]] || \
+    err "$OC_ENV_FILE is a symlink, not a regular file, or not owned by '$OC_USER'. Root will not read or replace it; inspect it, move it aside and re-run."
+if [[ "$ENV_FILE_STATE" == regular ]]; then
+    # The file belongs to the account the agent runs as: read it as that
+    # account and treat the value purely as data.
+    GATEWAY_TOKEN=$(oc_run awk -F= '/^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/ {
         sub(/^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/, "")
         gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "")
         print
         exit
-    }' "$OC_ENV_FILE" 2>/dev/null || true)
+    }' "$OC_ENV_FILE" 2>/dev/null | head -c 4096 || true)
+    if [[ -n "$GATEWAY_TOKEN" && "$GATEWAY_TOKEN" != REPLACE_* ]] && \
+       ! [[ ${#GATEWAY_TOKEN} -le 512 && "$GATEWAY_TOKEN" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+        warn "Existing OPENCLAW_GATEWAY_TOKEN in $OC_ENV_FILE is not a plain token ([A-Za-z0-9._~+/=-], max 512 chars)"
+        warn "A NEW token will be generated; update every client that used the old one"
+        GATEWAY_TOKEN=""
+    fi
 fi
 
 if [[ -n "$GATEWAY_TOKEN" && "$GATEWAY_TOKEN" != REPLACE_* ]]; then
@@ -346,8 +524,8 @@ fi
 msg "Step 4: Writing hardened openclaw.json..."
 
 EXEC_HOST_MODE="sandbox"
-OC_CONFIG_TMP=$(umask 077; mktemp "$OC_DIR/.openclaw.json.XXXXXX")
-chmod 600 "$OC_CONFIG_TMP"
+# Built in root-private scratch space, never directly inside $OC_DIR.
+OC_CONFIG_TMP="$ROOT_TMP/openclaw.json"
 
 cat > "$OC_CONFIG_TMP" <<OPENCLAW_JSON_HEAD
 {
@@ -509,28 +687,38 @@ cat >> "$OC_CONFIG_TMP" <<'OPENCLAW_JSON_TAIL'
 OPENCLAW_JSON_TAIL
 
 # NEVER execute $OPENCLAW_BIN as root (it may reside under $OC_HOME/.local/bin).
-chown "$OC_USER:$OC_GROUP" "$OC_CONFIG_TMP"
-chmod 0600 "$OC_CONFIG_TMP"
+# The account receives a candidate copy to validate; root keeps the original.
+OC_CONFIG_CANDIDATE="$OC_DIR/.openclaw.json.candidate"
+oc_write_file 0600 "$OC_CONFIG_CANDIDATE" < "$OC_CONFIG_TMP"
 
 if ! runuser -u "$OC_USER" -- env \
     HOME="$OC_HOME" \
-    OPENCLAW_CONFIG_PATH="$OC_CONFIG_TMP" \
+    OPENCLAW_CONFIG_PATH="$OC_CONFIG_CANDIDATE" \
     OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
     "$OPENCLAW_BIN" config validate; then
-    rm -f -- "$OC_CONFIG_TMP"
+    oc_run rm -f -- "$OC_CONFIG_CANDIDATE" || true
     err "Generated OpenClaw configuration failed validation; live config was not changed."
 fi
 
 # Back up only after the replacement has passed the installed CLI's schema.
-if [[ -f "$OC_CONFIG" ]]; then
-    BACKUP_NAME="$OC_CONFIG.backup.$(date +%Y%m%d-%H%M%S)"
-    cp -a "$OC_CONFIG" "$BACKUP_NAME"
-    chown "$OC_USER:$OC_GROUP" "$BACKUP_NAME"
-    chmod 600 "$BACKUP_NAME"
-    msg "Backed up existing config to: $BACKUP_NAME"
-fi
+# The copy is made by the account, so a planted symlink is never read as root.
+case "$(oc_file_state "$OC_CONFIG")" in
+    regular)
+        BACKUP_NAME="$OC_CONFIG.backup.$(date +%Y%m%d-%H%M%S)"
+        oc_run install -p -m 0600 -- "$OC_CONFIG" "$BACKUP_NAME" || \
+            err "Could not back up $OC_CONFIG as $OC_USER; live config was not changed."
+        msg "Backed up existing config to: $BACKUP_NAME"
+        ;;
+    other)
+        warn "$OC_CONFIG is a symlink, not a regular file, or not owned by $OC_USER"
+        warn "It is replaced without a backup — inspect where it pointed"
+        ;;
+esac
 
-install -o "$OC_USER" -g "$OC_GROUP" -m 0600 "$OC_CONFIG_TMP" "$OC_CONFIG"
+# Install root's own copy (not the candidate the account could have edited)
+# with an atomic rename that replaces, rather than follows, a symlink.
+oc_write_file 0600 "$OC_CONFIG" < "$OC_CONFIG_TMP"
+oc_run rm -f -- "$OC_CONFIG_CANDIDATE" || true
 rm -f -- "$OC_CONFIG_TMP"
 msg "Validated hardened openclaw.json installed at: $OC_CONFIG (mode 600)"
 
@@ -706,7 +894,7 @@ msg "Step 15: Setting up log rotation..."
 
 OC_LOG_DIR="$OC_DIR/logs"
 LOGROTATE_CONF="/etc/logrotate.d/openclaw-$OC_USER"
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0750 "$OC_LOG_DIR"
+oc_mkdir 0750 "$OC_LOG_DIR"
 install -d -m 0755 /etc/logrotate.d
 
 # Clean up legacy shared /etc/logrotate.d/openclaw when upgrading this user
@@ -757,59 +945,58 @@ echo -e "${C_BLUE}--- Phase 8: File Permissions & Credential Isolation ---${C_NC
 
 msg "Step 16: Locking down file permissions..."
 
+# Every mode change in this step is made by $OC_USER itself. Root does not
+# chmod or chown anything in this tree: the agent can plant a symlink (e.g.
+# exec-approvals.json -> /etc/shadow) and wait for the next hardening run.
+
 # Main OpenClaw directory — owner only
-chmod 700 "$OC_DIR"
-chown "$OC_USER:$OC_GROUP" "$OC_DIR"
+oc_mkdir 0700 "$OC_DIR"
 info "  $OC_DIR -> 700"
 
 # Config file — owner read/write only
-if [[ -f "$OC_CONFIG" ]]; then
-    chmod 600 "$OC_CONFIG"
-    chown "$OC_USER:$OC_GROUP" "$OC_CONFIG"
-    info "  $OC_CONFIG -> 600"
-fi
+oc_chmod_file 600 "$OC_CONFIG"
 
 # Credentials directory — owner only
-mkdir -p "$OC_CREDENTIALS"
-chmod 700 "$OC_CREDENTIALS"
-chown "$OC_USER:$OC_GROUP" "$OC_CREDENTIALS"
+oc_mkdir 0700 "$OC_CREDENTIALS"
 info "  $OC_CREDENTIALS/ -> 700"
 
-# Lock down all files in credentials directory
-if [[ -d "$OC_CREDENTIALS" ]]; then
-    find "$OC_CREDENTIALS" -type f -exec chmod 600 {} \;
-    find "$OC_CREDENTIALS" -type f -exec chown "$OC_USER:$OC_GROUP" {} \;
+# Lock down all files in credentials directory (find does not follow symlinks)
+if oc_run find "$OC_CREDENTIALS" -xdev -type f -exec chmod 600 {} +; then
     info "  $OC_CREDENTIALS/* -> 600"
+else
+    warn "  Could not set mode 600 on every file in $OC_CREDENTIALS"
 fi
 
 # Session directories — owner only (contain conversation transcripts)
-for sessions_dir in "$OC_DIR"/agents/*/sessions; do
-    if [[ -d "$sessions_dir" ]]; then
-        chmod 700 "$sessions_dir"
-        chown "$OC_USER:$OC_GROUP" "$sessions_dir"
-        info "  $sessions_dir -> 700"
-    fi
-done
-
-# Exec approvals file
-if [[ -f "$OC_EXEC_APPROVALS" ]]; then
-    chmod 600 "$OC_EXEC_APPROVALS"
-    chown "$OC_USER:$OC_GROUP" "$OC_EXEC_APPROVALS"
-    info "  $OC_EXEC_APPROVALS -> 600"
+SESSION_DIR_COUNT=$(oc_run find "$OC_DIR/agents" -mindepth 2 -maxdepth 2 -xdev \
+    -type d -name sessions -exec chmod 700 {} + -printf 'x' 2>/dev/null || true)
+if [[ -n "$SESSION_DIR_COUNT" ]]; then
+    info "  $OC_DIR/agents/*/sessions (${#SESSION_DIR_COUNT}) -> 700"
 fi
 
+# Exec approvals file
+oc_chmod_file 600 "$OC_EXEC_APPROVALS"
+
 # Workspace — owner rwx, group/other none
-chmod 700 "$OC_WORKSPACE"
-chown "$OC_USER:$OC_GROUP" "$OC_WORKSPACE"
+oc_mkdir 0700 "$OC_WORKSPACE"
 info "  $OC_WORKSPACE/ -> 700"
 
 # Log directory
-chmod 750 "$OC_LOG_DIR"
-chown "$OC_USER:$OC_GROUP" "$OC_LOG_DIR"
+oc_mkdir 0750 "$OC_LOG_DIR"
 info "  $OC_LOG_DIR/ -> 750"
 
-# Recursively fix ownership of entire .openclaw tree
-chown -R "$OC_USER:$OC_GROUP" "$OC_DIR"
+# Ownership of the tree is checked, not rewritten: a recursive root chown is
+# exactly the primitive a planted link turns against the rest of the system.
+# find does not follow symlinks and only reads metadata here.
+FOREIGN_OWNED=$(find "$OC_DIR" -xdev ! -user "$OC_USER" -printf '%u %p\n' 2>/dev/null | \
+    head -n 20 | LC_ALL=C tr -c '[:print:]\n' '?' || true)
+if [[ -n "$FOREIGN_OWNED" ]]; then
+    warn "Entries under $OC_DIR that are NOT owned by $OC_USER (first 20, left untouched):"
+    while IFS= read -r foreign_entry; do
+        warn "    $foreign_entry"
+    done <<< "$FOREIGN_OWNED"
+    warn "Stop the gateway, review each entry, then fix or remove it by hand."
+fi
 
 msg "File permissions locked down"
 
@@ -819,27 +1006,41 @@ msg "File permissions locked down"
 
 msg "Step 17: Configuring secure environment file..."
 
-if [[ -f "$OC_ENV_FILE" ]]; then
-    if grep -qE '^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=' "$OC_ENV_FILE"; then
-        sed -i "s|^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=.*|OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN|" "$OC_ENV_FILE"
-    else
-        printf '\nOPENCLAW_GATEWAY_TOKEN=%s\n' "$GATEWAY_TOKEN" >> "$OC_ENV_FILE"
-    fi
-    if [[ "$WITH_SANDBOX" == true ]] && ! grep -qE '^[[:space:]]*DOCKER_HOST=' "$OC_ENV_FILE"; then
-        cat >> "$OC_ENV_FILE" <<EOF
+# The new content is assembled in root-private scratch space and handed to the
+# account, which renames it into place. Root never opens $OC_ENV_FILE.
+ENV_BUILD="$ROOT_TMP/env"
+if [[ "$ENV_FILE_STATE" == regular ]]; then
+    # Existing content is read by the account and handled as data (capped at
+    # 1 MiB). The token reaches awk through the environment, never through a
+    # sed/awk program text, so a hostile value cannot become a command.
+    oc_run head -c 1048577 -- "$OC_ENV_FILE" > "$ENV_BUILD.in" || \
+        err "Could not read $OC_ENV_FILE as $OC_USER"
+    [[ $(stat -c %s -- "$ENV_BUILD.in") -le 1048576 ]] || \
+        err "$OC_ENV_FILE is larger than 1 MiB; refusing to process it"
+    OC_NEW_GATEWAY_TOKEN="$GATEWAY_TOKEN" awk '
+        /^[[:space:]]*OPENCLAW_GATEWAY_TOKEN=/ {
+            print "OPENCLAW_GATEWAY_TOKEN=" ENVIRON["OC_NEW_GATEWAY_TOKEN"]
+            found = 1
+            next
+        }
+        { print }
+        END { if (!found) printf "\nOPENCLAW_GATEWAY_TOKEN=%s\n", ENVIRON["OC_NEW_GATEWAY_TOKEN"] }
+    ' "$ENV_BUILD.in" > "$ENV_BUILD"
+    if [[ "$WITH_SANDBOX" == true ]] && ! grep -qE '^[[:space:]]*DOCKER_HOST=' "$ENV_BUILD"; then
+        cat >> "$ENV_BUILD" <<EOF
 
 # --- Rootless Docker sandbox ---
 DOCKER_HOST=unix://$SANDBOX_DOCKER_SOCKET
 OPENCLAW_DOCKER_SOCKET=$SANDBOX_DOCKER_SOCKET
 EOF
     fi
-    chown "$OC_USER:$OC_GROUP" "$OC_ENV_FILE"
-    chmod 600 "$OC_ENV_FILE"
+    oc_write_file 0600 "$OC_ENV_FILE" < "$ENV_BUILD"
+    rm -f -- "$ENV_BUILD" "$ENV_BUILD.in"
     msg "Preserved existing secure environment file: $OC_ENV_FILE (mode 600)"
 else
     (
         umask 077
-        cat > "$OC_ENV_FILE" <<EOF
+        cat > "$ENV_BUILD" <<EOF
 # =============================================================================
 # OpenClaw secure environment file
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
@@ -875,7 +1076,7 @@ OPENCLAW_TELEMETRY=false
 EOF
 
         if [[ "$WITH_SANDBOX" == true ]]; then
-            cat >> "$OC_ENV_FILE" <<EOF
+            cat >> "$ENV_BUILD" <<EOF
 
 # --- Rootless Docker sandbox ---
 DOCKER_HOST=unix://$SANDBOX_DOCKER_SOCKET
@@ -883,8 +1084,8 @@ OPENCLAW_DOCKER_SOCKET=$SANDBOX_DOCKER_SOCKET
 EOF
         fi
     )
-    chown "$OC_USER:$OC_GROUP" "$OC_ENV_FILE"
-    chmod 600 "$OC_ENV_FILE"
+    oc_write_file 0600 "$OC_ENV_FILE" < "$ENV_BUILD"
+    rm -f -- "$ENV_BUILD"
     msg "Secure environment file created: $OC_ENV_FILE (mode 600)"
     warn "IMPORTANT: Edit $OC_ENV_FILE to add your actual API keys"
 fi
@@ -898,38 +1099,213 @@ echo
 echo -e "${C_BLUE}--- Phase 9: systemd Service Hardening ---${C_NC}"
 
 # -----------------------------------------------------------------------------
-# Step 18: Create hardened systemd user service
+# Step 18: Create hardened systemd system service (runs as $OC_USER)
 # -----------------------------------------------------------------------------
 
-msg "Step 18: Creating hardened systemd user service..."
+msg "Step 18: Creating hardened systemd system service (runs as $OC_USER)..."
 
-# Create user systemd directory
-SYSTEMD_USER_DIR="$OC_HOME/.config/systemd/user"
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$OC_HOME/.config" "$OC_HOME/.config/systemd" "$SYSTEMD_USER_DIR"
+# The gateway runs from ROOT-OWNED SYSTEM units with User=$OC_USER. A unit in
+# the account's own user manager is not a security boundary:
+#   - the confined process can reach that manager (systemd-run --user) and
+#     start anything, unsandboxed, under the same UID;
+#   - the unit file, its drop-in and anything it loads are writable by the
+#     account being confined;
+#   - systemd.exec(5) only honours AppArmorProfile= and ProtectProc= for
+#     system services, and with kernel.unprivileged_userns_clone=0 a user
+#     manager starts the service with no filesystem sandbox at all.
 
-cat > "$SYSTEMD_USER_DIR/openclaw-gateway.service" <<EOF
+# --- Retire the legacy user-level units (written by older versions) ---
+LEGACY_USER_UNIT_DIR="$OC_HOME/.config/systemd/user"
+LEGACY_AUDIT_SCRIPT="$OC_HOME/.local/bin/openclaw-security-audit.sh"
+LEGACY_UNITS_MIGRATED=false
+LEGACY_GATEWAY_STATE=""
+if oc_run bash -c 'for p in "$@"; do [[ -e "$p" || -L "$p" ]] && exit 0; done; exit 1' _ \
+    "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service" \
+    "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service.d" \
+    "$LEGACY_USER_UNIT_DIR/openclaw-audit.service" \
+    "$LEGACY_USER_UNIT_DIR/openclaw-audit.timer" \
+    "$LEGACY_AUDIT_SCRIPT"; then
+    LEGACY_UNITS_MIGRATED=true
+    warn "Legacy user-level OpenClaw units found for $OC_USER — migrating to root-owned system units"
+
+    if oc_run test -L "$LEGACY_USER_UNIT_DIR/default.target.wants/openclaw-gateway.service"; then
+        LEGACY_GATEWAY_STATE="enabled"
+    fi
+    if run_user_systemctl list-units --no-legend openclaw-gateway.service >/dev/null; then
+        if run_user_systemctl is-active --quiet openclaw-gateway.service; then
+            LEGACY_GATEWAY_STATE="${LEGACY_GATEWAY_STATE:+$LEGACY_GATEWAY_STATE and }running"
+        fi
+        run_user_systemctl stop openclaw-gateway.service openclaw-audit.timer openclaw-audit.service >/dev/null || true
+        run_user_systemctl disable openclaw-gateway.service openclaw-audit.timer >/dev/null || true
+        info "  Stopped and disabled user units: openclaw-gateway.service, openclaw-audit.timer, openclaw-audit.service"
+    else
+        warn "  The user manager of $OC_USER is not reachable; nothing could be stopped through it"
+        warn "  If an old gateway is still running, stop it: pkill -u $OC_USER -f 'openclaw.*gateway'"
+    fi
+
+    # Removed by the account itself: root does not delete inside its home.
+    oc_run rm -f -- \
+        "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service" \
+        "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service.d/hardening.conf" \
+        "$LEGACY_USER_UNIT_DIR/openclaw-audit.service" \
+        "$LEGACY_USER_UNIT_DIR/openclaw-audit.timer" \
+        "$LEGACY_USER_UNIT_DIR/default.target.wants/openclaw-gateway.service" \
+        "$LEGACY_USER_UNIT_DIR/timers.target.wants/openclaw-audit.timer" \
+        "$LEGACY_AUDIT_SCRIPT" || \
+        warn "  Could not remove every legacy file as $OC_USER; remove what is left by hand"
+    oc_run rmdir -- "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service.d" 2>/dev/null || true
+    if [[ "$(oc_file_state "$LEGACY_USER_UNIT_DIR/openclaw-gateway.service.d")" != missing ]]; then
+        warn "  $LEGACY_USER_UNIT_DIR/openclaw-gateway.service.d still holds files this script did not write"
+        warn "  They no longer apply to anything. Port what you need to $SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT.d/ and delete the directory"
+    fi
+    info "  Removed legacy unit files, hardening drop-in and $LEGACY_AUDIT_SCRIPT"
+
+    if run_user_systemctl daemon-reload; then
+        info "  Reloaded the user manager of $OC_USER"
+    fi
+    if [[ -n "$LEGACY_GATEWAY_STATE" ]]; then
+        warn "  The legacy gateway was $LEGACY_GATEWAY_STATE and is now stopped and disabled."
+        warn "  Start its replacement when this run has finished: systemctl enable --now $GATEWAY_UNIT"
+    fi
+    msg "Legacy user-level units retired for $OC_USER"
+fi
+
+# --- Root-owned launcher: loads the env file as the service account ---
+# A system unit's EnvironmentFile= is parsed by systemd as root and follows
+# symlinks, so pointing it at the account-writable $OC_ENV_FILE would let the
+# account feed any root-readable KEY=VALUE file into its own environment.
+# The unit instead starts this launcher (as $OC_USER, inside the sandbox),
+# which reads the file as plain data and execs the real command.
+install -d -o root -g root -m 0755 "$OC_LIBEXEC_DIR"
+[[ ! -L "$OC_LIBEXEC_DIR" && "$(stat -c %u -- "$OC_LIBEXEC_DIR")" == 0 ]] || \
+    err "$OC_LIBEXEC_DIR must be a real root-owned directory"
+
+cat > "$ROOT_TMP/openclaw-env-exec" <<'LAUNCHER_EOF'
+#!/usr/bin/bash
 # =============================================================================
-# Hardened systemd user service for OpenClaw Gateway
+# openclaw-env-exec: load a KEY=VALUE file as data, then exec a command
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 #
-# This service runs as user '$OC_USER' (not root).
-# Manage with: systemctl --user start|stop|restart openclaw-gateway
-# View logs:   journalctl --user -u openclaw-gateway -f
+# Usage: openclaw-env-exec [--only KEY] ENV_FILE COMMAND [ARG...]
+#
+# ~/.openclaw/.env is writable by the OpenClaw service account. The systemd
+# units run this launcher AS that account, inside the unit's sandbox, so
+# nothing privileged ever parses the file. Every line is handled as data:
+#   - blank lines and lines starting with '#' or ';' are skipped
+#   - an optional leading "export " is dropped
+#   - the line is split at the first '='; KEY must be [A-Za-z_][A-Za-z0-9_]*
+#   - whitespace around KEY and VALUE and ONE pair of matching quotes around
+#     VALUE are stripped (so NODE_OPTIONS=--a=1 --b=2 keeps its spaces)
+#   - nothing is expanded, evaluated or sourced; no escapes, no continuations
+# With --only KEY every other key is ignored.
+# =============================================================================
+
+set -euo pipefail
+
+usage() {
+    printf 'Usage: %s [--only KEY] ENV_FILE COMMAND [ARG...]\n' "${0##*/}" >&2
+    exit 64
+}
+
+only_key=""
+if [[ "${1:-}" == "--only" ]]; then
+    [[ $# -ge 2 ]] || usage
+    only_key=$2
+    shift 2
+fi
+[[ $# -ge 2 ]] || usage
+env_file=$1
+shift
+
+if (( EUID == 0 )); then
+    printf '%s: refusing to run as root\n' "${0##*/}" >&2
+    exit 77
+fi
+if [[ ! -f "$env_file" || ! -r "$env_file" ]]; then
+    printf '%s: environment file %s is missing or unreadable\n' "${0##*/}" "$env_file" >&2
+    exit 78
+fi
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ -z "$line" || "$line" == '#'* || "$line" == ';'* ]]; then
+        continue
+    fi
+    if [[ "$line" == export[[:space:]]* ]]; then
+        line=${line#export}
+        line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "$line" == *=* ]] || continue
+    key=${line%%=*}
+    value=${line#*=}
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [[ -n "$only_key" && "$key" != "$only_key" ]]; then
+        continue
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ ${#value} -ge 2 ]]; then
+        if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+            value=${value:1:${#value}-2}
+        fi
+    fi
+    # Shell-internal read-only names (UID, EUID, PPID, ...) cannot be set.
+    if [[ -v "$key" && "${!key@a}" == *r* ]]; then
+        printf '%s: ignoring read-only variable %s\n' "${0##*/}" "$key" >&2
+        continue
+    fi
+    export "$key=$value"
+done < "$env_file"
+
+exec "$@"
+LAUNCHER_EOF
+install -o root -g root -m 0755 "$ROOT_TMP/openclaw-env-exec" "$OC_ENV_LAUNCHER"
+info "Root-owned env launcher installed: $OC_ENV_LAUNCHER"
+
+GATEWAY_UNIT_AFTER="network-online.target"
+GATEWAY_UNIT_WANTS="network-online.target"
+AUDIT_UNIT_AFTER="network-online.target"
+if [[ "$WITH_APPARMOR" == true ]]; then
+    # AppArmorProfile= fails closed, so the profile must be loaded first.
+    GATEWAY_UNIT_AFTER+=" apparmor.service"
+    AUDIT_UNIT_AFTER+=" apparmor.service"
+fi
+if [[ "$WITH_SANDBOX" == true ]]; then
+    # Rootless Docker lives in the account's user manager. Starting after it
+    # also guarantees /run/user/$USER_UID exists when the drop-in masks the
+    # manager's own sockets in it.
+    GATEWAY_UNIT_AFTER+=" user@${USER_UID}.service"
+    GATEWAY_UNIT_WANTS+=" user@${USER_UID}.service"
+fi
+
+cat > "$SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT" <<EOF
+# =============================================================================
+# Hardened systemd system service for OpenClaw Gateway ($OC_USER)
+# Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
+#
+# Root-owned unit; the process runs as user '$OC_USER' (not root).
+# Manage with: systemctl start|stop|restart $GATEWAY_UNIT
+# View logs:   journalctl -u $GATEWAY_UNIT -f
 # =============================================================================
 
 [Unit]
-Description=OpenClaw AI Agent Gateway (Hardened)
+Description=OpenClaw AI Agent Gateway for $OC_USER (Hardened)
 Documentation=https://docs.openclaw.ai/gateway
-After=network-online.target
-Wants=network-online.target
+After=$GATEWAY_UNIT_AFTER
+Wants=$GATEWAY_UNIT_WANTS
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=$OPENCLAW_BIN gateway
+User=$OC_USER
+Group=$OC_GROUP
+# No EnvironmentFile=: $OC_ENV_FILE is writable by '$OC_USER' and must not be
+# parsed by systemd as root. The launcher loads it as '$OC_USER', as data.
+ExecStart=$OC_ENV_LAUNCHER $OC_ENV_FILE $OPENCLAW_BIN gateway
 WorkingDirectory=$OC_WORKSPACE
-EnvironmentFile=$OC_ENV_FILE
 
 # --- Restart policy ---
 Restart=on-failure
@@ -947,12 +1323,12 @@ StandardError=journal
 SyslogIdentifier=openclaw-gateway
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-chown "$OC_USER:$OC_GROUP" "$SYSTEMD_USER_DIR/openclaw-gateway.service"
-chmod 644 "$SYSTEMD_USER_DIR/openclaw-gateway.service"
-msg "systemd user service created: $SYSTEMD_USER_DIR/openclaw-gateway.service"
+chown root:root "$SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT"
+chmod 644 "$SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT"
+msg "systemd system service created: $SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT"
 
 # -----------------------------------------------------------------------------
 # Step 19: Create systemd hardening drop-in
@@ -960,8 +1336,13 @@ msg "systemd user service created: $SYSTEMD_USER_DIR/openclaw-gateway.service"
 
 msg "Step 19: Creating systemd hardening drop-in..."
 
-DROPIN_DIR="$SYSTEMD_USER_DIR/openclaw-gateway.service.d"
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$DROPIN_DIR"
+# The same drop-in is installed for the gateway and for the weekly audit job
+# (Step 24), so the audit can never run with fewer restrictions than the
+# process whose files it reads.
+DROPIN_DIR="$SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT.d"
+AUDIT_DROPIN_DIR="$SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT.d"
+HARDENING_CONF="$ROOT_TMP/hardening.conf"
+install -d -o root -g root -m 0755 "$DROPIN_DIR"
 
 # Determine RestrictNamespaces based on sandbox
 if [[ "$WITH_SANDBOX" == true ]]; then
@@ -972,17 +1353,34 @@ else
     NAMESPACE_COMMENT="# All namespace creation restricted (no sandbox mode)"
 fi
 
-APPARMOR_DIRECTIVE=""
-if [[ "$WITH_APPARMOR" == true ]]; then
-    APPARMOR_DIRECTIVE="AppArmorProfile=-openclaw-gateway"
+# Keep the account's own user manager out of reach. Its D-Bus and private
+# sockets under /run/user/<uid> accept "run this, unsandboxed, as me" from any
+# process with the same UID (systemd-run --user).
+if [[ "$WITH_SANDBOX" == true ]]; then
+    RUNTIME_DIR_RESTRICTION="InaccessiblePaths=-/run/user/${USER_UID}/bus -/run/user/${USER_UID}/systemd"
+    RUNTIME_DIR_COMMENT="# Rootless Docker needs /run/user/${USER_UID}/docker.sock, so only the user
+# manager's own endpoints are masked. NOTE: the Docker socket itself still
+# lets the gateway start containers outside this unit's sandbox (see README)."
+else
+    RUNTIME_DIR_RESTRICTION="InaccessiblePaths=/run/user"
+    RUNTIME_DIR_COMMENT="# Nothing here needs a per-user runtime directory: hide all of /run/user, so a
+# user manager is unreachable even if it is started after this service."
 fi
 
-cat > "$DROPIN_DIR/hardening.conf" <<EOF
+# Fail closed: without the '-' prefix a missing profile stops the service
+# instead of silently running unconfined. Ignored when AppArmor is disabled.
+APPARMOR_DIRECTIVE=""
+if [[ "$WITH_APPARMOR" == true ]]; then
+    APPARMOR_DIRECTIVE="AppArmorProfile=openclaw-gateway"
+fi
+
+cat > "$HARDENING_CONF" <<EOF
 # =============================================================================
-# systemd hardening drop-in for OpenClaw Gateway
+# systemd hardening drop-in for OpenClaw ($OC_USER)
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 #
 # These directives apply defense-in-depth sandboxing to the OpenClaw process.
+# Installed for both $GATEWAY_UNIT and $AUDIT_UNIT.
 # Note: MemoryDenyWriteExecute=no is required because Node.js V8 JIT
 # needs writable+executable memory pages for just-in-time compilation.
 # =============================================================================
@@ -995,6 +1393,10 @@ ReadWritePaths=$OC_DIR
 PrivateTmp=yes
 PrivateDevices=yes
 UMask=077
+
+# --- User manager isolation ---
+$RUNTIME_DIR_COMMENT
+$RUNTIME_DIR_RESTRICTION
 
 # --- Kernel protection ---
 ProtectKernelTunables=yes
@@ -1030,36 +1432,40 @@ SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 # --- Protect proc/sys ---
+# The pid-only /proc subset (ProcSubset=) is deliberately NOT enabled. It
+# removes /proc/cpuinfo, /proc/meminfo and /proc/stat, and Node.js then reports
+# zero CPUs (os.cpus().length == 0), which breaks worker-pool sizing.
+# ProtectProc=invisible still hides every other user's processes.
 ProtectProc=invisible
-ProcSubset=pid
 ProtectHostname=yes
 EOF
 
-chown -R "$OC_USER:$OC_GROUP" "$DROPIN_DIR"
-chmod 644 "$DROPIN_DIR/hardening.conf"
+install -o root -g root -m 0644 "$HARDENING_CONF" "$DROPIN_DIR/hardening.conf"
 msg "Hardening drop-in created: $DROPIN_DIR/hardening.conf"
 
-run_user_systemctl() {
-    systemctl --machine="${OC_USER}@" --user "$@" 2>/dev/null || \
-        runuser -u "$OC_USER" -- env \
-            XDG_RUNTIME_DIR="/run/user/${USER_UID}" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${USER_UID}/bus" \
-            systemctl --user "$@" 2>/dev/null
-}
-
-# Reload systemd for the user
-# We need loginctl enable-linger for user services to persist
-if command -v loginctl &>/dev/null; then
-    loginctl enable-linger "$OC_USER" 2>/dev/null || \
-        warn "Failed to enable linger for $OC_USER (user services may not persist after logout)"
+# Rootless Docker runs inside the account's user manager, which must survive
+# logouts and start at boot. Nothing else needs linger any more: the gateway
+# and the audit timer are system units.
+if [[ "$WITH_SANDBOX" == true ]]; then
+    if command -v loginctl &>/dev/null; then
+        loginctl enable-linger "$OC_USER" 2>/dev/null || \
+            warn "Failed to enable linger for $OC_USER (rootless Docker may not be running after a reboot)"
+    fi
+elif [[ -e "/var/lib/systemd/linger/$OC_USER" ]]; then
+    info "Linger is enabled for $OC_USER and was left unchanged."
+    info "The gateway no longer needs a user manager; if nothing else does, turn it off:"
+    info "  loginctl disable-linger $OC_USER"
 fi
 
-# Reload user daemon
-if run_user_systemctl daemon-reload; then
-    msg "systemd user daemon reloaded for $OC_USER"
+# Reload the system manager so it sees the new units
+if systemctl daemon-reload; then
+    msg "systemd daemon reloaded"
 else
-    warn "Could not reload user daemon (user session may not be active)"
-    warn "Run manually: systemctl --machine=${OC_USER}@ --user daemon-reload"
+    warn "Could not reload systemd; run manually: systemctl daemon-reload"
+fi
+if systemctl is-active --quiet "$GATEWAY_UNIT" 2>/dev/null; then
+    warn "$GATEWAY_UNIT is running with its previous settings"
+    warn "Apply this run's changes when it has finished: systemctl restart $GATEWAY_UNIT"
 fi
 
 echo
@@ -1147,13 +1553,9 @@ echo -e "${C_BLUE}--- Phase 11: AppArmor Profile ---${C_NC}"
 if [[ "$WITH_APPARMOR" == true ]]; then
     msg "Step 21: Creating AppArmor confinement profile..."
 
-    APPARMOR_DIR="/etc/apparmor.d"
-
     if [[ -d "$APPARMOR_DIR" ]]; then
-        # Resolve node and OpenClaw binary paths
-        NODE_BIN=$(command -v node 2>/dev/null || echo "/usr/bin/node")
-        NODE_BIN_REAL=$(realpath "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")
-        OPENCLAW_BIN_REAL=$(realpath "$OPENCLAW_BIN" 2>/dev/null || echo "$OPENCLAW_BIN")
+        # NODE_BIN, NODE_BIN_REAL and OPENCLAW_BIN_REAL were resolved and
+        # checked before any state was changed (see Phase 1).
 
         SANDBOX_APPARMOR_RULES=""
         if [[ "$WITH_SANDBOX" == true ]]; then
@@ -1170,11 +1572,17 @@ if [[ "$WITH_APPARMOR" == true ]]; then
 #
 # This profile confines the OpenClaw Node.js process to:
 #   - Read access to Node.js binary, OpenClaw CLI, and system libraries
+#   - Execute (inherit this profile) only: node, env, bash/sh/dash, the
+#     OpenClaw launcher and the two root-owned helpers of this script
 #   - Read/write access to ~/.openclaw/ only (with .env and credentials read-only)
 #   - Network access for WebSocket (gateway) and HTTPS (API calls)
 #   - Deny mount, ptrace, raw network, and sensitive paths
-# This profile is unattached (applied via AppArmorProfile=-openclaw-gateway or
-# aa-exec -p openclaw-gateway) so host-wide /usr/bin/node and npm stay unconfined.
+# This profile is unattached (applied via AppArmorProfile=openclaw-gateway in
+# the root-owned system units, or aa-exec -p openclaw-gateway) so host-wide
+# /usr/bin/node and npm stay unconfined.
+#
+# Site additions (for example extra tools the agent may execute) belong in
+# /etc/apparmor.d/local/openclaw-gateway, which this script never overwrites.
 # =============================================================================
 
 abi <abi/3.0>,
@@ -1199,19 +1607,35 @@ profile openclaw-gateway flags=(enforce) {
   deny network packet,
 
   # ---- Node.js binary and libraries ----
-  $NODE_BIN_REAL                              mr,
-  $NODE_BIN                                   mr,
+  # 'ix' = execute and stay in this profile. Without an exec rule the gateway
+  # cannot start at all; a transition to another profile ('px'/'cx'/'ux') would
+  # be refused under NoNewPrivileges=yes and must not be used here.
+  $NODE_BIN_REAL                              mrix,
+  $NODE_BIN                                   mrix,
   /usr/lib/**                                 mr,
   /usr/lib/node_modules/**                    mr,
   /usr/local/lib/node_modules/**              mr,
   /usr/share/nodejs/**                        r,
 
+  # ---- Interpreters behind the launchers ----
+  # The OpenClaw entry point is a '#!/usr/bin/env node' script or a pnpm
+  # '/bin/sh' shim, and the helpers below are Bash scripts.
+  /usr/bin/env                                mrix,
+  /usr/bin/{bash,sh,dash}                     mrix,
+
+  # ---- Root-owned helpers installed by this script ----
+  $OC_ENV_LAUNCHER                            rix,
+  $AUDIT_SCRIPT                               rix,
+  # Log housekeeping of the weekly audit helper (nothing else is executable;
+  # further tools are a site decision for local/openclaw-gateway).
+  /usr/bin/{mkdir,rm}                         mrix,
+
   # ---- OpenClaw installation (pnpm global or local) ----
-  $OPENCLAW_BIN                               mr,
-  $OPENCLAW_BIN_REAL                          mr,
+  $OPENCLAW_BIN                               mrix,
+  $OPENCLAW_BIN_REAL                          mrix,
   $OC_HOME/.local/share/pnpm/**               mr,
-  $OC_HOME/.local/bin/openclaw                mr,
-  /usr/local/bin/openclaw                     mr,
+  $OC_HOME/.local/bin/openclaw                mrix,
+  /usr/local/bin/openclaw                     mrix,
 $SANDBOX_APPARMOR_RULES
 
   # ---- OpenClaw data directory ----
@@ -1277,6 +1701,9 @@ $SANDBOX_APPARMOR_RULES
   deny /tmp/**                                x,
   deny /var/tmp/**                            x,
   deny $OC_WORKSPACE/**                       x,
+
+  # ---- Site-specific additions (never overwritten by this script) ----
+  include if exists <local/openclaw-gateway>
 }
 EOF
 
@@ -1284,21 +1711,29 @@ EOF
         msg "AppArmor profile created: $APPARMOR_DIR/openclaw-gateway"
 
         # Load the unattached profile if AppArmor is active (flags=(enforce) sets enforce mode)
+        # The units name AppArmorProfile=openclaw-gateway without the '-'
+        # prefix: with AppArmor enabled they do not start unless it is loaded.
         if command -v apparmor_parser &>/dev/null; then
             if apparmor_parser -r -W "$APPARMOR_DIR/openclaw-gateway" 2>/dev/null; then
                 msg "AppArmor profile 'openclaw-gateway' loaded in ENFORCE mode"
+                info "$GATEWAY_UNIT and $AUDIT_UNIT are bound to it and fail closed without it"
             else
                 warn "Failed to parse AppArmor profile (AppArmor may not be active)"
                 warn "Ensure AppArmor is installed and enabled: systemctl enable --now apparmor"
+                warn "With AppArmor enabled, $GATEWAY_UNIT and $AUDIT_UNIT will NOT start until"
+                warn "the profile loads: apparmor_parser -r /etc/apparmor.d/openclaw-gateway"
             fi
         else
             warn "apparmor_parser not found — profile written but not loaded"
             warn "Install AppArmor: pacman -S apparmor"
             warn "Then load: apparmor_parser -r /etc/apparmor.d/openclaw-gateway"
+            warn "With AppArmor enabled, $GATEWAY_UNIT and $AUDIT_UNIT will NOT start until then"
         fi
 
         info "AppArmor policy summary:"
         info "  ALLOW: Node.js binary, system libs, TLS certs"
+        info "  EXEC:  node, env, bash/sh/dash, openclaw and this script's helpers only (ix)"
+        info "         Other tools: add rules to /etc/apparmor.d/local/openclaw-gateway"
         info "  ALLOW: Read/write to $OC_DIR/ only"
         info "  ALLOW: Network inet/inet6 stream (WebSocket + HTTPS)"
         info "  DENY:  mount, ptrace, raw network"
@@ -1310,6 +1745,8 @@ EOF
         warn "AppArmor directory $APPARMOR_DIR does not exist"
         warn "Install AppArmor first: pacman -S apparmor"
         warn "Then run the apparmor hardening script"
+        warn "The units already name AppArmorProfile=openclaw-gateway: once AppArmor is"
+        warn "enabled they will not start until this script has been re-run"
     fi
 else
     info "Step 21: AppArmor not requested (use --with-apparmor to enable)"
@@ -1336,8 +1773,8 @@ else
     msg "Initialized git repo in $OC_WORKSPACE"
 fi
 
-# Create a .gitignore for the workspace
-cat > "$OC_WORKSPACE/.gitignore" <<'EOF'
+# Create a .gitignore for the workspace (written by the account, atomically)
+oc_write_file 0644 "$OC_WORKSPACE/.gitignore" <<'EOF'
 # OpenClaw workspace .gitignore
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 
@@ -1370,8 +1807,6 @@ build/
 *.tgz
 EOF
 
-chown "$OC_USER:$OC_GROUP" "$OC_WORKSPACE/.gitignore"
-chmod 0644 "$OC_WORKSPACE/.gitignore"
 info "Created $OC_WORKSPACE/.gitignore"
 
 # Initial commit
@@ -1406,9 +1841,7 @@ if [[ -n "$AUDIT_OUTPUT" ]]; then
 
     # Save both successful results and diagnostics from a failed audit.
     AUDIT_FILE="$OC_DIR/security-audit-$(date +%Y%m%d-%H%M%S).log"
-    ( umask 077 && printf '%s\n' "$AUDIT_OUTPUT" > "$AUDIT_FILE" )
-    chown "$OC_USER:$OC_GROUP" "$AUDIT_FILE"
-    chmod 600 "$AUDIT_FILE"
+    printf '%s\n' "$AUDIT_OUTPUT" | oc_write_file 0600 "$AUDIT_FILE"
     info "Audit results saved to: $AUDIT_FILE"
 fi
 
@@ -1428,81 +1861,108 @@ fi
 
 msg "Step 24: Creating weekly security audit systemd timer..."
 
-# Audit script
-AUDIT_SCRIPT="$OC_HOME/.local/bin/openclaw-security-audit.sh"
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$OC_HOME/.local" "$OC_HOME/.local/bin"
-
-cat > "$AUDIT_SCRIPT" <<'AUDIT_SCRIPT_EOF'
-#!/usr/bin/env bash
+# Audit script: root-owned and outside the account's home. The job reads files
+# the gateway can write (openclaw.json, plugins), so it runs as $OC_USER under
+# the same sandbox drop-in as the gateway and never loads $OC_ENV_FILE as a
+# whole: only OPENCLAW_GATEWAY_TOKEN is extracted, as data, by the launcher.
+cat > "$ROOT_TMP/openclaw-security-audit" <<'AUDIT_SCRIPT_EOF'
+#!/usr/bin/bash
 # =============================================================================
 # Automated OpenClaw security audit
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 #
-# Runs weekly via systemd timer: openclaw-audit.timer
+# Usage: openclaw-security-audit OC_DIR OPENCLAW_BIN
+#
+# Runs weekly via the root-owned system timer openclaw-audit-<user>.timer, as
+# the OpenClaw service account and inside the same sandbox as the gateway.
 # Results are logged and old logs are rotated.
 # =============================================================================
 
 set -euo pipefail
-
-AUDIT_SCRIPT_EOF
-
-cat >> "$AUDIT_SCRIPT" <<EOF
 umask 077
-OC_DIR=$(printf '%q' "$OC_DIR")
-OPENCLAW_BIN=$(printf '%q' "$OPENCLAW_BIN")
-AUDIT_LOG_DIR="\$OC_DIR/audit-logs"
-AUDIT_LOG="\$AUDIT_LOG_DIR/security-audit-\$(date +%Y%m%d-%H%M%S).log"
 
-mkdir -p "\$AUDIT_LOG_DIR"
+if [[ $# -ne 2 ]]; then
+    printf 'Usage: %s OC_DIR OPENCLAW_BIN\n' "${0##*/}" >&2
+    exit 64
+fi
+if (( EUID == 0 )); then
+    printf '%s: refusing to run the OpenClaw CLI as root\n' "${0##*/}" >&2
+    exit 77
+fi
 
-echo "=== OpenClaw Security Audit: \$(date) ===" >> "\$AUDIT_LOG"
-echo "" >> "\$AUDIT_LOG"
+OC_DIR=$1
+OPENCLAW_BIN=$2
+AUDIT_LOG_DIR="$OC_DIR/audit-logs"
+printf -v AUDIT_STAMP '%(%Y%m%d-%H%M%S)T' -1
+AUDIT_LOG="$AUDIT_LOG_DIR/security-audit-$AUDIT_STAMP.log"
 
-if [[ -x "\$OPENCLAW_BIN" ]]; then
+mkdir -p -- "$AUDIT_LOG_DIR"
+
+printf '=== OpenClaw Security Audit: %(%c)T ===\n' -1 >> "$AUDIT_LOG"
+echo "" >> "$AUDIT_LOG"
+
+if [[ -x "$OPENCLAW_BIN" ]]; then
     audit_status=0
-    "\$OPENCLAW_BIN" security audit --deep >> "\$AUDIT_LOG" 2>&1 || audit_status=1
-    echo "" >> "\$AUDIT_LOG"
-    "\$OPENCLAW_BIN" doctor >> "\$AUDIT_LOG" 2>&1 || audit_status=1
+    "$OPENCLAW_BIN" security audit --deep >> "$AUDIT_LOG" 2>&1 || audit_status=1
+    echo "" >> "$AUDIT_LOG"
+    "$OPENCLAW_BIN" doctor >> "$AUDIT_LOG" 2>&1 || audit_status=1
 else
-    echo "ERROR: openclaw CLI not found in PATH" >> "\$AUDIT_LOG"
+    echo "ERROR: openclaw CLI not found at $OPENCLAW_BIN" >> "$AUDIT_LOG"
     audit_status=1
 fi
 
-echo "" >> "\$AUDIT_LOG"
-echo "=== Audit complete ===" >> "\$AUDIT_LOG"
+echo "" >> "$AUDIT_LOG"
+echo "=== Audit complete ===" >> "$AUDIT_LOG"
 
-# Rotate: keep last 12 audit logs (12 weeks = ~3 months)
-ls -1t "\$AUDIT_LOG_DIR"/security-audit-*.log 2>/dev/null | tail -n +13 | xargs -r rm -f || true
-exit "\$audit_status"
-EOF
+# Rotate: keep last 12 audit logs (12 weeks = ~3 months). The timestamped
+# names sort chronologically, so the oldest logs come first in the glob.
+LC_COLLATE=C
+shopt -s nullglob
+audit_logs=("$AUDIT_LOG_DIR"/security-audit-*.log)
+if (( ${#audit_logs[@]} > 12 )); then
+    rm -f -- "${audit_logs[@]:0:${#audit_logs[@]}-12}" || true
+fi
+exit "$audit_status"
+AUDIT_SCRIPT_EOF
+install -o root -g root -m 0755 "$ROOT_TMP/openclaw-security-audit" "$AUDIT_SCRIPT"
 
-chmod 755 "$AUDIT_SCRIPT"
-chown "$OC_USER:$OC_GROUP" "$AUDIT_SCRIPT"
+# Root-controlled environment for the audit in sandbox mode (the account's
+# .env is not loaded, so the Docker endpoint is named here).
+AUDIT_UNIT_ENVIRONMENT=""
+if [[ "$WITH_SANDBOX" == true ]]; then
+    AUDIT_UNIT_ENVIRONMENT="Environment=DOCKER_HOST=unix://$SANDBOX_DOCKER_SOCKET OPENCLAW_DOCKER_SOCKET=$SANDBOX_DOCKER_SOCKET"
+fi
 
-# Audit service (user-level)
-cat > "$SYSTEMD_USER_DIR/openclaw-audit.service" <<EOF
-# Weekly OpenClaw security audit service
+# Audit service (root-owned system unit, runs as $OC_USER)
+cat > "$SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT" <<EOF
+# Weekly OpenClaw security audit service ($OC_USER)
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
+#
+# Sandboxed by $AUDIT_UNIT.d/hardening.conf (identical to the gateway's).
 
 [Unit]
-Description=OpenClaw Weekly Security Audit
-After=network-online.target
+Description=OpenClaw Weekly Security Audit for $OC_USER
+After=$AUDIT_UNIT_AFTER
 
 [Service]
 Type=oneshot
-EnvironmentFile=$OC_ENV_FILE
+User=$OC_USER
+Group=$OC_GROUP
+WorkingDirectory=$OC_HOME
 UMask=0077
-ExecStart=$AUDIT_SCRIPT
-PrivateTmp=true
+$AUDIT_UNIT_ENVIRONMENT
+# No EnvironmentFile=: only OPENCLAW_GATEWAY_TOKEN is taken from the
+# account-writable $OC_ENV_FILE, as data, by the root-owned launcher.
+ExecStart=$OC_ENV_LAUNCHER --only OPENCLAW_GATEWAY_TOKEN $OC_ENV_FILE $AUDIT_SCRIPT $OC_DIR $OPENCLAW_BIN
 EOF
 
-# Audit timer (user-level)
-cat > "$SYSTEMD_USER_DIR/openclaw-audit.timer" <<EOF
-# Weekly OpenClaw security audit timer
+# Audit timer (root-owned system unit)
+cat > "$SYSTEMD_SYSTEM_DIR/$AUDIT_TIMER" <<EOF
+# Weekly OpenClaw security audit timer ($OC_USER)
 # Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
 
 [Unit]
-Description=Weekly OpenClaw Security Audit Timer
+Description=Weekly OpenClaw Security Audit Timer for $OC_USER
 
 [Timer]
 OnCalendar=weekly
@@ -1513,26 +1973,31 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-chown "$OC_USER:$OC_GROUP" \
-    "$SYSTEMD_USER_DIR/openclaw-audit.service" \
-    "$SYSTEMD_USER_DIR/openclaw-audit.timer"
+chown root:root \
+    "$SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT" \
+    "$SYSTEMD_SYSTEM_DIR/$AUDIT_TIMER"
 chmod 644 \
-    "$SYSTEMD_USER_DIR/openclaw-audit.service" \
-    "$SYSTEMD_USER_DIR/openclaw-audit.timer"
+    "$SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT" \
+    "$SYSTEMD_SYSTEM_DIR/$AUDIT_TIMER"
+
+# Same sandbox as the gateway (drop-in generated in Step 19)
+install -d -o root -g root -m 0755 "$AUDIT_DROPIN_DIR"
+install -o root -g root -m 0644 "$HARDENING_CONF" "$AUDIT_DROPIN_DIR/hardening.conf"
 
 # Enable the timer
-if run_user_systemctl daemon-reload && \
-   run_user_systemctl enable openclaw-audit.timer && \
-   run_user_systemctl start openclaw-audit.timer; then
-    msg "Enabled and started openclaw-audit.timer for $OC_USER"
+if systemctl daemon-reload && \
+   systemctl enable "$AUDIT_TIMER" && \
+   systemctl start "$AUDIT_TIMER"; then
+    msg "Enabled and started $AUDIT_TIMER"
 else
-    warn "Could not enable audit timer (user session may not be active)"
-    warn "Run manually: systemctl --machine=${OC_USER}@ --user enable --now openclaw-audit.timer"
+    warn "Could not enable the audit timer"
+    warn "Run manually: systemctl enable --now $AUDIT_TIMER"
 fi
 
 msg "Weekly security audit timer created"
-info "Service: $SYSTEMD_USER_DIR/openclaw-audit.service"
-info "Timer:   $SYSTEMD_USER_DIR/openclaw-audit.timer"
+info "Service: $SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT"
+info "Sandbox: $AUDIT_DROPIN_DIR/hardening.conf"
+info "Timer:   $SYSTEMD_SYSTEM_DIR/$AUDIT_TIMER"
 info "Script:  $AUDIT_SCRIPT"
 
 echo
@@ -1551,7 +2016,9 @@ msg "Step 25: Documenting dangerous commands that must NEVER be allowlisted..."
 
 DENYLIST_FILE="$OC_DIR/EXEC_DENYLIST.md"
 
-cat > "$DENYLIST_FILE" <<'DENYLIST_EOF'
+# The timestamp is filled in on the way to the account-side writer; root never
+# opens or edits the file inside $OC_DIR.
+sed "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" <<'DENYLIST_EOF' | oc_write_file 644 "$DENYLIST_FILE"
 # OpenClaw Exec Denylist — Commands That Must NEVER Be Allowlisted
 
 > Generated by AwesomeArchLinux/hardening/openclaw/openclaw.sh
@@ -1658,11 +2125,6 @@ If the AI agent requests any of these commands:
 6. **Run security audit**: `openclaw security audit --deep`
 DENYLIST_EOF
 
-# Replace timestamp placeholder
-sed -i "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" "$DENYLIST_FILE"
-
-chown "$OC_USER:$OC_GROUP" "$DENYLIST_FILE"
-chmod 644 "$DENYLIST_FILE"
 msg "Exec denylist documentation written: $DENYLIST_FILE"
 
 # Print a summary to stdout
@@ -1697,9 +2159,9 @@ else
 fi
 
 HOOKS_DIR="$OC_WORKSPACE/.git/hooks"
-install -d -o "$OC_USER" -g "$OC_GROUP" -m 0755 "$HOOKS_DIR"
+oc_mkdir 0755 "$HOOKS_DIR"
 
-cat > "$HOOKS_DIR/pre-commit" <<'PRECOMMIT_EOF'
+oc_write_file 0755 "$HOOKS_DIR/pre-commit" <<'PRECOMMIT_EOF'
 #!/usr/bin/env bash
 # =============================================================================
 # Pre-commit hook: pure-Bash staged secret scanner (+ optional gitleaks)
@@ -1744,8 +2206,6 @@ if git diff --cached -U0 --diff-filter=ACMR | awk -v pat="$SECRET_REGEX" '
 fi
 PRECOMMIT_EOF
 
-chown "$OC_USER:$OC_GROUP" "$HOOKS_DIR/pre-commit"
-chmod 0755 "$HOOKS_DIR/pre-commit"
 msg "Pure-Bash secret-scanning pre-commit hook installed: $HOOKS_DIR/pre-commit"
 
 echo
@@ -1782,11 +2242,13 @@ echo
 echo -e "${C_BLUE}Generated Files:${C_NC}"
 echo "  Config:              $OC_CONFIG"
 echo "  Environment:         $OC_ENV_FILE"
-echo "  systemd service:     $SYSTEMD_USER_DIR/openclaw-gateway.service"
+echo "  systemd service:     $SYSTEMD_SYSTEM_DIR/$GATEWAY_UNIT (root-owned, User=$OC_USER)"
 echo "  systemd hardening:   $DROPIN_DIR/hardening.conf"
-echo "  Audit service:       $SYSTEMD_USER_DIR/openclaw-audit.service"
-echo "  Audit timer:         $SYSTEMD_USER_DIR/openclaw-audit.timer"
+echo "  Audit service:       $SYSTEMD_SYSTEM_DIR/$AUDIT_UNIT"
+echo "  Audit hardening:     $AUDIT_DROPIN_DIR/hardening.conf"
+echo "  Audit timer:         $SYSTEMD_SYSTEM_DIR/$AUDIT_TIMER"
 echo "  Audit script:        $AUDIT_SCRIPT"
+echo "  Env launcher:        $OC_ENV_LAUNCHER"
 echo "  Log rotation:        $LOGROTATE_CONF"
 echo "  Exec denylist:       $DENYLIST_FILE"
 if [[ "$WITH_FIREWALL" == true ]]; then
@@ -1829,7 +2291,10 @@ echo "  Phase 8:  File Permissions"
 echo "    [16] Permissions: 700 dirs, 600 configs/credentials"
 echo "    [17] Secure env file with API key placeholders"
 echo "  Phase 9:  systemd Hardening"
-echo "    [18] User service: openclaw-gateway.service"
+echo "    [18] System service (root-owned, runs as $OC_USER): $GATEWAY_UNIT"
+if [[ "$LEGACY_UNITS_MIGRATED" == true ]]; then
+echo "         Legacy user-level units retired (details in the Step 18 output above)"
+fi
 echo "    [19] Drop-in: ProtectSystem=strict, NoNewPrivileges, syscall filter"
 echo "  Phase 10: Firewall"
 if [[ "$WITH_FIREWALL" == true ]]; then
@@ -1854,9 +2319,15 @@ echo "    [26] Pure-Bash git pre-commit secret scanner (+ optional gitleaks)"
 echo
 
 echo -e "${C_BLUE}systemd Hardening Summary:${C_NC}"
+echo "  - Root-owned system units; User=$OC_USER, Group=$OC_GROUP (gateway and audit job)"
+echo "  - $OC_ENV_FILE loaded by a root-owned launcher as $OC_USER (no EnvironmentFile=)"
 echo "  - ProtectSystem=strict (read-only /usr, /boot, /etc)"
 echo "  - ProtectHome=read-only (needs read access to ~/.openclaw)"
 echo "  - ReadWritePaths=$OC_DIR only"
+echo "  - $RUNTIME_DIR_RESTRICTION (user manager unreachable)"
+if [[ "$WITH_APPARMOR" == true ]]; then
+echo "  - $APPARMOR_DIRECTIVE (fails closed if the profile is not loaded)"
+fi
 echo "  - PrivateTmp=yes, PrivateDevices=yes"
 echo "  - NoNewPrivileges=yes, LockPersonality=yes"
 echo "  - RestrictSUIDSGID=yes, CapabilityBoundingSet= (empty)"
@@ -1872,8 +2343,14 @@ echo "  - SystemCallFilter deny: @mount @reboot @swap @clock @cpu-emulation @deb
 echo "  - SystemCallArchitectures=native"
 echo "  - MemoryDenyWriteExecute=no (V8 JIT requires W+X pages)"
 echo "  - RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK (outbound HTTPS permitted)"
-echo "  - ProtectProc=invisible, ProcSubset=pid"
+echo "  - ProtectProc=invisible (pid-only /proc subset not used: Node.js needs cpuinfo/meminfo)"
 echo "  - ProtectHostname=yes"
+if [[ "$WITH_SANDBOX" == true ]]; then
+echo
+echo -e "${C_YELLOW}  NOTE: with --with-sandbox the gateway can reach the rootless Docker daemon${C_NC}"
+echo -e "${C_YELLOW}  ($SANDBOX_DOCKER_SOCKET). That daemon runs outside this sandbox as $OC_USER;${C_NC}"
+echo -e "${C_YELLOW}  anything able to use the socket can start containers with host bind mounts.${C_NC}"
+fi
 echo
 
 echo -e "${C_YELLOW}IMPORTANT — Verification Commands:${C_NC}"
@@ -1883,18 +2360,22 @@ echo ""
 echo "  # Run deep security audit"
 echo "  su - $OC_USER -c 'openclaw security audit --deep'"
 echo ""
-echo "  # Start the gateway service"
-echo "  systemctl --machine=${OC_USER}@ --user start openclaw-gateway"
+echo "  # Start the gateway service (system unit, as root)"
+echo "  systemctl start $GATEWAY_UNIT"
 echo ""
 echo "  # Check service status"
-echo "  systemctl --machine=${OC_USER}@ --user status openclaw-gateway"
+echo "  systemctl status $GATEWAY_UNIT"
 echo ""
 echo "  # View gateway logs"
-echo "  systemctl --machine=${OC_USER}@ --user status openclaw-gateway --no-pager"
-echo "  su - $OC_USER -c 'journalctl --user -u openclaw-gateway -f'"
+echo "  systemctl status $GATEWAY_UNIT --no-pager"
+echo "  journalctl -u $GATEWAY_UNIT -f"
 echo ""
-echo "  # Check audit timer"
-echo "  systemctl --machine=${OC_USER}@ --user list-timers openclaw-audit.timer"
+echo "  # Review the sandbox systemd actually applies"
+echo "  systemd-analyze security $GATEWAY_UNIT"
+echo ""
+echo "  # Check audit timer and the last audit run"
+echo "  systemctl list-timers $AUDIT_TIMER"
+echo "  journalctl -u $AUDIT_UNIT -n 20 --no-pager"
 echo ""
 echo "  # Verify AppArmor (if enabled)"
 echo "  aa-status 2>/dev/null | grep openclaw"
@@ -1925,8 +2406,12 @@ echo "     openclaw approvals allowlist add /usr/bin/cmd # Add exact binary"
 echo "     openclaw approvals allowlist remove /usr/bin/cmd"
 echo "     NEVER approve destructive commands (see $DENYLIST_FILE)"
 echo ""
-echo "  4. Start the gateway:"
-echo "     su - $OC_USER -c 'systemctl --user enable --now openclaw-gateway'"
+echo "  4. Start the gateway (root-owned system unit; it runs as $OC_USER):"
+echo "     systemctl enable --now $GATEWAY_UNIT"
+if [[ -n "$LEGACY_GATEWAY_STATE" ]]; then
+echo "     The legacy user-level gateway ($LEGACY_GATEWAY_STATE before this run) was"
+echo "     stopped and disabled; nothing is serving until you run the command above."
+fi
 echo ""
 if [[ "$WITH_SANDBOX" != true ]]; then
 echo "  5. Consider enabling Docker sandbox for stronger isolation:"
@@ -1948,7 +2433,7 @@ echo -e "${C_RED}INCIDENT RESPONSE — Quick Reference:${C_NC}"
 echo "  If you suspect the AI agent has been compromised:"
 echo ""
 echo "  1. STOP the gateway immediately:"
-echo "     su - $OC_USER -c 'systemctl --user stop openclaw-gateway'"
+echo "     systemctl stop $GATEWAY_UNIT"
 echo ""
 echo "  2. Revoke the gateway token:"
 echo "     Generate a new token and update $OC_ENV_FILE"
@@ -1968,7 +2453,8 @@ echo "     su - $OC_USER -c 'openclaw security audit --deep'"
 echo ""
 echo "  7. Check system for persistence mechanisms:"
 echo "     crontab -l -u $OC_USER"
-echo "     systemctl --user list-units --type=service"
+echo "     systemctl list-units 'openclaw-*'"
+echo "     ls -la $OC_HOME/.config/systemd/user/   # units here run UNSANDBOXED as $OC_USER; expect none"
 echo "     ls -la /tmp/ /var/tmp/"
 echo ""
 echo "  8. Review nftables/iptables for unauthorized rules:"

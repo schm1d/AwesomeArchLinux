@@ -224,7 +224,7 @@ Good companion components for a hardened Arch workstation:
 
 Optional, depending on workflow:
 - `utils/zram.sh` (`zram-generator`)
-- `utils/cpufreq.sh` (`linux-cpupower`)
+- `utils/cpufreq.sh` (`cpupower`)
 - `utils/iosched.sh` (udev BFQ / mq-deadline / none)
 - `utils/vaapi.sh` (VA-API / VDPAU)
 - `hardening/browser/browser.sh` (enterprise policies)

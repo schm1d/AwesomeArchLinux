@@ -13,7 +13,8 @@
 #
 # Usage:       sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME]
 #                                  [-n NUM_CLIENTS] [-d DNS] [-e ENDPOINT]
-#                                  [--add-client NAME] [--force] [-h]
+#                                  [--add-client NAME] [--block-ipv6]
+#                                  [--force] [-h]
 #
 # Requirements:
 #   - Arch Linux with pacman
@@ -65,7 +66,9 @@ DNS="9.9.9.9,149.112.112.112"
 DNS_EXPLICIT=false
 ENDPOINT_OVERRIDE=""
 ADD_CLIENT_NAME=""
+BLOCK_IPV6=false
 FORCE=false
+CLIENT_ALLOWED_IPS="0.0.0.0/0"
 WG_DIR="/etc/wireguard"
 WG_CONF="$WG_DIR/wg0.conf"
 CLIENT_DIR="$WG_DIR/clients"
@@ -85,6 +88,9 @@ Options:
   -d DNS             DNS servers for clients (default: $DNS)
   -e ENDPOINT        Public IPv4 or DNS hostname for client Endpoint (overrides auto-detect)
   --add-client NAME  Add a single new client peer to an existing wg0.conf safely
+  --block-ipv6       Also route the clients' IPv6 traffic into the tunnel
+                     (AllowedIPs = 0.0.0.0/0, ::/0). The tunnel is IPv4-only, so
+                     IPv6 is dropped instead of leaking around the VPN
   --force            Back up existing wg0.conf and overwrite existing configs/keys
   -h, --help         Show this help
 
@@ -108,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         -d)           need_arg "$@"; DNS="$2"; DNS_EXPLICIT=true; shift 2 ;;
         -e)           need_arg "$@"; ENDPOINT_OVERRIDE="$2"; shift 2 ;;
         --add-client) need_arg "$@"; ADD_CLIENT_NAME="$2"; shift 2 ;;
+        --block-ipv6) BLOCK_IPV6=true; shift ;;
         --force)      FORCE=true; shift ;;
         -h|--help)    usage ;;
         *)            err "Unknown option: $1" ;;
@@ -163,6 +170,9 @@ validate_dns_list() {
     local list="$1" entry
     local -a entries=()
     [[ -n "$list" && "$list" != ,* && "$list" != *, && "$list" != *,,* ]] || return 1
+    # The read below consumes one line only; anything after a line break would
+    # reach the client configs unchecked.
+    [[ "$list" != *$'\n'* && "$list" != *$'\r'* ]] || return 1
     IFS=',' read -r -a entries <<< "$list"
     (( ${#entries[@]} >= 1 )) || return 1
     for entry in "${entries[@]}"; do
@@ -180,6 +190,8 @@ validate_dns_list() {
 [[ $(id -u) -eq 0 ]] || err "Must be run as root"
 [[ "$NUM_CLIENTS" =~ ^[1-9][0-9]*$ ]] || err "NUM_CLIENTS must be a positive integer"
 [[ "$WG_PORT" =~ ^[0-9]+$ ]] && (( 10#$WG_PORT >= 1 && 10#$WG_PORT <= 65535 )) || err "PORT must be 1-65535"
+# Canonical decimal form: nft reads a leading zero as octal, wg-quick does not.
+WG_PORT=$((10#$WG_PORT))
 [[ "$CLIENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && "$CLIENT_NAME" != "server" ]] || \
     err "CLIENT_NAME may contain only letters, digits, '_' and '-', and must not be 'server'"
 validate_dns_list "$DNS" || err "DNS must be a comma-separated list of valid IPv4/IPv6 addresses: $DNS"
@@ -190,16 +202,27 @@ if [[ -n "$ADD_CLIENT_NAME" ]]; then
     [[ "$ADD_CLIENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && "$ADD_CLIENT_NAME" != "server" ]] || \
         err "Invalid --add-client name: $ADD_CLIENT_NAME"
 fi
+# The server only routes IPv4 inside the tunnel. With ::/0 in the clients'
+# AllowedIPs their IPv6 traffic is sent into the tunnel and dropped there
+# instead of leaving through the local network next to the VPN.
+if [[ "$BLOCK_IPV6" == true ]]; then
+    CLIENT_ALLOWED_IPS="0.0.0.0/0, ::/0"
+fi
 
 # --- Derive subnet values ---
-SUBNET_BASE="${WG_SUBNET%/*}"
-SUBNET_PREFIX="${WG_SUBNET#*/}"
-[[ "$WG_SUBNET" == */* && "$SUBNET_PREFIX" =~ ^[0-9]+$ ]] || err "Invalid IPv4 CIDR: $WG_SUBNET"
-(( 10#$SUBNET_PREFIX >= 8 && 10#$SUBNET_PREFIX <= 30 )) || err "WireGuard subnet prefix must be /8 through /30"
+# The complete value is matched at once: it is written into nftables rules, and
+# splitting it first would validate only its first line.
+[[ "$WG_SUBNET" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || \
+    err "Invalid IPv4 CIDR: $WG_SUBNET"
+OCT1="${BASH_REMATCH[1]}"
+OCT2="${BASH_REMATCH[2]}"
+OCT3="${BASH_REMATCH[3]}"
+OCT4="${BASH_REMATCH[4]}"
+SUBNET_PREFIX=$((10#${BASH_REMATCH[5]}))
+(( SUBNET_PREFIX >= 8 && SUBNET_PREFIX <= 30 )) || err "WireGuard subnet prefix must be /8 through /30"
 
-IFS='.' read -r OCT1 OCT2 OCT3 OCT4 <<< "$SUBNET_BASE"
 for octet in "$OCT1" "$OCT2" "$OCT3" "$OCT4"; do
-    [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || err "Invalid IPv4 CIDR: $WG_SUBNET"
+    (( 10#$octet <= 255 )) || err "Invalid IPv4 CIDR: $WG_SUBNET"
 done
 
 ipv4_to_int() {
@@ -217,6 +240,8 @@ SUBNET_INT=$(ipv4_to_int "$OCT1" "$OCT2" "$OCT3" "$OCT4")
 HOST_COUNT=$(( 1 << (32 - SUBNET_PREFIX) ))
 NETMASK=$(( (0xFFFFFFFF << (32 - SUBNET_PREFIX)) & 0xFFFFFFFF ))
 (( (SUBNET_INT & NETMASK) == SUBNET_INT )) || err "$WG_SUBNET is not a network address"
+# Canonical form without leading zeros for nftables and the summary.
+WG_SUBNET="$(ipv4_from_int "$SUBNET_INT")/${SUBNET_PREFIX}"
 
 SERVER_IP=$(ipv4_from_int "$(( SUBNET_INT + 1 ))")
 SERVER_ADDR="${SERVER_IP}/${SUBNET_PREFIX}"
@@ -224,9 +249,50 @@ SERVER_ADDR="${SERVER_IP}/${SUBNET_PREFIX}"
 MAX_CLIENTS=$(( HOST_COUNT - 3 ))
 (( NUM_CLIENTS <= MAX_CLIENTS )) || err "Subnet too small for $NUM_CLIENTS clients (max $MAX_CLIENTS)"
 
+# Succeeds when the IPv4 CIDR (or bare address) in $1 overlaps the VPN subnet.
+overlaps_vpn_subnet() {
+    local cidr="$1" prefix=32 other_int mask
+    if [[ "$cidr" == */* ]]; then
+        prefix="${cidr#*/}"
+        [[ "$prefix" =~ ^[0-9]{1,2}$ ]] || return 1
+        prefix=$((10#$prefix))
+        (( prefix <= 32 )) || return 1
+    fi
+    [[ "${cidr%/*}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    other_int=$(ipv4_to_int "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}")
+    # Two networks overlap when they agree under the shorter of the two masks.
+    (( prefix <= SUBNET_PREFIX )) || prefix=$SUBNET_PREFIX
+    mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    (( (other_int & mask) == (SUBNET_INT & mask) ))
+}
+
+# Prints the first address or route of this host (other than wg0 itself) that
+# overlaps the VPN subnet, or nothing.
+find_vpn_subnet_conflict() {
+    local cidr origin
+    while read -r cidr origin; do
+        if overlaps_vpn_subnet "$cidr"; then
+            printf '%s (%s)\n' "$cidr" "$origin"
+            return 0
+        fi
+    done < <(
+        ip -4 -o addr show 2>/dev/null | awk '$2 != "wg0" && $2 != "lo" { print $4, "address on " $2 }' || true
+        ip -4 route show 2>/dev/null | awk '$1 != "default" {
+            dev = ""
+            for (i = 1; i < NF; i++) if ($i == "dev") dev = $(i + 1)
+            if (dev != "" && dev != "wg0" && dev != "lo") print $1, "route via " dev
+        }' || true
+    )
+    return 0
+}
+
 # Auto-detect default network interface and public IP (pipefail-safe).
 # Error checks run AFTER EXISTING_ENDPOINT_HOST fallback in --add-client mode.
-DEFAULT_IF=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+# The interface is the word after "dev"; its position varies ("default dev
+# ppp0 scope link" has no "via", multipath routes list it per nexthop).
+DEFAULT_IF=$(ip -4 route show default 2>/dev/null | awk '{
+    for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }
+}')
 DETECTED_IP=""
 if [[ -n "$DEFAULT_IF" ]]; then
     DETECTED_IP=$(ip -4 -o addr show dev "$DEFAULT_IF" 2>/dev/null | awk '{ split($4, a, "/"); if (a[1] != "") { print a[1]; exit } }')
@@ -282,6 +348,13 @@ if [[ -n "$ADD_CLIENT_NAME" ]]; then
     fi
     [[ -n "$SERVER_PUBLIC_IP" ]] || \
         err "Could not detect server Endpoint IP/hostname; specify -e ENDPOINT"
+
+    # Keep the IPv6 handling the existing clients were generated with.
+    if [[ "$BLOCK_IPV6" == false ]] && \
+        grep -Eqs '^[[:space:]]*AllowedIPs[[:space:]]*=.*::/0' "$CLIENT_DIR"/*.conf; then
+        BLOCK_IPV6=true
+        CLIENT_ALLOWED_IPS="0.0.0.0/0, ::/0"
+    fi
 
     if [[ "$DNS_EXPLICIT" == false ]]; then
         EXISTING_DNS=$(awk -F'=' '/^[[:space:]]*DNS[[:space:]]*=/ {
@@ -377,7 +450,7 @@ DNS = $DNS
 PublicKey = $SERVER_PUBLIC_KEY
 PresharedKey = $PRESHARED_KEY
 Endpoint = ${SERVER_PUBLIC_IP}:${EX_PORT}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = $CLIENT_ALLOWED_IPS
 PersistentKeepalive = 25
 EOF
         cat >> "$WG_CONF" <<EOF
@@ -417,7 +490,18 @@ EOF
 fi
 
 [[ -n "$DEFAULT_IF" ]] || err "Could not detect default IPv4 network interface"
+ip link show dev "$DEFAULT_IF" &>/dev/null || \
+    err "Default route points at '$DEFAULT_IF', which is not a network interface on this host"
 [[ -n "$SERVER_PUBLIC_IP" ]] || err "Could not detect server IPv4 address on $DEFAULT_IF; specify -e ENDPOINT"
+
+# wg-quick adds a route for the VPN subnet through wg0. If the server's own
+# network (or a container bridge) uses an overlapping range, replies to that
+# network would go into the tunnel and the server drops off its LAN, taking
+# the SSH session with it. Refuse before anything is installed or changed.
+SUBNET_CONFLICT=$(find_vpn_subnet_conflict)
+if [[ -n "$SUBNET_CONFLICT" ]]; then
+    err "VPN subnet $WG_SUBNET overlaps $SUBNET_CONFLICT. Choose an unused private range with -s, for example -s 10.66.66.0/24."
+fi
 
 # =============================================================================
 # PROTECT EXISTING KEYS AND CONFIGS UNLESS --force IS PASSED
@@ -448,6 +532,7 @@ info "Default interface: $DEFAULT_IF"
 info "Client base name:  $CLIENT_NAME"
 info "Number of clients: $NUM_CLIENTS"
 info "DNS servers:       $DNS"
+info "Client AllowedIPs: $CLIENT_ALLOWED_IPS"
 info "Log: $LOGFILE"
 if [[ -z "$ENDPOINT_OVERRIDE" && "$SERVER_PUBLIC_IP" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; then
     warn "Detected private/CGNAT address ($SERVER_PUBLIC_IP) on $DEFAULT_IF; re-run with -e <public-ip-or-dns> if clients connect from the internet."
@@ -601,7 +686,7 @@ DNS = $DNS
 PublicKey = $SERVER_PUBLIC_KEY
 PresharedKey = $PRESHARED_KEY
 Endpoint = ${SERVER_PUBLIC_IP}:${WG_PORT}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = $CLIENT_ALLOWED_IPS
 PersistentKeepalive = 25
 EOF
 
@@ -686,6 +771,9 @@ nft insert rule inet filter forward oifname "wg0" ct state established,related a
 nft add table ip wireguard_nat
 nft add chain ip wireguard_nat postrouting "{ type nat hook postrouting priority srcnat; policy accept; }"
 nft add rule ip wireguard_nat postrouting oifname "$DEFAULT_IF" ip saddr "$WG_SUBNET" masquerade comment "awesome-wireguard-nat"
+# The accepts above were inserted at the top of their chains. Put drop-only
+# blocks of other scripts (container isolation) back above them.
+aal_nft_raise_guard_rules || warn "Could not re-order the live isolation rules; they apply again after 'systemctl reload nftables'."
 
 info "nftables rules are active and persisted in /etc/nftables.conf"
 
@@ -747,6 +835,7 @@ echo -e "${C_BLUE}Network:${C_NC}"
 echo "  Subnet:         $WG_SUBNET"
 echo "  NAT Interface:  $DEFAULT_IF"
 echo "  DNS:            $DNS"
+echo "  Client routes:  $CLIENT_ALLOWED_IPS"
 echo
 echo -e "${C_BLUE}Client Configs:${C_NC}"
 for conf in "${CLIENT_CONFIGS[@]}"; do
@@ -767,5 +856,11 @@ echo "  4. Transfer client configs securely (QR code, scp, etc.)."
 echo "     NEVER send private keys over unencrypted channels."
 echo "  5. To add more clients later, run: sudo $0 --add-client <name>"
 echo "     (See also: $SCRIPT_DIR/README.md)"
+if [[ "$BLOCK_IPV6" != true ]]; then
+    echo "  6. The tunnel carries IPv4 only. On a client network with IPv6, IPv6"
+    echo "     traffic bypasses the VPN and exposes the client's own address."
+    echo "     Re-run with --block-ipv6 (and --force) to drop it in the tunnel"
+    echo "     instead, or disable IPv6 on the clients."
+fi
 echo
 echo -e "${C_GREEN}Done.${C_NC}"

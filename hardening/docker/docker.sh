@@ -215,7 +215,21 @@ if [[ "$DO_BENCH" == true ]]; then
     for audit_path in "${AUDIT_PATHS[@]}"; do
         if [[ -e "$audit_path" ]]; then
             if command -v auditctl &>/dev/null; then
-                if auditctl -l 2>/dev/null | grep -q "$audit_path"; then
+                # Exact match on a rule's path operand (-w PATH, -F path=PATH,
+                # -F dir=PATH): a substring match would let the /usr/bin/dockerd
+                # rule satisfy /usr/bin/docker, or /etc/docker/daemon.json
+                # satisfy /etc/docker.
+                if auditctl -l 2>/dev/null | awk -v p="$audit_path" '
+                        {
+                            for (i = 1; i <= NF; i++) {
+                                f = $i
+                                sub(/^(path|dir)=/, "", f)
+                                if (f != "/") sub(/\/$/, "", f)
+                                if (f == p) found = 1
+                            }
+                        }
+                        END { exit !found }
+                    '; then
                     bench_pass "1.1 - Audit rule exists for $audit_path"
                 else
                     bench_warn "1.1 - No audit rule for $audit_path"
@@ -446,6 +460,7 @@ if [[ "$DO_SCAN" == true ]]; then
         FIRST_ENTRY=true
         TOTAL_IMAGES=0
         VULN_IMAGES=0
+        FAILED_IMAGES=0
 
         while IFS= read -r IMAGE; do
             [[ -z "$IMAGE" ]] && continue
@@ -461,9 +476,16 @@ if [[ "$DO_SCAN" == true ]]; then
             fi
 
             # Run Trivy scan into a variable first so partial output on failure
-            # never corrupts the JSON report array.
+            # never corrupts the JSON report array. A scan that failed (no
+            # vulnerability database, no network, unreadable image) is recorded
+            # as an explicit error entry: it must never read as "clean".
             if ! SCAN_OUTPUT=$(trivy image --severity HIGH,CRITICAL --format json "$IMAGE" 2>/dev/null) || [[ -z "$SCAN_OUTPUT" ]]; then
-                SCAN_OUTPUT="{}"
+                IMAGE_JSON="${IMAGE//\\/\\\\}"
+                IMAGE_JSON="${IMAGE_JSON//\"/\\\"}"
+                printf '{"ArtifactName": "%s", "ScanError": true}\n' "$IMAGE_JSON" >> "$SCAN_REPORT"
+                warn "  Scan FAILED for $IMAGE (not counted as clean). Re-run: trivy image $IMAGE"
+                (( ++FAILED_IMAGES ))
+                continue
             fi
             printf '%s\n' "$SCAN_OUTPUT" >> "$SCAN_REPORT"
 
@@ -484,10 +506,15 @@ if [[ "$DO_SCAN" == true ]]; then
 
         echo
         echo -e "${C_BLUE}--- Scan Summary ---${C_NC}"
-        echo "  Total images scanned: $TOTAL_IMAGES"
+        echo "  Total images: $TOTAL_IMAGES"
+        echo "  Images scanned: $(( TOTAL_IMAGES - FAILED_IMAGES ))"
         echo "  Images with vulnerabilities: $VULN_IMAGES"
+        echo "  Images that could not be scanned: $FAILED_IMAGES"
         echo "  Report: $SCAN_REPORT"
         echo
+        if (( FAILED_IMAGES > 0 )); then
+            warn "$FAILED_IMAGES image(s) could not be scanned and are NOT known to be clean (\"ScanError\" entries in the report)."
+        fi
     fi
 
     # -----------------------------------------------------------------
@@ -511,6 +538,7 @@ SCAN_DIR="/var/log/docker-security"
 install -d -m 0750 "$SCAN_DIR"
 SCAN_DATE=$(date +%Y%m%d-%H%M%S)
 REPORT="$SCAN_DIR/image-scan-${SCAN_DATE}.json"
+FAILED=0
 
 # Detect runtime
 if command -v docker &>/dev/null; then
@@ -537,8 +565,14 @@ else
         else
             printf ',\n' >> "$REPORT"
         fi
+        # A failed scan is recorded as an explicit error entry and makes the
+        # unit fail: an empty result must never read as "no vulnerabilities".
         if ! SCAN_OUTPUT=$(trivy image --severity HIGH,CRITICAL --format json "$IMAGE" 2>/dev/null) || [[ -z "$SCAN_OUTPUT" ]]; then
-            SCAN_OUTPUT="{}"
+            IMAGE_JSON="${IMAGE//\\/\\\\}"
+            IMAGE_JSON="${IMAGE_JSON//\"/\\\"}"
+            SCAN_OUTPUT=$(printf '{"ArtifactName": "%s", "ScanError": true}' "$IMAGE_JSON")
+            echo "Scan failed for $IMAGE" >&2
+            FAILED=$((FAILED + 1))
         fi
         printf '%s\n' "$SCAN_OUTPUT" >> "$REPORT"
     done <<< "$IMAGES"
@@ -555,6 +589,10 @@ if (( ${#REPORTS[@]} > 12 )); then
 fi
 
 echo "Scan complete: $REPORT"
+if (( FAILED > 0 )); then
+    echo "$FAILED image(s) could not be scanned; see the ScanError entries in $REPORT" >&2
+    exit 1
+fi
 SCANSCRIPT
 
     rmdir /etc/systemd/system/docker-image-scan.service.d 2>/dev/null || true

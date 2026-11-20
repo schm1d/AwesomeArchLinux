@@ -67,8 +67,10 @@ test_nginx_regex_location_precedence_in_wordpress_and_react() {
         fail "react.sh: dotfile block (line ${dot_line:-none}) must precede static extension regex (line ${asset_line:-none})"
 
     # In nginx.sh, composer.json regex must match leading slash URIs
-    assert_contains "$(cat "$nginx_sh")" 'composer\.(json|lock)' "nginx.sh blocks composer metadata"
-    assert_not_contains "$(cat "$nginx_sh")" '|^(Entries' "nginx.sh does not anchor URI filename without leading slash"
+    local nginx_code
+    nginx_code="$(script_code "$nginx_sh")"
+    assert_contains "$nginx_code" 'composer\.(json|lock)' "nginx.sh blocks composer metadata"
+    assert_not_contains "$nginx_code" '|^(Entries' "nginx.sh does not anchor URI filename without leading slash"
 }
 
 test_systemd_capabilities_and_chrony_runtime_dir() {
@@ -78,20 +80,63 @@ test_systemd_capabilities_and_chrony_runtime_dir() {
     local php_sh="$REPO_ROOT/hardening/php/php.sh"
     local postfix_sh="$REPO_ROOT/hardening/postfix/postfix.sh"
 
-    assert_not_contains "$(cat "$chrony_sh")" "RuntimeDirectory=chrony" "chrony.sh avoids root-owned /run/chrony crash"
-    assert_not_contains "$(cat "$chroot_sh")" "RuntimeDirectory=chrony" "chroot.sh avoids root-owned /run/chrony crash"
-    assert_contains "$(cat "$chrony_sh")" "AF_NETLINK" "chrony.sh allows AF_NETLINK for DNS/NTS"
+    # Comment lines are excluded: the setting has to be in a generated unit,
+    # not merely mentioned in an explanation next to it.
+    local chrony_code chroot_code script code
+    chrony_code="$(script_code "$chrony_sh")"
+    chroot_code="$(script_code "$chroot_sh")"
+    assert_not_contains "$chrony_code" "RuntimeDirectory=chrony" "chrony.sh avoids root-owned /run/chrony crash"
+    assert_not_contains "$chroot_code" "RuntimeDirectory=chrony" "chroot.sh avoids root-owned /run/chrony crash"
+    grep -Eq '^[[:space:]]*RestrictAddressFamilies=.*AF_NETLINK' <<<"$chrony_code" || \
+        fail "chrony.sh allows AF_NETLINK for DNS/NTS (RestrictAddressFamilies= line)"
 
-    assert_contains "$(cat "$nginx_sh")" "CAP_KILL" "nginx drop-in retains CAP_KILL for worker reload"
-    assert_contains "$(cat "$php_sh")" "CAP_KILL" "php-fpm drop-in retains CAP_KILL for worker reload"
-    assert_contains "$(cat "$postfix_sh")" "CAP_KILL" "dovecot drop-in retains CAP_KILL for worker management"
+    for script in "$nginx_sh" "$php_sh" "$postfix_sh"; do
+        code="$(script_code "$script")"
+        grep -Eq '^[[:space:]]*CapabilityBoundingSet=.*CAP_KILL' <<<"$code" || \
+            fail "${script#"$REPO_ROOT"/}: no CapabilityBoundingSet= line retains CAP_KILL for worker reload/management"
+    done
+}
+
+# Source-level guards for three fixes that have no runnable fixture here. Each
+# one looks at generated configuration lines only (comment lines are dropped).
+test_ssh_totp_include_postfix_sasl_and_fail2ban_filter() {
+    # sshd keeps the first value it reads for a keyword, so the TOTP drop-in has
+    # to be included above the public-key-only AuthenticationMethods line of
+    # the generated sshd_config; below it the second factor would be ignored.
+    local sshd_conf include_line auth_line
+    sshd_conf="$(sed -n '/<<[[:space:]]*SSHD_EOF$/,/^SSHD_EOF$/p' "$REPO_ROOT/hardening/ssh/ssh.sh" | grep -v '^[[:space:]]*#' || true)"
+    include_line="$(grep -Fxn -m1 'Include ${TOTP_DROPIN}' <<<"$sshd_conf" | cut -d: -f1 || true)"
+    auth_line="$(grep -n -m1 '^AuthenticationMethods ' <<<"$sshd_conf" | cut -d: -f1 || true)"
+    [[ -n "$auth_line" ]] || fail "ssh.sh: generated sshd_config has no AuthenticationMethods line"
+    [[ -n "$include_line" ]] || fail "ssh.sh: generated sshd_config does not include the TOTP drop-in"
+    (( include_line < auth_line )) || \
+        fail "ssh.sh: Include \${TOTP_DROPIN} (line $include_line) must come before AuthenticationMethods (line $auth_line)"
+
+    # AUTH is off for smtpd in general (port 25) and switched on only for the
+    # submission services in master.cf.
+    local postfix_code
+    postfix_code="$(script_code "$REPO_ROOT/hardening/postfix/postfix.sh")"
+    grep -qx 'smtpd_sasl_auth_enable = no' <<<"$postfix_code" || \
+        fail "postfix.sh: main.cf does not turn SASL AUTH off by default"
+    if grep -Eq '^smtpd_sasl_auth_enable[[:space:]]*=[[:space:]]*yes' <<<"$postfix_code"; then
+        fail "postfix.sh: main.cf offers SASL AUTH on every smtpd, including the MX port"
+    fi
+    grep -Eq '^[[:space:]]+-o smtpd_sasl_auth_enable=yes' <<<"$postfix_code" || \
+        fail "postfix.sh: master.cf no longer enables SASL AUTH for the submission services"
+
+    local fail2ban_code
+    fail2ban_code="$(script_code "$REPO_ROOT/hardening/fail2ban/fail2ban.sh")"
+    grep -q '^failregex = ' <<<"$fail2ban_code" || fail "fail2ban.sh no longer writes a failregex for its sshd filter"
+    assert_not_contains "$fail2ban_code" "Bad protocol version" "fail2ban.sh sshd filter has no 'Bad protocol version' pattern"
 }
 
 test_openclaw_privilege_and_v8_inspector_safety() {
     local oc_sh="$REPO_ROOT/hardening/openclaw/openclaw.sh"
 
-    assert_not_contains "$(cat "$oc_sh")" "killall -USR1" "openclaw logrotate never sends SIGUSR1 (V8 debugger)"
-    assert_not_contains "$(cat "$oc_sh")" 'owner $OC_HOME/**' "openclaw AppArmor never exposes entire user home"
+    local oc_code
+    oc_code="$(script_code "$oc_sh")"
+    assert_not_contains "$oc_code" "killall -USR1" "openclaw logrotate never sends SIGUSR1 (V8 debugger)"
+    assert_not_contains "$oc_code" 'owner $OC_HOME/**' "openclaw AppArmor never exposes entire user home"
 }
 
 test_apparmor_dry_run_and_parser_validation() {
@@ -150,6 +195,7 @@ test_fscrypt_refuses_root_and_self_session_termination() {
 run_test "php.sh set_ini preserves literal & and avoids duplicate uncommenting" test_php_set_ini_ampersand_and_duplicate_comments
 run_test "wordpress.sh, react.sh, and nginx.sh location regex security precedence" test_nginx_regex_location_precedence_in_wordpress_and_react
 run_test "systemd drop-ins preserve CAP_KILL and avoid chrony RuntimeDirectory crash" test_systemd_capabilities_and_chrony_runtime_dir
+run_test "ssh.sh TOTP include order, postfix.sh SASL default, fail2ban.sh sshd filter" test_ssh_totp_include_postfix_sasl_and_fail2ban_filter
 run_test "openclaw.sh prevents V8 SIGUSR1 debugger and home AppArmor leak" test_openclaw_privilege_and_v8_inspector_safety
 run_test "apparmor.sh --dry-run profiles pass apparmor_parser and allow sd_notify" test_apparmor_dry_run_and_parser_validation
 run_test "fscrypt.sh refuses self-session termination and root encryption" test_fscrypt_refuses_root_and_self_session_termination

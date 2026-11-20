@@ -13,6 +13,8 @@ CLEANUP_ENABLED=0
 
 cleanup() {
     if [[ "$CLEANUP_ENABLED" -eq 0 ]]; then
+        # Nothing to undo on disk, but never leave key material behind.
+        remove_install_secrets
         return
     fi
     echo "Cleanup triggered, undoing partial disk setup..." >&2
@@ -20,10 +22,23 @@ cleanup() {
     umount -R /mnt 2>/dev/null || true
     vgchange -an "${LVM_NAME:-lvm_arch}" 2>/dev/null || true
     cryptsetup close "${CRYPT_NAME:-crypt_lvm}" 2>/dev/null || true
-    shred -zu ./boot.key 2>/dev/null || true
-    shred -zu ./recovery.key 2>/dev/null || true
-    shred -zu ./luks-header-backup.img 2>/dev/null || true
-    shred -zu ./tpm_luks.conf 2>/dev/null || true
+    remove_install_secrets
+}
+
+# Key material, the LUKS header backup and the TPM hand-off file live in a
+# private RAM-backed directory (see create_install_secrets_dir), never in the
+# current working directory: the installer is often started from a checkout on
+# a USB stick, where shred cannot reliably destroy flash/FAT contents.
+SECRETS_DIR=""
+
+remove_install_secrets() {
+    local secret
+    [[ -n "${SECRETS_DIR:-}" && -d "$SECRETS_DIR" ]] || return 0
+    for secret in boot.key recovery.key luks-header-backup.img tpm_luks.conf; do
+        shred -zu "$SECRETS_DIR/$secret" 2>/dev/null || true
+    done
+    rm -rf -- "$SECRETS_DIR"
+    SECRETS_DIR=""
 }
 
 trap cleanup EXIT
@@ -109,12 +124,25 @@ log_action "UEFI support confirmed"
 # 1. HELPER FUNCTIONS
 # -----------------------
 
+# read wrapper for the ask_* helpers below. They run inside $(...), where
+# errexit is off, so a closed stdin (EOF) used to make every "ask until valid"
+# loop spin forever. Exit the subshell instead: the caller's assignment then
+# fails and set -e stops the installer. Callers must therefore capture the
+# answer with a plain assignment (answer=$(ask_...)), never inside [[ ... ]].
+prompt_read() {
+    local prompt_msg="$1" var_name="$2"
+    if ! read -r -p "$prompt_msg" "${var_name?}"; then
+        echo -e "\n${BRed}No input available (stdin closed). Aborting.${NC}" >&2
+        exit 1
+    fi
+}
+
 # Prompt user yes/no question
 ask_yes_no() {
     local prompt_msg="$1"
     local choice
     while true; do
-        read -r -p "$prompt_msg (y/n): " choice
+        prompt_read "$prompt_msg (y/n): " choice
         case "$choice" in
             [Yy]) echo "y"; return 0 ;;
             [Nn]) echo "n"; return 0 ;;
@@ -153,7 +181,7 @@ recommended_tmp_size_gb() {
 ask_for_disk() {
     local disk
     while true; do
-        read -r -p "Select the target disk (e.g., sda, nvme0n1): " disk
+        prompt_read "Select the target disk (e.g., sda, nvme0n1): " disk
         disk="${disk#/dev/}"
         if [[ -n "$disk" && "$disk" != */* && -b "/dev/$disk" &&
               "$(lsblk -dn -o TYPE "/dev/$disk" 2>/dev/null)" == "disk" ]]; then
@@ -165,12 +193,66 @@ ask_for_disk() {
     done
 }
 
+# Refuse a target that is in use. Wiping a disk with mounted filesystems,
+# active swap, or open LUKS/LVM/RAID devices on top of it (the live medium, a
+# data disk, a previous half-finished attempt) destroys data and then fails
+# halfway through repartitioning.
+assert_disk_not_in_use() {
+    local disk="$1" mounts holders
+    mounts=$(lsblk -nrpo NAME,MOUNTPOINTS "$disk" 2>/dev/null | awk 'NF > 1' || true)
+    if [[ -n "$mounts" ]]; then
+        echo -e "${BRed}Refusing to use $disk: it has mounted filesystems or active swap:${NC}" >&2
+        sed 's/^/  /' <<< "$mounts" >&2
+        echo "Unmount them first. The live medium itself cannot be the install target." >&2
+        return 1
+    fi
+    holders=$(lsblk -nrpo NAME,TYPE "$disk" 2>/dev/null | awk '$2 != "disk" && $2 != "part"' || true)
+    if [[ -n "$holders" ]]; then
+        echo -e "${BRed}Refusing to use $disk: LUKS/LVM/RAID devices on it are still active:${NC}" >&2
+        sed 's/^/  /' <<< "$holders" >&2
+        echo "Deactivate them first (vgchange -an <vg>; cryptsetup close <name>), or use base/recovery-mount.sh option 2." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Last stop before anything is written: the operator must type the disk name.
+confirm_disk_erase() {
+    local disk="$1" disk_name="${1#/dev/}" answer
+    echo -e "${BRed}\nWARNING: ALL DATA ON $disk WILL BE PERMANENTLY ERASED.${NC}" >&2
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MODEL "$disk" >&2 || true
+    while true; do
+        prompt_read "Type the disk name ($disk_name) to erase it, or 'abort' to quit: " answer
+        answer="${answer#/dev/}"
+        if [[ "$answer" == "$disk_name" ]]; then
+            return 0
+        elif [[ "$answer" == "abort" ]]; then
+            return 1
+        fi
+        echo -e "${BRed}That does not match '$disk_name'.\n${NC}" >&2
+    done
+}
+
+# Private RAM-backed directory for key material (see remove_install_secrets).
+create_install_secrets_dir() {
+    local base
+    for base in /run /dev/shm; do
+        if [[ "$(findmnt -n -o FSTYPE --target "$base" 2>/dev/null || true)" =~ ^(tmpfs|ramfs)$ ]]; then
+            SECRETS_DIR=$(mktemp -d "$base/awesome-install.XXXXXX")
+            chmod 700 "$SECRETS_DIR"
+            return 0
+        fi
+    done
+    echo -e "${BRed}No RAM-backed filesystem (/run or /dev/shm) is available for the installation keys.${NC}" >&2
+    return 1
+}
+
 # Prompt user for positive integer input
 ask_for_numeric() {
     local prompt_msg="$1"
     local input_val
     while true; do
-        read -r -p "$prompt_msg " input_val
+        prompt_read "$prompt_msg " input_val
         if [[ "$input_val" =~ ^[1-9][0-9]*$ ]]; then
             echo "$input_val"
             return 0
@@ -184,7 +266,7 @@ ask_for_numeric() {
 ask_for_username() {
     local username
     while true; do
-        read -r -p "Enter the new username: " username
+        prompt_read "Enter the new username: " username
         if [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#username} -le 32 ]]; then
             echo "$username"
             return 0
@@ -198,7 +280,7 @@ ask_for_username() {
 ask_for_hostname() {
     local hostname
     while true; do
-        read -r -p "Enter the new hostname: " hostname
+        prompt_read "Enter the new hostname: " hostname
         if [[ "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9\.-]*$ ]] && [[ ${#hostname} -le 64 ]]; then
             echo "$hostname"
             return 0
@@ -215,7 +297,7 @@ ask_for_sysctl_profile() {
         echo "1) workstation - compatible security baseline (recommended)" >&2
         echo "2) strict      - disables unprivileged user namespaces, io_uring, kexec, and debugging" >&2
         echo "3) performance - workstation baseline plus fq + BBR" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "workstation"; return 0 ;;
@@ -232,7 +314,7 @@ ask_for_ipv6_policy() {
         echo -e "${BBlue}Select IPv6 policy:${NC}" >&2
         echo "1) enabled and hardened (recommended; preserves SLAAC)" >&2
         echo "2) disabled by explicit sysctl overlay" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "false"; return 0 ;;
@@ -261,7 +343,7 @@ ask_for_gpu_unlock() {
         echo -e "${BBlue}Optional NVIDIA tensor-core unlock (Zagitta/gpu-unlock — GeForce RTX 20/30/40):${NC}" >&2
         echo "1) disabled (default)" >&2
         echo "2) enabled  - build & install gpu-unlock DKMS + firmware for full-rate FP16/BF16/TF32" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "false"; return 0 ;;
@@ -278,12 +360,12 @@ ask_for_gpu_unlock_targets() {
         echo -e "${BBlue}Select gpu_unlock.targets kernel parameter:${NC}" >&2
         echo "1) all - unlock every supported unbound RTX 20/30/40 GPU (default)" >&2
         echo "2) specific PCI address(es) - comma-separated BDFs (e.g. 0000:01:00.0)" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         case "$choice" in
             1) echo "all"; return 0 ;;
             2)
-                read -r -p "Enter PCI address(es) (DDDD:BB:DD.F[,DDDD:BB:DD.F...]): " targets_input
+                prompt_read "Enter PCI address(es) (DDDD:BB:DD.F[,DDDD:BB:DD.F...]): " targets_input
                 if [[ "$targets_input" =~ $bdf_re ]]; then
                     echo "$targets_input"
                     return 0
@@ -301,7 +383,7 @@ ask_for_bootloader_profile() {
         echo -e "${BBlue}Select the boot profile:${NC}" >&2
         echo "1) grub - encrypted /boot, PBKDF2 LUKS, embedded boot key" >&2
         echo "2) uki  - signed UKIs on the ESP, Argon2id LUKS, no embedded key" >&2
-        read -r -p "Choice (1 or 2): " choice
+        prompt_read "Choice (1 or 2): " choice
         case "$choice" in
             1) echo "grub"; return 0 ;;
             2) echo "uki"; return 0 ;;
@@ -319,6 +401,19 @@ describe_sysctl_profile() {
     esac
 }
 
+# A timezone is a zone name (no "..", no absolute path) whose file under
+# /usr/share/zoneinfo is a compiled TZif zone. A bare "-f" test also accepted
+# path traversal and data files such as zone.tab or tzdata.zi, which then
+# became a broken /etc/localtime symlink.
+valid_timezone() {
+    local tz="$1" zone_file magic
+    [[ "$tz" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] || return 1
+    zone_file="/usr/share/zoneinfo/$tz"
+    [[ -f "$zone_file" ]] || return 1
+    magic=$(head -c 4 "$zone_file" 2>/dev/null | tr -d '\0') || return 1
+    [[ "$magic" == "TZif" ]]
+}
+
 # Prompt user for timezone
 ask_for_timezone() {
     local tz
@@ -326,13 +421,13 @@ ask_for_timezone() {
         echo -e "${BBlue}Select timezone:${NC}" >&2
         echo "Common: UTC, US/Eastern, US/Pacific, Europe/London, Europe/Berlin," >&2
         echo "        Europe/Zurich, Asia/Tokyo, Asia/Shanghai, Australia/Sydney" >&2
-        read -r -p "Timezone [UTC]: " tz
+        prompt_read "Timezone [UTC]: " tz
         tz="${tz:-UTC}"
-        if [ -f "/usr/share/zoneinfo/$tz" ]; then
+        if valid_timezone "$tz"; then
             echo "$tz"
             return 0
         else
-            echo -e "${BRed}Invalid timezone: '$tz'. Must be a valid path under /usr/share/zoneinfo.\n${NC}" >&2
+            echo -e "${BRed}Invalid timezone: '$tz'. Use a zone name from 'timedatectl list-timezones' (e.g. Europe/Zurich).\n${NC}" >&2
         fi
     done
 }
@@ -360,10 +455,10 @@ ask_for_locale() {
             (( ++i ))
         done
         echo "   0) Other -- type a locale name" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -r -p "Enter locale (e.g. nl_NL.UTF-8): " loc
+            prompt_read "Enter locale (e.g. nl_NL.UTF-8): " loc
             if [[ "$loc" =~ ^[A-Za-z0-9_.@-]+$ ]] && grep -Eq "^#?${loc//./\\.}[[:space:]]" /etc/locale.gen 2>/dev/null; then
                 echo "$loc"
                 return 0
@@ -377,6 +472,21 @@ ask_for_locale() {
             echo -e "${BRed}Invalid choice.\n${NC}" >&2
         fi
     done
+}
+
+# True when the name is an installed console keymap. The list is captured
+# first: piping localectl into "grep -q" under pipefail can report failure
+# (SIGPIPE) for a keymap that does exist, and the name is matched literally.
+console_keymap_exists() {
+    local km="$1" available
+    [[ -n "$km" ]] || return 1
+    available=$(localectl list-keymaps 2>/dev/null || true)
+    if [[ -z "$available" ]]; then
+        # No localectl data (minimal environment): fall back to the kbd tree.
+        available=$(find /usr/share/kbd/keymaps -type f -name '*.map*' -printf '%f\n' 2>/dev/null |
+            sed -E 's/\.map(\.gz|\.zst|\.xz|\.bz2)?$//' || true)
+    fi
+    grep -Fqx -- "$km" <<< "$available"
 }
 
 # Prompt user for console keymap
@@ -397,7 +507,6 @@ ask_for_keymap() {
         "pl"
         "ru"
         "jp106"
-        "kr"
     )
     while true; do
         echo -e "${BBlue}Select console keymap:${NC}" >&2
@@ -407,11 +516,11 @@ ask_for_keymap() {
             (( ++i ))
         done
         echo "   0) Other -- type a keymap name" >&2
-        read -r -p "Choice [1]: " choice
+        prompt_read "Choice [1]: " choice
         choice="${choice:-1}"
         if [[ "$choice" == "0" ]]; then
-            read -r -p "Enter keymap name: " km
-            if localectl list-keymaps 2>/dev/null | grep -qx "$km"; then
+            prompt_read "Enter keymap name: " km
+            if console_keymap_exists "$km"; then
                 loadkeys "$km" 2>/dev/null || true
                 echo "$km"
                 return 0
@@ -420,9 +529,12 @@ ask_for_keymap() {
             fi
         elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keymaps[@]} )); then
             km="${keymaps[$((choice-1))]}"
-            loadkeys "$km" 2>/dev/null || true
-            echo "$km"
-            return 0
+            if console_keymap_exists "$km"; then
+                loadkeys "$km" 2>/dev/null || true
+                echo "$km"
+                return 0
+            fi
+            echo -e "${BRed}Keymap '$km' is not available on this system. Pick another one.\n${NC}" >&2
         else
             echo -e "${BRed}Invalid choice.\n${NC}" >&2
         fi
@@ -469,7 +581,9 @@ validate_network() {
     echo -e "${BBlue}Checking network connection...${NC}"
     if ! ping -c 1 archlinux.org &>/dev/null; then
         echo -e "${BRed}Warning: No network connection detected.${NC}"
-        if [[ $(ask_yes_no "Continue anyway?") == "n" ]]; then
+        local continue_offline
+        continue_offline=$(ask_yes_no "Continue anyway?")
+        if [[ "$continue_offline" == "n" ]]; then
             exit 1
         fi
     fi
@@ -538,7 +652,9 @@ setup_tpm_tools() {
         
         systemctl start tpm2-abrmd.service 2>/dev/null || true
         
-        if [[ $(ask_yes_no "Do you want to clear the TPM? (requires physical presence)") == "y" ]]; then
+        local clear_tpm
+        clear_tpm=$(ask_yes_no "Do you want to clear the TPM? (requires physical presence)")
+        if [[ "$clear_tpm" == "y" ]]; then
             echo -e "${BYellow}Attempting to clear TPM...${NC}"
             tpm2_clear -c platform 2>/dev/null || echo -e "${BRed}TPM clear failed or not permitted${NC}"
         fi
@@ -568,8 +684,8 @@ setup_tpm_in_chroot() {
         
         arch-chroot /mnt pacman -S --needed --noconfirm tpm2-tools
         
-        if [ -f ./tpm_luks.conf ]; then
-            cp ./tpm_luks.conf /mnt/etc/tpm_luks.conf
+        if [ -f "$SECRETS_DIR/tpm_luks.conf" ]; then
+            cp "$SECRETS_DIR/tpm_luks.conf" /mnt/etc/tpm_luks.conf
             chmod 600 /mnt/etc/tpm_luks.conf
         fi
         
@@ -630,7 +746,8 @@ if [ "$TPM_AVAILABLE" = true ]; then
     
     if [ "$TPM_AVAILABLE" = true ]; then
         echo -e "${BGreen}TPM2 is available for encryption${NC}"
-        if [[ $(ask_yes_no "Use TPM2 for LUKS encryption?") == "y" ]]; then
+        USE_TPM_ANSWER=$(ask_yes_no "Use TPM2 for LUKS encryption?")
+        if [[ "$USE_TPM_ANSWER" == "y" ]]; then
             USE_TPM_LUKS=true
             
             echo -e "${BBlue}Select PCRs to bind:${NC}"
@@ -662,6 +779,7 @@ echo
 
 TARGET_DISK=$(ask_for_disk)
 DISK="/dev/$TARGET_DISK"
+assert_disk_not_in_use "$DISK"
 # Informational only -- see the partitioning section for why there is no
 # drive-type-specific behaviour.
 DEVICE_TYPE=$(detect_device_type "$DISK")
@@ -714,10 +832,35 @@ validate_ssh_pubkey() {
         echo -e "${BRed}Error: SSH public key contains invalid characters.${NC}" >&2
         return 1
     fi
-    # Verify key starts with a known SSH key type prefix
-    if ! [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]; then
-        echo -e "${BRed}Error: SSH public key must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-, sk-ssh-, or sk-ecdsa-.${NC}" >&2
-        return 1
+    # Accept only key types the hardened sshd will accept afterwards
+    # (PubkeyAcceptedAlgorithms in hardening/ssh/ssh.sh). Password logins are
+    # disabled, so a key sshd refuses -- plain ecdsa-sha2-* in particular --
+    # would lock the operator out of the freshly installed machine.
+    local key_type="${key%% *}"
+    case "$key_type" in
+        ssh-ed25519|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com|ssh-rsa) ;;
+        ecdsa-sha2-*)
+            echo -e "${BRed}Error: plain ECDSA keys ($key_type) are not accepted by the hardened sshd configuration.${NC}" >&2
+            echo -e "${BRed}Use an Ed25519 key (ssh-keygen -t ed25519), a FIDO2 key, or RSA.${NC}" >&2
+            return 1
+            ;;
+        *)
+            echo -e "${BRed}Error: unsupported SSH key type '${key_type}'. Accepted: ssh-ed25519, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com, ssh-rsa.${NC}" >&2
+            return 1
+            ;;
+    esac
+    # Check the whole key, not just its prefix: a truncated paste must fail
+    # here rather than at the first login attempt.
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        local key_file
+        key_file=$(mktemp) || return 1
+        printf '%s\n' "$key" > "$key_file"
+        if ! ssh-keygen -l -f "$key_file" >/dev/null 2>&1; then
+            rm -f -- "$key_file"
+            echo -e "${BRed}Error: that is not a complete, valid SSH public key (ssh-keygen could not parse it).${NC}" >&2
+            return 1
+        fi
+        rm -f -- "$key_file"
     fi
     return 0
 }
@@ -758,7 +901,7 @@ echo -e "IPv6: $([[ "$DISABLE_IPV6" == true ]] && echo disabled || echo 'enabled
 echo -e "Boot Profile: $INSTALL_BOOTLOADER"
 echo -e "GPU Unlock: $([[ "$INSTALL_GPU_UNLOCK" == true ]] && echo "enabled (gpu_unlock.targets=$GPU_UNLOCK_TARGETS)" || echo disabled)"
 echo -e "/tmp: ${SIZE_OF_TMP} GiB encrypted LVM volume"
-echo -e "SSH Key:  ${SSH_PUBKEY:+(provided)}${SSH_PUBKEY:-(none)}\n"
+echo -e "SSH Key:  $([[ -n "$SSH_PUBKEY" ]] && echo "(provided, ${SSH_PUBKEY%% *})" || echo "(none)")\n"
 
 log_action "User: $USERNAME, Hostname: $HOSTNAME, Timezone: $TIMEZONE, Locale: $LOCALE, Keymap: $KEYMAP, Sysctl Profile: $SYSCTL_PROFILE_LABEL, Disable IPv6: $DISABLE_IPV6, Boot Profile: $INSTALL_BOOTLOADER, GPU Unlock: $INSTALL_GPU_UNLOCK ($GPU_UNLOCK_TARGETS)"
 
@@ -785,9 +928,20 @@ PARTITION1="${DISK}${PART_SUFFIX}1"
 PARTITION2="${DISK}${PART_SUFFIX}2"
 PARTITION3="${DISK}${PART_SUFFIX}3"
 
+# Nothing has been written so far. Re-check that the disk is still idle and
+# make the operator confirm the target explicitly before the first write.
+assert_disk_not_in_use "$DISK"
+if ! confirm_disk_erase "$DISK"; then
+    echo -e "${BYellow}Aborted before any change was made to $DISK.${NC}"
+    exit 1
+fi
+log_action "Operator confirmed erasing $DISK"
+
 # Optional secure wipe
-if [[ $(ask_yes_no "Securely wipe disk before encryption?") == "y" ]]; then
-    if [[ $(ask_yes_no "Use fast wipe (less secure)?") == "y" ]]; then
+WIPE_ANSWER=$(ask_yes_no "Securely wipe disk before encryption?")
+if [[ "$WIPE_ANSWER" == "y" ]]; then
+    FAST_WIPE_ANSWER=$(ask_yes_no "Use fast wipe (less secure)?")
+    if [[ "$FAST_WIPE_ANSWER" == "y" ]]; then
         echo -e "${BBlue}Fast wiping disk...${NC}"
         wipe_disk "$DISK" /dev/zero
     else
@@ -798,6 +952,16 @@ fi
 
 echo -e "${BBlue}Creating partitions...${NC}"
 log_action "Creating partition table"
+
+# Drop filesystem/LUKS/LVM/RAID signatures of the previous layout first. Zapping
+# only the partition table leaves them on disk, and a stale LVM PV or LUKS
+# header that ends up inside one of the new partitions is picked up again by
+# udev and LVM (duplicate VG names, wrong blkid types).
+while read -r old_partition; do
+    [[ -b "$old_partition" ]] || continue
+    wipefs -a "$old_partition" >/dev/null 2>&1 || true
+done < <(lsblk -nrpo NAME,TYPE "$DISK" 2>/dev/null | awk '$2 == "part" { print $1 }')
+wipefs -a "$DISK" >/dev/null 2>&1 || true
 
 sgdisk -Z "$DISK"
 sgdisk -o "$DISK"
@@ -813,12 +977,29 @@ sgdisk -o "$DISK"
 # through a LUKS container leaks filesystem usage patterns into the ciphertext,
 # which this project treats as an unacceptable trade for SSD wear levelling.
 
-sgdisk -n 1:2048:4095 -t 1:ef02 -c 1:"BIOS_Boot" "$DISK"
-sgdisk -n 2:4096:2101247 -t 2:ef00 -c 2:"EFI_System" "$DISK"
-sgdisk -n 3:2101248:0 -t 3:8309 -c 3:"Linux_LUKS" "$DISK"
+# Sizes, not sector numbers: fixed sector ranges assume 512-byte logical
+# sectors and turn the 1 GiB ESP into 8 GiB on 4Kn drives. With sgdisk's 1 MiB
+# alignment these produce the same layout as before on 512-byte disks
+# (1 MiB BIOS boot at 1 MiB, 1 GiB ESP, LUKS on the rest).
+sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS_Boot" "$DISK"
+sgdisk -n 2:0:+1G -t 2:ef00 -c 2:"EFI_System" "$DISK"
+sgdisk -n 3:0:0 -t 3:8309 -c 3:"Linux_LUKS" "$DISK"
 
 partprobe "$DISK"
-sleep 2
+udevadm settle --timeout=30 || true
+for new_partition in "$PARTITION1" "$PARTITION2" "$PARTITION3"; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -b "$new_partition" ]] && break
+        sleep 1
+    done
+    if [[ ! -b "$new_partition" ]]; then
+        echo -e "${BRed}Partition $new_partition did not appear after partitioning $DISK.${NC}" >&2
+        exit 1
+    fi
+    # Clear whatever old signature now sits at the start of the new partition.
+    wipefs -a "$new_partition" >/dev/null 2>&1 || true
+done
+udevadm settle --timeout=30 || true
 
 # -----------------------
 # 6. LUKS SETUP
@@ -857,18 +1038,19 @@ ask_luks_password_until_success "$PARTITION3" "$CRYPT_NAME"
 # Create keys
 echo -e "${BBlue}Creating encryption keys...${NC}"
 check_entropy
+create_install_secrets_dir
 umask 077
-dd if=/dev/random of=./boot.key bs=512 count=8 iflag=fullblock
-dd if=/dev/random of=./recovery.key bs=512 count=8 iflag=fullblock
+dd if=/dev/random of="$SECRETS_DIR/boot.key" bs=512 count=8 iflag=fullblock
+dd if=/dev/random of="$SECRETS_DIR/recovery.key" bs=512 count=8 iflag=fullblock
 umask 022
 
 # Add keys to LUKS
 echo -e "${BBlue}Adding keyfiles to LUKS container...${NC}"
 echo "You'll need to enter your LUKS passphrase twice (once for each key)"
-cryptsetup -v luksAddKey "$PARTITION3" ./boot.key --key-slot 1
-cryptsetup -v luksAddKey "$PARTITION3" ./recovery.key --key-slot 2
+cryptsetup -v luksAddKey "$PARTITION3" "$SECRETS_DIR/boot.key" --key-slot 1
+cryptsetup -v luksAddKey "$PARTITION3" "$SECRETS_DIR/recovery.key" --key-slot 2
 
-echo -e "${BGreen}IMPORTANT: Copy $(pwd)/recovery.key to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
+echo -e "${BGreen}IMPORTANT: Copy $SECRETS_DIR/recovery.key to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
 read -r -p "Press Enter after saving recovery.key..."
 
 # TPM2 enrollment (if selected)
@@ -881,7 +1063,7 @@ if [ "$USE_TPM_LUKS" = true ]; then
     # Create config for later enrollment
     (
         umask 077
-        cat > ./tpm_luks.conf <<EOF
+        cat > "$SECRETS_DIR/tpm_luks.conf" <<EOF
 CRYPTDEVICE=UUID=$UUID:$CRYPT_NAME
 TPM2_PCRS=$TPM_PCRS
 TPM2_DEVICE=$TPM_DEVICE
@@ -893,13 +1075,13 @@ fi
 
 # Backup LUKS header
 echo -e "${BBlue}Backing up LUKS header...${NC}"
-(umask 077; cryptsetup luksHeaderBackup "$PARTITION3" --header-backup-file ./luks-header-backup.img)
-echo -e "${BGreen}IMPORTANT: Copy $(pwd)/luks-header-backup.img to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
+(umask 077; cryptsetup luksHeaderBackup "$PARTITION3" --header-backup-file "$SECRETS_DIR/luks-header-backup.img")
+echo -e "${BGreen}IMPORTANT: Copy $SECRETS_DIR/luks-header-backup.img to external off-machine storage NOW (live-ISO copy will be shredded at cleanup)!${NC}"
 read -r -p "Press Enter after saving header backup..."
 
 # Open LUKS container
 echo -e "${BBlue}Opening LUKS container...${NC}"
-cryptsetup -v luksOpen "$PARTITION3" "$CRYPT_NAME" --key-file ./boot.key
+cryptsetup -v luksOpen "$PARTITION3" "$CRYPT_NAME" --key-file "$SECRETS_DIR/boot.key"
 
 # -----------------------
 # 7. LVM SETUP
@@ -1068,15 +1250,15 @@ EOF
 if [[ "$INSTALL_BOOTLOADER" == "grub" ]]; then
     echo -e "${BBlue}Setting up the GRUB initramfs LUKS key...${NC}"
     mkdir --verbose -p "/mnt$LUKS_KEYS"
-    cp ./boot.key "/mnt$LUKS_KEYS/boot.key"
+    cp "$SECRETS_DIR/boot.key" "/mnt$LUKS_KEYS/boot.key"
     chmod 400 "/mnt$LUKS_KEYS/boot.key"
     chown -R root:root "/mnt$LUKS_KEYS"
     chmod 700 "/mnt$LUKS_KEYS"
 fi
 
 # Copy TPM config if used
-if [ "$USE_TPM_LUKS" = true ] && [ -f ./tpm_luks.conf ]; then
-    cp ./tpm_luks.conf /mnt/etc/
+if [ "$USE_TPM_LUKS" = true ] && [ -f "$SECRETS_DIR/tpm_luks.conf" ]; then
+    cp "$SECRETS_DIR/tpm_luks.conf" /mnt/etc/
     chmod 600 /mnt/etc/tpm_luks.conf
 fi
 
@@ -1217,10 +1399,19 @@ CRITICAL POST-INSTALLATION STEPS:
    - Secure backups of recovery.key and luks-header-backup.img
 
 2. SECURITY SERVICES:
-   systemctl enable --now apparmor
-   systemctl enable --now auditd
-   systemctl enable --now rkhunter-check.timer
-   systemctl enable --now arch-audit.timer
+   Already enabled by the installer (check with 'systemctl is-enabled <unit>'):
+     auditd, rkhunter-check.timer, arch-audit.timer
+   AppArmor is installed but NOT active yet. Enabling apparmor.service alone
+   does nothing: the kernel also needs its LSM parameters. From a checkout of
+   the repository run
+       sudo ./hardening/apparmor/apparmor.sh
+   (see hardening/apparmor/README.md) and reboot. Then:
+     - 'cat /sys/kernel/security/lsm' must list apparmor; 'aa-status' shows
+       the loaded profiles.
+     - The sshd profile starts in complain (log-only) mode. Log in over SSH
+       as you normally do, look for apparmor="ALLOWED" lines for sshd in
+       'journalctl -k' / the audit log, and when there are none run
+           sudo ./hardening/apparmor/apparmor.sh --enforce
    systemctl status audit-rules.service awesome-journal-sealing.service
    - Move /root/journal-sealing/verification-*.txt to trusted off-machine storage.
    - Verify the saved copy, then remove the local verification file.
@@ -1241,16 +1432,17 @@ EMERGENCY RECOVERY:
 - Boot from live USB and use recovery.key
 - Restore header: cryptsetup luksHeaderRestore $PARTITION3 --header-backup-file=luks-header-backup.img
 
-Installation log: $INSTALL_LOG
+Installation log: /root/$(basename "$INSTALL_LOG")
 ================================================================================
 EOF
 
 # Backup LUKS header
-cp ./luks-header-backup.img /mnt/root/
+cp "$SECRETS_DIR/luks-header-backup.img" /mnt/root/
 chmod 600 /mnt/root/luks-header-backup.img
 
-# Copy installation log
-cp "$INSTALL_LOG" /mnt/root/
+# Copy installation log (refreshed at the very end; this early copy is what
+# remains if the chroot phase fails)
+install -m 0600 "$INSTALL_LOG" "/mnt/root/$(basename "$INSTALL_LOG")"
 
 # -----------------------
 # 11. CHROOT CONFIGURATION
@@ -1271,7 +1463,7 @@ arch-chroot /mnt bash -c "source /set-install-vars.sh && /chroot.sh"
 # configuration has completed successfully.
 if [[ "$INSTALL_BOOTLOADER" == "uki" ]]; then
     echo -e "${BBlue}Removing the install-session LUKS keyslot...${NC}"
-    cryptsetup -v luksRemoveKey "$PARTITION3" ./boot.key
+    cryptsetup -v luksRemoveKey "$PARTITION3" "$SECRETS_DIR/boot.key"
     log_action "Removed UKI install-session key from LUKS slot 1"
 fi
 
@@ -1299,23 +1491,20 @@ echo -e "${BBlue}Performing secure cleanup...${NC}"
 log_action "Performing cleanup"
 
 # Secure deletion of sensitive files
-shred -vzu ./boot.key 2>/dev/null || true
-shred -vzu ./recovery.key 2>/dev/null || true
-shred -vzu ./luks-header-backup.img 2>/dev/null || true
-shred -vzu ./tpm_luks.conf 2>/dev/null || true
+remove_install_secrets
 
 # Clean up scripts
 shred -vzu /mnt/chroot.sh 2>/dev/null || true
 shred -vzu /mnt/bootloader.sh 2>/dev/null || true
 shred -vzu /mnt/set-install-vars.sh 2>/dev/null || true
-shred -vzu /mnt/sysctl.sh 2>/dev/null || true
-shred -vzu /mnt/sysctl-profile.conf 2>/dev/null || true
 rm -rf -- /mnt/sysctl-profile
 shred -vzu /mnt/ssh.sh 2>/dev/null || true
 shred -vzu /mnt/nftables.sh 2>/dev/null || true
 
-# Clear pacman cache
-arch-chroot /mnt bash -c "pacman -Scc --noconfirm"
+# Clear pacman cache. "pacman -Scc --noconfirm" answers the default N to
+# "remove ALL files from cache?" and removes nothing, so answer explicitly.
+arch-chroot /mnt bash -c "printf 'y\ny\n' | pacman -Scc" >/dev/null ||
+    echo -e "${BYellow}Could not clear the pacman package cache; run 'pacman -Scc' after first boot.${NC}" >&2
 
 # Clear bash history
 arch-chroot /mnt bash -c 'history -c && rm -f "$HOME/.bash_history"'
@@ -1345,3 +1534,7 @@ echo -e "${BGreen}Verify your external off-machine backups of recovery.key and l
 echo -e "${BYellow}(Live-ISO copies have been shredded; an encrypted copy of luks-header-backup.img is also at /root/luks-header-backup.img on the installed system, which should be moved off-machine.)${NC}"
 
 log_action "Installation completed successfully"
+
+# The copy taken before the chroot phase stops there; replace it with the
+# complete log now that everything has run.
+install -m 0600 "$INSTALL_LOG" "/mnt/root/$(basename "$INSTALL_LOG")" 2>/dev/null || true

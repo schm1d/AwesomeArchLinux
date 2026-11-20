@@ -27,6 +27,9 @@
 #   --encrypt-user     Move an existing user's home aside, create an empty
 #                      encrypted replacement tied to their login password,
 #                      and write recovery instructions.
+#   --allow-ssh-key-lockout
+#                      With --encrypt-user: proceed although the account can
+#                      only log in over SSH with keys stored in its home.
 #   --status           Show current fscrypt state.
 #   --uninstall        Remove pam_fscrypt wiring. Does not decrypt data.
 # =============================================================================
@@ -75,6 +78,10 @@ Usage: sudo $0 [--setup] [--encrypt-user USER] [--status] [--uninstall] [-h]
   --encrypt-user USER     Encrypt USER's home directory with their login
                           password as the protector. Saves recovery notes
                           to /root/fscrypt-recovery-<user>.txt (0600).
+  --allow-ssh-key-lockout With --encrypt-user: proceed although sshd only
+                          accepts public keys for USER and the keys live in
+                          the home being encrypted (USER loses SSH access
+                          until the keys are moved; console access required).
   --status                Show current fscrypt state.
   --uninstall             Remove pam_fscrypt wiring (does NOT decrypt data).
   -h, --help              Show this help.
@@ -91,6 +98,7 @@ EOF
 # --- Parse args ---
 ACTION="setup"
 TARGET_USER=""
+ALLOW_SSH_KEY_LOCKOUT=false
 
 if [[ $# -eq 0 ]]; then
     ACTION="setup"
@@ -104,6 +112,7 @@ else
                 TARGET_USER="$2"
                 shift 2
                 ;;
+            --allow-ssh-key-lockout) ALLOW_SSH_KEY_LOCKOUT=true; shift ;;
             --status)        ACTION="status"; shift ;;
             --uninstall)     ACTION="uninstall"; shift ;;
             -h|--help)       show_help ;;
@@ -415,6 +424,14 @@ do_encrypt_user() {
             err "Refusing to encrypt '$u' from active logind session '$XDG_SESSION_ID' owned by '$u': 'loginctl terminate-user $u' would kill this script mid-migration. Log in directly as root on a local console (or via another admin user) and retry."
         fi
     fi
+    # Both checks above depend on environment variables that 'sudo su -',
+    # 'su -', doas, or a tmux/screen pane drop. terminate-user kills every
+    # process in the user's slice, so look at this process's own cgroup. Only
+    # root can get as far as terminate-user, hence the EUID condition.
+    if (( EUID == 0 )) && [[ -r /proc/self/cgroup ]] &&
+       grep -Eq "/user-${uid}\.slice(/|\$)" /proc/self/cgroup; then
+        err "Refusing to encrypt '$u': this shell runs inside '$u''s login session (user-${uid}.slice), so 'loginctl terminate-user $u' would kill this script mid-migration. Log in directly as root on a local console (or via another admin user) and retry."
+    fi
 
     # Prereqs: setup must already have run
     command -v fscrypt >/dev/null 2>&1 || err "fscrypt is not installed. Run: sudo $0 --setup"
@@ -440,6 +457,69 @@ do_encrypt_user() {
     local moved="${home}.pre-encrypt"
     if [[ -e "$moved" || -L "$moved" ]]; then
         err "$moved already exists. Refusing to clobber. Remove or rename it first."
+    fi
+
+    # SSH interaction. The encrypted home starts empty and stays locked until a
+    # login hands the account password to pam_fscrypt. sshd looks for
+    # ~/.ssh/authorized_keys before that can happen and a public-key login
+    # never unlocks, so an account that can only log in with keys kept inside
+    # its home loses SSH access. Per the fscrypt README, over SSH only
+    # PasswordAuthentication unlocks automatically (not keyboard-interactive).
+    if [[ -s "$home/.ssh/authorized_keys" ]] && command -v sshd >/dev/null 2>&1; then
+        local sshd_effective="" ssh_methods="" ssh_alt ssh_keyfile
+        local ssh_login_without_key=false ssh_keys_outside_home=false
+        local -a ssh_alts=() ssh_keyfiles=()
+        # The keyword case of 'sshd -T' differs between OpenSSH releases.
+        sshd_effective=$(sshd -T -C "user=$u,host=localhost,addr=127.0.0.1" 2>/dev/null \
+            | awk '{ $1 = tolower($1); print }' || true)
+        if [[ -z "$sshd_effective" ]]; then
+            warn "Could not read the effective sshd configuration (sshd -T failed)."
+            warn "'$u' has SSH keys in $home/.ssh/authorized_keys. If sshd only accepts public keys, '$u' will be locked out of SSH after this migration: check before typing YES."
+        else
+            ssh_methods=$(awk '$1 == "authenticationmethods" { $1 = ""; sub(/^ +/, ""); print; exit }' <<< "$sshd_effective")
+            if [[ -z "$ssh_methods" || "$ssh_methods" == "any" ]]; then
+                if awk '($1 == "passwordauthentication" || $1 == "kbdinteractiveauthentication") && $2 == "yes" { found = 1 }
+                        END { exit !found }' <<< "$sshd_effective"; then
+                    ssh_login_without_key=true
+                fi
+            else
+                read -r -a ssh_alts <<< "$ssh_methods"
+                for ssh_alt in "${ssh_alts[@]}"; do
+                    if [[ ",$ssh_alt," != *,publickey,* && "$ssh_alt" =~ (password|keyboard-interactive) ]]; then
+                        ssh_login_without_key=true
+                    fi
+                done
+            fi
+
+            # Keys that sshd can read without the home: an absolute
+            # AuthorizedKeysFile outside it, a keys command, or a user CA.
+            read -r -a ssh_keyfiles <<< "$(awk '$1 == "authorizedkeysfile" { $1 = ""; sub(/^ +/, ""); print; exit }' <<< "$sshd_effective")"
+            for ssh_keyfile in "${ssh_keyfiles[@]}"; do
+                ssh_keyfile="${ssh_keyfile//%u/$u}"
+                ssh_keyfile="${ssh_keyfile//%U/$uid}"
+                ssh_keyfile="${ssh_keyfile//%h/$home}"
+                if [[ "$ssh_keyfile" == /* && "$ssh_keyfile" != "$home"/* && -s "$ssh_keyfile" ]]; then
+                    ssh_keys_outside_home=true
+                fi
+            done
+            if awk '($1 == "authorizedkeyscommand" || $1 == "trustedusercakeys") && $2 != "none" { found = 1 }
+                    END { exit !found }' <<< "$sshd_effective"; then
+                ssh_keys_outside_home=true
+            fi
+
+            if [[ "$ssh_login_without_key" == false && "$ssh_keys_outside_home" == false ]]; then
+                warn "sshd requires a public key for '$u' (AuthenticationMethods '${ssh_methods:-any}', no password login) and the only keys are in $home/.ssh/authorized_keys."
+                warn "After this migration '$u' cannot log in over SSH: the new home is empty and stays locked until a password login unlocks it."
+                if [[ "${ALLOW_SSH_KEY_LOCKOUT:-false}" == true ]]; then
+                    warn "Continuing because --allow-ssh-key-lockout was given. Console access is required to unlock $home."
+                else
+                    err "Refusing to encrypt '$u'. Move the keys outside the home first (e.g. 'AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys' with a root-owned copy of the keys) or enable SSH password login for '$u'; if console access is guaranteed, re-run with --allow-ssh-key-lockout. See README.md, 'SSH logins'."
+                fi
+            else
+                warn "SSH: a public-key login does not unlock $home, and keys kept in $home/.ssh/authorized_keys are unreadable while it is locked."
+                warn "Only a console login or an SSH password login (PasswordAuthentication) unlocks it automatically; after any other login run: fscrypt unlock $home"
+            fi
+        fi
     fi
 
     # Resolve the actual home, including homes outside /home, before moving
@@ -549,6 +629,9 @@ EOF
 
    1. Log in as '$u' at the console / display manager using their normal
       login password. pam_fscrypt will unlock $home automatically.
+      Over SSH only a password login (PasswordAuthentication) unlocks it;
+      a public-key login does not, and ~/.ssh/authorized_keys is not
+      readable by sshd while the home is locked (see README.md, "SSH logins").
 
    2. Copy their previous files back into the now-encrypted home, e.g.:
 

@@ -26,6 +26,8 @@ sudo ./postfix.sh -d example.com -H mx1.example.com \
 2. **TLS certificate** for the mail hostname (e.g., via certbot/nginx.sh)
 3. **DNS control** over your domain
 4. **DNSSEC** on your domain (required for DANE)
+5. A **local recursive resolver** (for example unbound) if the Spamhaus DNSBL
+   is to be effective; see [Postscreen DNSBLs and the resolver](#postscreen-dnsbls-and-the-resolver)
 
 ### Options
 
@@ -34,8 +36,8 @@ sudo ./postfix.sh -d example.com -H mx1.example.com \
 | `-d DOMAIN` | Mail domain | *required* |
 | `-H HOSTNAME` | Mail server hostname | `mail.$DOMAIN` |
 | `-s SELECTOR` | DKIM selector name | `default` |
-| `-r HOST` | SMTP relay for outbound (hybrid) | |
-| `-R PORT` | SMTP relay port | `587` |
+| `-r HOST` | SMTP relay for outbound (hybrid). Use the provider's hostname, not an IP address, so its certificate can be verified | |
+| `-R PORT` | SMTP relay port (`465` selects implicit TLS) | `587` |
 | `-u USER` | SMTP relay username | |
 | `--relay-password-file FILE` | Read the SMTP relay password from a private, non-symlink file | |
 | `--relay-spf-include DOMAIN` | Provider-published SPF include domain | |
@@ -97,15 +99,66 @@ sudo ./postfix.sh -d example.com -H mx1.example.com \
 | **Full MX** | `inet_interfaces = all` | Accept inbound + outbound |
 | **TLS 1.2+** | ECDHE/AEAD-only cipher suite | Removes legacy protocols and ciphers |
 | **DANE** | `smtp_tls_security_level = dane` | DNSSEC-verified TLS when usable TLSA records exist; opportunistic otherwise |
-| **Postscreen** | DNSBL + protocol tests | Block bots before smtpd |
+| **Relay TLS** | `smtp_tls_security_level = secure` | With relay credentials or relay port 465: mandatory TLS and a verified relay certificate (see below) |
+| **Postscreen** | DNSBL (reply-filtered) + protocol tests | Block bots before smtpd |
+| **Role addresses** | `virtual_alias_maps` | `root@`, `abuse@`, `dmarc-reports@`, `tls-reports@` reach the administrator |
 | **SMTP smuggling** | `smtpd_forbid_bare_newline` | CVE-2023-51764 protection |
 | **Virtual mailbox** | LMTP to Dovecot | No system user per mailbox |
 | **Rate limiting** | 10 conn/min, 30 msg/min | Dual-layer with rspamd |
 | **Milters** | OpenDKIM + rspamd | DKIM signing + spam filtering |
+| **SMTP AUTH** | `smtpd_sasl_auth_enable = no` globally | AUTH is offered on 587 and 465 only, never on the MX port 25 |
 | **Submission** | Port 587 (STARTTLS) | Authenticated user submission |
 | **SMTPS** | Port 465 (implicit TLS) | RFC 8314 submission |
 | **Header privacy** | Strip on submission only | Hide sender IP/client |
 | **VRFY disabled** | `disable_vrfy_command = yes` | Prevent user enumeration |
+
+#### Outbound relay TLS
+
+Without a relay, outbound mail uses `dane`. With `-r HOST` the level depends
+on what is sent to the relay:
+
+| Relay options | `smtp_tls_security_level` | Reason |
+|---|---|---|
+| `-r HOST` only (IP-authorized relay) on a STARTTLS port | `dane` | Unchanged: opportunistic unless the relay publishes TLSA records |
+| `-u USER --relay-password-file FILE`, or `-R 465` | `secure` | TLS is mandatory and the certificate must match the relay hostname. `dane` would fall back to opportunistic TLS for a relay without TLSA records, so a man-in-the-middle could strip STARTTLS or present any certificate and collect the password |
+| the same, with `-r` given as an IP address | `encrypt` | TLS is mandatory, but a certificate name cannot be matched against an IP address. The script warns; use the hostname |
+
+With credentials, `smtp_sasl_security_options = noanonymous, noplaintext`
+keeps the password from ever being offered on an unencrypted session, and
+`-R 465` adds `smtp_tls_wrappermode = yes` (implicit TLS). Earlier versions
+of the script used `dane` for every relay; if mail to the relay is deferred
+with a certificate verification error after re-running, check that `-r` is the
+name on the provider's certificate.
+
+#### Postscreen DNSBLs and the resolver
+
+```
+postscreen_dnsbl_sites = zen.spamhaus.org=127.0.0.[2..11]*3, bl.spamcop.net=127.0.0.2*2, b.barracudacentral.org=127.0.0.2*2
+```
+
+The `=reply` filters are required. Spamhaus refuses queries that arrive
+through public or ISP resolvers (Cloudflare, Google, Quad9 and similar) and
+answers them with an error code in `127.255.255.0/24`. Without a filter
+postscreen treats any answer as a listing, so every remote server scores 3 and
+all inbound mail is rejected. With the filter such a resolver is harmless, but
+the Spamhaus list then never matches. The script probes the Spamhaus test
+entry (`2.0.0.127.zen.spamhaus.org`) at the end and warns when the list is not
+usable from this host. To make it effective, run a local recursive resolver
+(for example unbound) or use a Spamhaus DQS key. The base installer of this
+repository points systemd-resolved at Cloudflare, so expect that warning on a
+freshly installed host.
+
+#### Role addresses
+
+`myorigin` is the mail domain, so local mail to `root` (cron, systemd, smartd)
+is addressed to `root@DOMAIN`. That domain is a virtual mailbox domain: the
+local `aliases` file is not consulted for it, and an address without a mailbox
+bounces. The script therefore maintains `/etc/postfix/valiases`
+(`virtual_alias_maps`) and maps `root@`, `abuse@`, `dmarc-reports@` and
+`tls-reports@DOMAIN` (the last two are published in the generated DMARC and
+TLS-RPT records) to the admin address. An address that already has a mailbox
+in `vmailbox` or an entry in `valiases` is left alone, so the file can be
+edited by hand; run `postmap lmdb:/etc/postfix/valiases` afterwards.
 
 ### 3. Dovecot (IMAP)
 
@@ -158,7 +211,7 @@ The script outputs all required DNS records:
 | **SPF** | Authorizes sending IPs |
 | **DKIM** | Public key for signature verification |
 | **DMARC** | Policy for failed SPF/DKIM (starts at quarantine) |
-| **DANE/TLSA** | Certificate pinning via DNSSEC (`TLSA 3 1 1` leaf SPKI — requires `certbot --reuse-key` / `reuse_key = True` — and `TLSA 2 1 1` issuing CA SPKI from `chain.pem`) |
+| **DANE/TLSA** | Certificate pinning via DNSSEC. `TLSA 3 1 1` (leaf SPKI) is the record to rely on; it requires `certbot --reuse-key` / `reuse_key = True`. `TLSA 2 1 1` (SPKI of the CA that issued the current certificate, from `chain.pem`) is printed as an optional extra: Let's Encrypt issues from several intermediates and may switch at any renewal, so that record alone stops matching. Publish it only in addition to `3 1 1`, or publish one for every active intermediate |
 | **MTA-STS** | Strict Transport Security for SMTP |
 | **TLS-RPT** | TLS failure reporting |
 | **PTR** | Reverse DNS (set at hosting provider) |
@@ -181,6 +234,15 @@ systemctl restart dovecot
 ```
 
 Back up `/etc/dovecot/mail-crypt.key` separately and securely. It is the global private key used to decrypt stored mail; losing it makes encrypted messages unrecoverable. The installer refuses to generate a new key over an existing Maildir.
+
+### Re-running the Script
+
+The script can be run again after a change (new certificate path, selector,
+relay). It rewrites the configuration and then restarts ClamAV, OpenDKIM,
+rspamd, Dovecot and Postfix so that the running daemons use the new files and
+systemd sandboxes; IMAP sessions are disconnected briefly and ClamAV reloads
+its signature database. Existing mailboxes (`vmailbox`), aliases (`valiases`),
+Dovecot users, DKIM keys and the mail-encryption key are preserved.
 
 ### Add DNS Records
 
@@ -337,6 +399,7 @@ systemctl restart rspamd
 | `/etc/postfix/master.cf` | Service definitions (postscreen, submission, smtps) |
 | `/etc/postfix/header_checks_submission` | Header stripping for submission |
 | `/etc/postfix/vmailbox{,.lmdb}` | Virtual mailbox source and compiled LMDB map |
+| `/etc/postfix/valiases{,.lmdb}` | Virtual alias source and compiled LMDB map (role addresses) |
 | `/etc/postfix/aliases{,.lmdb}` | System alias source and compiled LMDB map |
 | `/etc/postfix/sasl_passwd{,.lmdb}` | Relay credential source and compiled LMDB map (if configured) |
 | `/etc/dovecot/dovecot.conf` | Complete Dovecot 2.4 config: TLS, auth, LMTP, Sieve, and encrypted Maildir |

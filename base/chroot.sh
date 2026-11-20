@@ -145,16 +145,20 @@ VCEOF
 # Translate vconsole keymap to X11 layout using systemd's kbd-model-map.
 vconsole_to_x11() {
     local keymap="$1"
-    local layout="" variant="" line
+    local layout="" model="" variant="" line
     local map_file="/usr/share/systemd/kbd-model-map"
 
     if [[ -f "$map_file" ]]; then
-        # Match the first column (console keymap) exactly
-        line=$(awk -v km="$keymap" '$1 == km { print; exit }' "$map_file")
+        # Columns: consolelayout xlayout xmodel xvariant xoptions.
+        # Match the first column (console keymap) exactly.
+        line=$(awk -v km="$keymap" '!/^#/ && $1 == km { print; exit }' "$map_file")
         if [[ -n "$line" ]]; then
-            layout=$(echo "$line" | awk '{print $3}')
-            variant=$(echo "$line" | awk '{print $4}')
-            # kbd-model-map uses "" for empty variant
+            layout=$(awk '{print $2}' <<< "$line")
+            model=$(awk '{print $3}' <<< "$line")
+            variant=$(awk '{print $4}' <<< "$line")
+            # kbd-model-map uses "-" for an empty field
+            [[ "$layout" == "-" ]] && layout=""
+            [[ "$model" == "-" ]] && model=""
             if [[ "$variant" == '""' || "$variant" == "-" ]]; then
                 variant=""
             fi
@@ -183,18 +187,19 @@ vconsole_to_x11() {
         esac
     fi
 
-    echo "$layout" "$variant"
+    # Variant last: it is the only field that may be empty.
+    echo "$layout" "${model:-pc105}" "$variant"
 }
 
 echo -e "${BBlue}Writing X11 keyboard configuration...${NC}"
-read -r X11_LAYOUT X11_VARIANT <<< "$(vconsole_to_x11 "$KEYMAP")"
+read -r X11_LAYOUT X11_MODEL X11_VARIANT <<< "$(vconsole_to_x11 "$KEYMAP")"
 install -d /etc/X11/xorg.conf.d
 {
     echo 'Section "InputClass"'
     echo '    Identifier "system-keyboard"'
     echo '    MatchIsKeyboard "on"'
     echo "    Option \"XkbLayout\" \"$X11_LAYOUT\""
-    echo '    Option "XkbModel" "pc105"'
+    echo "    Option \"XkbModel\" \"${X11_MODEL:-pc105}\""
     if [[ -n "$X11_VARIANT" ]]; then
         echo "    Option \"XkbVariant\" \"$X11_VARIANT\""
     fi
@@ -251,9 +256,13 @@ DNSOverTLS=no
 IPv6PrivacyExtensions=yes
 
 [DHCPv4]
-UseDNS=no  # Don't accept DNS from DHCP
+# systemd does not allow a comment after a value on the same line: the whole
+# "no  # ..." string is rejected and the setting silently keeps its default.
+# Don't accept DNS from DHCP
+UseDNS=no
 UseDomains=no
-UseNTP=no  # Use our own NTP configuration
+# Use our own NTP configuration
+UseNTP=no
 
 [DHCPv6]
 UseDNS=no
@@ -375,6 +384,23 @@ cat <<EOF > /etc/nftables.conf
 flush ruleset
 
 table inet filter {
+    # Per-source SSH connection tracking for the rate limit below. A plain
+    # "limit rate" is ONE bucket shared by every client, so background scan
+    # noise on the SSH port would lock the legitimate admin out.
+    set ssh_ratelimit4 {
+        type ipv4_addr
+        flags dynamic
+        timeout 2m
+        size 65535
+    }
+
+    set ssh_ratelimit6 {
+        type ipv6_addr
+        flags dynamic
+        timeout 2m
+        size 65535
+    }
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -387,12 +413,21 @@ table inet filter {
         # Drop invalid connections
         ct state invalid drop
 
-        # Allow ICMP & ICMPv6 (Path MTU Discovery & IPv6 Neighbor Discovery)
-        ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
-        ip6 nexthdr icmpv6 icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+        # Allow ICMP & ICMPv6 (Path MTU Discovery, IPv6 Neighbor Discovery, MLD).
+        # "meta l4proto" also matches ICMPv6 behind extension headers, which
+        # "ip6 nexthdr" does not; MLD queries must be answered or switches with
+        # MLD snooping stop forwarding neighbour-discovery multicast to us.
+        meta l4proto icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept
+        meta l4proto ipv6-icmp icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query, mld-listener-report, mld-listener-done, mld2-listener-report } accept
 
-        # Allow SSH with rate limiting (burst allows legitimate reconnects)
-        tcp dport ${SSH_PORT} ct state new limit rate 4/minute burst 8 packets accept
+        # DHCPv6 client: server replies go to a link-local address that
+        # conntrack cannot relate to our multicast solicit.
+        ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+
+        # Allow SSH with per-source rate limiting (burst allows legitimate reconnects)
+        tcp dport ${SSH_PORT} ct state new add @ssh_ratelimit4 { ip saddr limit rate over 4/minute burst 8 packets } drop
+        tcp dport ${SSH_PORT} ct state new add @ssh_ratelimit6 { ip6 saddr limit rate over 4/minute burst 8 packets } drop
+        tcp dport ${SSH_PORT} ct state new accept
 
         # Drop everything else
         counter drop
@@ -468,9 +503,12 @@ CLAMD_CONF="/etc/clamav/clamd.conf"
 ensure_clamd_option() {
   local KEY="$1"
   local VALUE="$2"
-  # If the key exists, replace it; otherwise, append it
-  if grep -Eq "^#?\s*${KEY}\s" "$CLAMD_CONF"; then
-    sed -Ei "s|^#?\s*${KEY}.*|${KEY} ${VALUE}|" "$CLAMD_CONF"
+  # If the key exists, replace it; otherwise, append it. The option name is
+  # matched as a whole word: a bare prefix match let "Bytecode" overwrite the
+  # BytecodeSecurity/BytecodeTimeout lines and "AlertEncrypted" the
+  # AlertEncryptedArchive/AlertEncryptedDoc ones.
+  if grep -Eq "^#?\s*${KEY}(\s|\$)" "$CLAMD_CONF"; then
+    sed -Ei "s|^#?\s*${KEY}(\s.*)?\$|${KEY} ${VALUE}|" "$CLAMD_CONF"
   else
     echo "${KEY} ${VALUE}" >> "$CLAMD_CONF"
   fi
@@ -788,20 +826,34 @@ systemctl mask dhcpcd.service 2>/dev/null || true
 # Wi-Fi regulatory domain: the wireless-regdb package ships a udev hook
 # (/usr/bin/set-wireless-regdom) that reads /etc/conf.d/wireless-regdom
 # and applies it. If the file is missing the hook exits 1 every udev
-# event. Derive a 2-letter country code from the LOCALE (e.g.
-# de_CH.UTF-8 -> CH, en_US.UTF-8 -> US). Fall back to a blank line that
-# the user can fill in if we can't infer one.
+# event. Derive the 2-letter country code from where the machine is: the
+# timezone (Europe/Zurich -> CH via tzdata's zone.tab). The locale is only a
+# fallback, and never the en_US default, which says nothing about location and
+# would apply US channel/power rules everywhere. If nothing can be inferred,
+# leave a commented line (the kernel then keeps the conservative world domain).
 WIRELESS_COUNTRY=""
-case "$LOCALE" in
-    *_*) WIRELESS_COUNTRY="${LOCALE#*_}"; WIRELESS_COUNTRY="${WIRELESS_COUNTRY%%.*}" ;;
-esac
+WIRELESS_COUNTRY_SOURCE=""
+if [[ -r /usr/share/zoneinfo/zone.tab ]]; then
+    WIRELESS_COUNTRY=$(awk -F '\t' -v tz="$TIMEZONE" '!/^#/ && $3 == tz { print $1; exit }' /usr/share/zoneinfo/zone.tab)
+    WIRELESS_COUNTRY_SOURCE="timezone $TIMEZONE"
+fi
+if [[ -z "$WIRELESS_COUNTRY" && "$TIMEZONE" == US/* ]]; then
+    WIRELESS_COUNTRY="US"
+    WIRELESS_COUNTRY_SOURCE="timezone $TIMEZONE"
+fi
+if [[ -z "$WIRELESS_COUNTRY" && "$LOCALE" != en_US* ]]; then
+    case "$LOCALE" in
+        *_*) WIRELESS_COUNTRY="${LOCALE#*_}"; WIRELESS_COUNTRY="${WIRELESS_COUNTRY%%.*}" ;;
+    esac
+    WIRELESS_COUNTRY_SOURCE="locale $LOCALE"
+fi
 mkdir -p /etc/conf.d
-if [[ -n "$WIRELESS_COUNTRY" && ${#WIRELESS_COUNTRY} -eq 2 ]]; then
+if [[ "$WIRELESS_COUNTRY" =~ ^[A-Z]{2}$ ]]; then
     echo "WIRELESS_REGDOM=\"$WIRELESS_COUNTRY\"" > /etc/conf.d/wireless-regdom
-    echo -e "${BBlue}Wi-Fi regulatory domain set to $WIRELESS_COUNTRY (from locale).${NC}"
+    echo -e "${BBlue}Wi-Fi regulatory domain set to $WIRELESS_COUNTRY (from $WIRELESS_COUNTRY_SOURCE).${NC}"
 else
     echo "# WIRELESS_REGDOM=\"XX\"  # set your 2-letter country code (ISO 3166)" > /etc/conf.d/wireless-regdom
-    echo -e "${BYellow}Could not infer WIRELESS_REGDOM from LOCALE; edit /etc/conf.d/wireless-regdom${NC}"
+    echo -e "${BYellow}Could not infer WIRELESS_REGDOM from the timezone or locale; edit /etc/conf.d/wireless-regdom${NC}"
 fi
 
 # Installing Fail2ban
@@ -868,6 +920,11 @@ Defaults insults
 Defaults lecture=once
 Defaults logfile=/var/log/sudo.log
 Defaults log_input, log_output
+# log_input records everything typed under sudo. Keep passwords entered at
+# prompts of the commands being run (passwd, cryptsetup, ssh, ...) out of
+# /var/log/sudo-io, and cap the number of session logs so they cannot fill /var.
+Defaults !log_passwords
+Defaults maxseq=10000
 
 # Allow root and sudo group full access
 root ALL=(ALL:ALL) ALL
@@ -1194,8 +1251,31 @@ sleep 1
 #   le    - BLE only; A2DP headphones/speakers will not work
 : "${BLUETOOTH_CONTROLLER_MODE:=dual}"
 
+# True when a Bluetooth controller is present. Asks the kernel first: many
+# adapters (MediaTek, some Realtek combo cards) do not carry the word
+# "Bluetooth" in their USB/PCI descriptor. The lsusb/lspci text match is only
+# a fallback, and its output is captured first because "cmd | grep -q" under
+# pipefail can report failure (SIGPIPE) on a match.
+bluetooth_hardware_present() {
+  local entry hw_list
+  for entry in /sys/class/bluetooth/hci*; do
+    [[ -e "$entry" ]] && return 0
+  done
+  # USB Wireless Controller class, Bluetooth programming interface (e0/01/01)
+  for entry in /sys/bus/usb/devices/*/bInterfaceClass; do
+    [[ -r "$entry" ]] || continue
+    if [[ "$(< "$entry")" == "e0" &&
+          "$(cat "${entry%/*}/bInterfaceSubClass" 2>/dev/null)" == "01" &&
+          "$(cat "${entry%/*}/bInterfaceProtocol" 2>/dev/null)" == "01" ]]; then
+      return 0
+    fi
+  done
+  hw_list=$( { lsusb 2>/dev/null || true; lspci 2>/dev/null || true; } )
+  grep -qi "bluetooth" <<< "$hw_list"
+}
+
 configure_bluetooth() {
-  if lsusb | grep -iq "bluetooth" || lspci | grep -iq "bluetooth"; then
+  if bluetooth_hardware_present; then
     echo -e "${BBlue}Bluetooth hardware detected.${NC}"
 
     if ! pacman -Qi bluez bluez-utils &>/dev/null; then
@@ -1244,7 +1324,11 @@ EOF
       cat <<'EOF' | install -Dm644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf
   [Service]
   ProtectHome=true
-  RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+  # bluetoothd needs more than AF_BLUETOOTH + AF_UNIX: AF_ALG for the kernel
+  # crypto it uses to generate the IRK (without it "Privacy=device" silently
+  # stays off: "Failed to open crypto"), AF_NETLINK for udev-based plugins,
+  # and AF_INET for the ioctl socket that brings PAN (bnep) interfaces up.
+  RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH AF_ALG AF_NETLINK AF_INET
 EOF
   
   
@@ -1301,6 +1385,12 @@ if [[ "$NVIDIA_CARD" == true ]]; then
     echo "Detected NVIDIA GPU:$nvidia_gpu_model"
 
     case "$nvidia_gpu_model" in
+        # Turing data-centre cards are still sold as "Tesla" (TU104GL [Tesla T4]).
+        # Match them before the pre-Turing "Tesla" catch-all below, which
+        # otherwise sends them to nouveau.
+        *"Tesla T4"*|*"TU10"*|*"TU11"*)
+            NVIDIA_OPEN_SUPPORTED=true
+            ;;
         # Pre-Turing architectures (Tesla, Fermi, Kepler, Maxwell, Pascal, Volta):
         # nvidia-open requires Turing+ GSP firmware, and legacy closed drivers live
         # only in the AUR. Fall back to open-source mesa (nouveau) so the system
@@ -1575,7 +1665,8 @@ Type=oneshot
 # checkupdates syncs a temporary database, leaving pacman's live sync database
 # untouched. Exit 2 means there are no pending updates and is not an error.
 ExecStart=/usr/bin/checkupdates
-StandardOutput=file:/var/log/pacman-updates.log
+# truncate: (not file:) so a shorter list does not keep the tail of an older one.
+StandardOutput=truncate:/var/log/pacman-updates.log
 StandardError=inherit
 SuccessExitStatus=2
 EOF
@@ -1601,14 +1692,14 @@ ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectKernelLogs=no
 ProtectControlGroups=no
-# AF_NETLINK is required for PAM/auditd communication during session setup.
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# RestrictAddressFamilies=, LockPersonality= and RestrictRealtime= are seccomp
+# filters. They are inherited by every process sshd starts, i.e. by each login
+# session, and not even sudo can lift them: tcpdump, nmap, AF_ALG users and
+# setarch would all fail over SSH. They are therefore deliberately not set.
 IPAddressAllow=any
 IPAddressDeny=
 PrivateDevices=no
 DevicePolicy=auto
-LockPersonality=yes
-RestrictRealtime=yes
 Restart=on-failure
 RestartSec=5s
 EOF
@@ -1619,10 +1710,15 @@ mkdir -p /etc/systemd/system/NetworkManager.service.d/
 cat > /etc/systemd/system/NetworkManager.service.d/hardening.conf <<'EOF'
 [Service]
 RuntimeDirectory=NetworkManager
+# Keep /run/NetworkManager across a restart: it holds the state NM uses to
+# take its devices over again without tearing the connections down.
+RuntimeDirectoryPreserve=yes
 StateDirectory=NetworkManager
 ProtectSystem=strict
 ReadWritePaths=-/etc/NetworkManager -/etc/resolv.conf
-ProtectHome=yes
+# read-only like the upstream unit, not "yes": 802.1X and VPN profiles
+# commonly reference certificates and keys stored under /home.
+ProtectHome=read-only
 ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectControlGroups=yes
@@ -1675,7 +1771,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes
 LockPersonality=yes
 LimitNOFILE=8192
-TasksMax=16
+# clamd's default MaxThreads is 10, plus the listener, a database-reload
+# thread and helpers; 16 made multi-threaded scans fail to spawn workers.
+TasksMax=64
 Restart=on-failure
 RestartSec=10s
 EOF
@@ -1851,6 +1949,11 @@ echo -e "${BBlue}Installation completed! You can reboot the system now.${NC}"
 # remain resumable via recovery-mount.sh
 shred -u /ssh.sh 2>/dev/null || true
 shred -u /nftables.sh 2>/dev/null || true
+# Leave a small permanent record of the install profile. /root/.install-env is
+# removed below (it holds install-time details), and utils/audit-check.sh must
+# not have to guess from "runs in a VM" whether this is a workstation or a VPS.
+printf 'INSTALL_TYPE=baremetal\n' > /etc/awesome-install-profile
+chmod 0644 /etc/awesome-install-profile
 shred -u /root/.install-env 2>/dev/null || true
 shred -u /bootloader.sh 2>/dev/null || true
 shred -u /chroot.sh 2>/dev/null || true

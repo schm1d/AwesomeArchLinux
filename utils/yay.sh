@@ -4,6 +4,9 @@
 # Script:      yay.sh
 # Description: Installs the yay AUR helper on Arch Linux safely on systems with
 #              /tmp mounted noexec and restrictive home default POSIX ACLs.
+#              yay itself is an AUR recipe: it is built through the reviewed
+#              builder (hardening/lib/aur-review.sh), which shows the recipe
+#              and needs a typed confirmation on the terminal.
 #
 # Author:      Bruno Schmid @brulliant
 # LinkedIn:    https://www.linkedin.com/in/schmidbruno/
@@ -26,7 +29,7 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 # Check dependencies
-for cmd in git makepkg pacman; do
+for cmd in pacman sudo; do
     if ! command -v "$cmd" &>/dev/null; then
         echo -e "${BRed}Required command '$cmd' not found.${NC}" >&2
         exit 1
@@ -52,24 +55,32 @@ if command -v yay &>/dev/null; then
     exit 0
 fi
 
-echo -e "${BBlue}Installing base-devel and go (required for building yay)...${NC}"
-sudo pacman -S --needed --noconfirm base-devel go
-
-# Build inside ~/.cache rather than /tmp (mounted noexec on hardened installs)
-BUILDDIR="$(mktemp -d "$HOME/.cache/yay-bootstrap.XXXXXX")"
-if command -v setfacl &>/dev/null; then
-    setfacl -b -k "$BUILDDIR" 2>/dev/null || true
+# AUR recipes are mutable, user-submitted build instructions, so yay is not
+# built with a bare `makepkg -si --noconfirm`. The reviewed builder shows the
+# exact recipe commit, waits for a typed confirmation, installs the build
+# dependencies (go) from the signed repositories and builds as a disposable
+# unprivileged user under /var/cache.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+AUR_LIB=""
+for candidate in "$SCRIPT_DIR/../hardening/lib/aur-review.sh" "$SCRIPT_DIR/aur-review.sh"; do
+    if [ -r "$candidate" ]; then
+        AUR_LIB="$candidate"
+        break
+    fi
+done
+if [ -z "$AUR_LIB" ]; then
+    echo -e "${BRed}hardening/lib/aur-review.sh not found. Run this script from a full checkout of the repository.${NC}" >&2
+    exit 1
 fi
-mkdir -p -m 0700 "$BUILDDIR/tmp"
-trap 'rm -rf -- "$BUILDDIR"' EXIT
 
-echo -e "${BBlue}Cloning yay from AUR...${NC}"
-git clone https://aur.archlinux.org/yay.git "$BUILDDIR/yay"
+echo -e "${BBlue}Installing base-devel and git (required for building yay)...${NC}"
+sudo pacman -S --needed --noconfirm base-devel git
 
-echo -e "${BBlue}Building and installing yay...${NC}"
-(
-    cd "$BUILDDIR/yay"
-    TMPDIR="$BUILDDIR/tmp" GOTMPDIR="$BUILDDIR/tmp" makepkg -si --noconfirm
-)
+echo -e "${BBlue}Building yay from the AUR (the recipe is shown for review first)...${NC}"
+# shellcheck disable=SC2016
+if ! sudo bash -c 'set -euo pipefail; source "$1"; aal_aur_install_reviewed "$2"' _ "$AUR_LIB" yay; then
+    echo -e "${BRed}yay was not installed (review declined, no terminal, or the build failed).${NC}" >&2
+    exit 1
+fi
 
 echo -e "${BGreen}yay installed successfully ($(yay --version)).${NC}"

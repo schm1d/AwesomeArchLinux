@@ -146,6 +146,37 @@ remount_all() {
     echo -e "${BGreen}Everything mounted successfully${NC}"
 }
 
+# What the installer does after a successful chroot phase and a resumed run
+# would otherwise skip: remove the staged scripts, and point out the
+# install-session LUKS key of the UKI profile. $1 is the boot profile, which
+# the caller reads BEFORE the chroot phase: chroot.sh removes
+# /root/.install-env when it completes.
+finish_resumed_install() {
+    local boot_profile="${1:-}"
+    local staged luks_device=""
+    local -a staged_files=(chroot.sh vps-chroot.sh bootloader.sh set-install-vars.sh ssh.sh nftables.sh)
+
+    echo -e "${BBlue}Removing staged installer files from /mnt...${NC}"
+    for staged in "${staged_files[@]}"; do
+        if [[ -f "/mnt/$staged" ]]; then
+            shred -zu "/mnt/$staged" 2>/dev/null || unlink "/mnt/$staged" || true
+        fi
+    done
+    if [[ -d /mnt/sysctl-profile ]]; then
+        find /mnt/sysctl-profile -xdev -mindepth 1 -maxdepth 1 -type f -delete
+        rmdir /mnt/sysctl-profile 2>/dev/null || true
+    fi
+
+    if [[ "$boot_profile" == "uki" ]]; then
+        luks_device=$(cryptsetup status "$LUKS_NAME" 2>/dev/null | awk '$1 == "device:" { print $2; exit }')
+        echo -e "${BYellow}UKI profile: LUKS key slot 1 still holds the temporary install-session key.${NC}"
+        echo "The installer removes it after the chroot phase; a resumed run cannot (the key file was shredded)."
+        echo "Remove the slot now or after first boot (asks for your passphrase):"
+        echo "  cryptsetup luksKillSlot ${luks_device:-<LUKS partition>} 1"
+    fi
+    echo -e "${BGreen}Installation steps completed.${NC}"
+}
+
 # Continue interrupted chroot installation
 continue_install() {
     echo -e "${BBlue}Continuing installation...${NC}"
@@ -155,7 +186,10 @@ continue_install() {
         return 1
     fi
 
-    local chroot_target=""
+    local chroot_target="" boot_profile=""
+    if grep -Eqs '^export _?INSTALL_BOOTLOADER=uki$' /mnt/root/.install-env /mnt/set-install-vars.sh; then
+        boot_profile="uki"
+    fi
     if [[ -f /mnt/chroot.sh ]]; then
         chroot_target="/chroot.sh"
     elif [[ -f /mnt/vps-chroot.sh ]]; then
@@ -171,9 +205,11 @@ continue_install() {
             echo -e "${BBlue}Running $chroot_target with /root/.install-env...${NC}"
             arch-chroot /mnt "$chroot_target"
         fi
+        finish_resumed_install "$boot_profile"
     else
         echo -e "${BRed}Installation scripts or environment not found in /mnt${NC}" >&2
         echo "You may need to copy them again or run option 5 to repair manually." >&2
+        return 1
     fi
 }
 
@@ -185,6 +221,25 @@ enter_chroot() {
     fi
     echo -e "${BBlue}Entering arch-chroot at /mnt (type 'exit' to return)...${NC}"
     arch-chroot /mnt /bin/bash
+}
+
+# Run one menu action without letting its failure end the recovery session.
+# Under "set -e" a plain call exited the whole script on the first error (a
+# wrong LUKS passphrase, a busy mount, a missing file), dropping the operator
+# out of the menu. The action runs in a subshell so that errexit still stops
+# IT at the first failing step: calling it as "action || ..." would switch
+# errexit off inside the function and let it plough on (for example mount the
+# ESP on the live system after the LUKS open failed).
+run_menu_action() {
+    local action="$1" status=0
+    set +e
+    ( set -e; "$action" )
+    status=$?
+    set -e
+    if (( status != 0 )); then
+        echo -e "${BRed}'${action//_/ }' did not complete (exit status $status). Nothing further was attempted; back to the menu.${NC}" >&2
+    fi
+    return 0
 }
 
 # Main menu
@@ -200,11 +255,11 @@ while true; do
     read -r -p "Select option [1-6]: " choice
 
     case "$choice" in
-        1) show_status ;;
-        2) unmount_all ;;
-        3) remount_all ;;
-        4) continue_install ;;
-        5) enter_chroot ;;
+        1) run_menu_action show_status ;;
+        2) run_menu_action unmount_all ;;
+        3) run_menu_action remount_all ;;
+        4) run_menu_action continue_install ;;
+        5) run_menu_action enter_chroot ;;
         6)
             echo "Exiting..."
             exit 0

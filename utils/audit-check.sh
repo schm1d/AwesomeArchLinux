@@ -48,8 +48,26 @@ resolve_hostname() {
 }
 
 is_vps_profile() {
-    if [[ -r /root/.install-env ]] && grep -qE 'INSTALL_TYPE=.*vps' /root/.install-env 2>/dev/null; then
-        return 0
+    # The installers record the profile they applied in a persistent marker
+    # (INSTALL_TYPE=baremetal | vps | vps-harden): a workstation install that
+    # merely runs inside a VM must not be graded as a headless VPS. The file
+    # is read as data, never sourced; an unknown value falls through.
+    local profile=""
+    if [[ -r /etc/awesome-install-profile ]]; then
+        profile="$(awk -F= '$1 == "INSTALL_TYPE" { v = $2; gsub(/[[:space:]"\047]/, "", v); print v; exit }' \
+            /etc/awesome-install-profile 2>/dev/null || true)"
+        case "$profile" in
+            vps*)      return 0 ;;
+            baremetal) return 1 ;;
+        esac
+    fi
+    # Installs made before the marker existed: the installer's own environment
+    # file while it is still there, then whether this is a virtual machine.
+    if [[ -r /root/.install-env ]]; then
+        if grep -qE 'INSTALL_TYPE=.*vps' /root/.install-env 2>/dev/null; then
+            return 0
+        fi
+        return 1
     fi
     if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet 2>/dev/null; then
         return 0
@@ -370,14 +388,28 @@ check_filesystem_security() {
 check_authentication() {
     category_header "Authentication"
 
-    local faillock_found=false
-    if grep -rq "pam_faillock" /etc/pam.d/ 2>/dev/null || [[ -f /etc/security/faillock.conf ]]; then
-        faillock_found=true
+    # Stock Arch already ships pam_faillock and faillock.conf, so their mere
+    # presence proves nothing: check the lockout policy this project applies
+    # (deny = 5, unlock_time = 900). Unset keys use pam_faillock's defaults.
+    local faillock_conf="/etc/security/faillock.conf"
+    local faillock_deny="" faillock_unlock=""
+    if [[ -r "$faillock_conf" ]]; then
+        faillock_deny=$(awk -F= '/^[[:space:]]*deny[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); val = $2 } END { print val }' "$faillock_conf" 2>/dev/null)
+        faillock_unlock=$(awk -F= '/^[[:space:]]*unlock_time[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); val = $2 } END { print val }' "$faillock_conf" 2>/dev/null)
     fi
-    if [[ "$faillock_found" == true ]]; then
-        result_pass "PAM faillock is configured"
+    faillock_deny="${faillock_deny:-3}"
+    faillock_unlock="${faillock_unlock:-600}"
+    [[ "$faillock_unlock" == "never" ]] && faillock_unlock=0
+
+    if ! grep -rqE '^[^#]*pam_faillock' /etc/pam.d/ 2>/dev/null; then
+        result_fail "PAM faillock is not configured" "pam_faillock not found in /etc/pam.d/"
+    elif [[ "$faillock_deny" =~ ^[0-9]+$ && "$faillock_unlock" =~ ^[0-9]+$ ]] \
+        && (( faillock_deny >= 1 && faillock_deny <= 5 )) \
+        && (( faillock_unlock == 0 || faillock_unlock >= 900 )); then
+        result_pass "PAM faillock locks accounts (deny=$faillock_deny, unlock_time=$faillock_unlock)"
     else
-        result_fail "PAM faillock is not configured" "not found in /etc/pam.d/ or /etc/security/faillock.conf"
+        result_fail "PAM faillock policy should be deny <= 5 and unlock_time >= 900" \
+            "deny=$faillock_deny, unlock_time=$faillock_unlock"
     fi
 
     local pwquality_configured=false
@@ -455,7 +487,10 @@ check_ssh_hardening() {
         local key="$1"
         if [[ -n "$sshd_effective" ]]; then
             local eff
-            eff=$(awk -v k="${key,,}" '$1 == k { print $2; exit }' <<<"$sshd_effective")
+            # sshd -T prints lowercase keywords on older OpenSSH releases and
+            # CamelCase ones (PermitRootLogin) on current ones: compare
+            # case-insensitively, as sshd itself does.
+            eff=$(awk -v k="${key,,}" 'tolower($1) == k { print $2; exit }' <<<"$sshd_effective")
             if [[ -n "$eff" ]]; then
                 printf '%s' "$eff"
                 return
@@ -523,8 +558,10 @@ check_ssh_hardening() {
     fi
 
     val="$(get_ssh_setting "AllowTcpForwarding")"
-    if [[ "${val,,}" == "no" || "${disable_fwd,,}" == "yes" ]]; then
-        result_pass "TCP forwarding disabled (${val:+AllowTcpForwarding=$val}${val:-DisableForwarding=yes})"
+    if [[ "${val,,}" == "no" ]]; then
+        result_pass "TCP forwarding disabled (AllowTcpForwarding=$val)"
+    elif [[ "${disable_fwd,,}" == "yes" ]]; then
+        result_pass "TCP forwarding disabled (DisableForwarding=yes)"
     elif [[ -n "$val" ]]; then
         result_fail "AllowTcpForwarding should be no (or DisableForwarding yes)" "$val"
     else
@@ -532,13 +569,29 @@ check_ssh_hardening() {
     fi
 
     val="$(get_ssh_setting "AllowAgentForwarding")"
-    if [[ "${val,,}" == "no" || "${disable_fwd,,}" == "yes" ]]; then
-        result_pass "Agent forwarding disabled (${val:+AllowAgentForwarding=$val}${val:-DisableForwarding=yes})"
+    if [[ "${val,,}" == "no" ]]; then
+        result_pass "Agent forwarding disabled (AllowAgentForwarding=$val)"
+    elif [[ "${disable_fwd,,}" == "yes" ]]; then
+        result_pass "Agent forwarding disabled (DisableForwarding=yes)"
     elif [[ -n "$val" ]]; then
         result_fail "AllowAgentForwarding should be no (or DisableForwarding yes)" "$val"
     else
         result_fail "Agent forwarding not disabled" "not set"
     fi
+}
+
+# Effective DNSOverTLS= value of systemd-resolved. The last assignment wins, so
+# a later drop-in with DNSOverTLS=no must not be reported as "active" just
+# because an earlier file says yes.
+resolved_dnsovertls() {
+    local merged=""
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        merged="$(systemd-analyze cat-config systemd/resolved.conf 2>/dev/null || true)"
+    fi
+    if [[ -z "$merged" ]]; then
+        merged="$(cat /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d/*.conf 2>/dev/null || true)"
+    fi
+    awk -F= '/^[[:space:]]*DNSOverTLS[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); val = $2 } END { print val }' <<<"$merged"
 }
 
 # =============================================================================
@@ -567,15 +620,15 @@ check_network_security() {
     fi
 
     local dot_setting
-    dot_setting=$(grep -hE '^[[:space:]]*DNSOverTLS[[:space:]]*=[[:space:]]*(yes|opportunistic)' \
-        /etc/systemd/resolved.conf.d/*.conf /etc/systemd/resolved.conf 2>/dev/null | tail -n1 || true)
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null && [[ -n "$dot_setting" ]]; then
-        result_pass "DNS-over-TLS via systemd-resolved is active"
+    dot_setting="$(resolved_dnsovertls)"
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null \
+        && [[ "${dot_setting,,}" =~ ^(yes|true|on|1|opportunistic)$ ]]; then
+        result_pass "DNS-over-TLS via systemd-resolved is active (DNSOverTLS=$dot_setting)"
     elif systemctl is-active --quiet stubby 2>/dev/null; then
         result_pass "DNS-over-TLS via stubby (opt-in) is active"
     else
         result_fail "DNS-over-TLS is not active" \
-            "resolved=$(systemctl is-active systemd-resolved 2>/dev/null || echo 'not found'), stubby=$(systemctl is-active stubby 2>/dev/null || echo 'not found'), DoT=${dot_setting:-missing}"
+            "resolved=$(systemctl is-active systemd-resolved 2>/dev/null || echo 'not found'), stubby=$(systemctl is-active stubby 2>/dev/null || echo 'not found'), DNSOverTLS=${dot_setting:-not set}"
     fi
 
     local unexpected
@@ -704,6 +757,15 @@ check_service_security() {
     else
         result_warn "AppArmor MAC is not enabled (opt-in via hardening/apparmor/apparmor.sh)" \
             "kernel=${aa_kernel}"
+    fi
+
+    # hardening/apparmor/apparmor.sh loads the sshd profile in complain mode
+    # (violations are logged, nothing is blocked) until the operator has
+    # checked the log and re-run it with --enforce.
+    local aa_profiles="/sys/kernel/security/apparmor/profiles"
+    if [[ -r "$aa_profiles" ]] && grep -qE '^sshd \(complain\)$' "$aa_profiles" 2>/dev/null; then
+        result_warn "AppArmor sshd profile is in complain mode (logging only, not confining sshd)" \
+            "review the audit log, then run hardening/apparmor/apparmor.sh --enforce"
     fi
 
     if systemctl is-enabled --quiet clamav-freshclam 2>/dev/null || systemctl is-enabled --quiet clamav-freshclam-once.timer 2>/dev/null; then

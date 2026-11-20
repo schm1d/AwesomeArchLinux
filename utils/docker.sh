@@ -30,6 +30,21 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"    "$C_NC" "$1" >&2; exit 1; }
 MODE="podman"
 TARGET_USER="${SUDO_USER:-}"
 
+# Replace root-owned FILE with the content on stdin. A previous version with
+# different content is kept as FILE.bak.<timestamp>.
+install_config() {
+    local mode="$1" file="$2" tmp backup
+    tmp="$(mktemp "${file}.XXXXXX")"
+    cat > "$tmp"
+    chmod "$mode" "$tmp"
+    if [[ -f "$file" ]] && ! cmp -s -- "$file" "$tmp"; then
+        backup="${file}.bak.$(date +%Y%m%d%H%M%S)"
+        cp -a -- "$file" "$backup"
+        info "Existing $file saved as $backup"
+    fi
+    mv -f -- "$tmp" "$file"
+}
+
 usage() {
     cat <<EOF
 Usage: sudo $0 [--docker|--podman] [-u USERNAME] [-h]
@@ -70,7 +85,6 @@ if ! id "$TARGET_USER" &>/dev/null; then
     err "User '$TARGET_USER' does not exist."
 fi
 
-TARGET_GROUP="$(id -gn "$TARGET_USER")"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]] || err "Home directory '$TARGET_HOME' does not exist."
 
@@ -117,7 +131,9 @@ if [[ "$MODE" == "docker" ]]; then
 
     # Keep Docker's maintained built-in seccomp profile rather than fetching an
     # unpinned static JSON file from GitHub master that goes stale across upgrades.
-    cat > /etc/docker/daemon.json <<'EOF'
+    # default-ulimits entries need "Name": dockerd passes it on as RLIMIT_<NAME>,
+    # and an entry without it makes every container start fail.
+    install_config 0600 /etc/docker/daemon.json <<'EOF'
 {
     "icc": false,
     "no-new-privileges": true,
@@ -130,8 +146,8 @@ if [[ "$MODE" == "docker" ]]; then
     },
     "storage-driver": "overlay2",
     "default-ulimits": {
-        "nofile": { "Hard": 64000, "Soft": 64000 },
-        "nproc":  { "Hard": 4096,  "Soft": 4096  }
+        "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 },
+        "nproc":  { "Name": "nproc",  "Hard": 4096,  "Soft": 4096  }
     },
     "default-address-pools": [
         { "base": "172.17.0.0/16", "size": 24 }
@@ -141,8 +157,12 @@ if [[ "$MODE" == "docker" ]]; then
     "ip-masq": true
 }
 EOF
-    chmod 0600 /etc/docker/daemon.json
-    msg "daemon.json written with hardened defaults"
+    if daemon_validate_out="$(dockerd --validate --config-file /etc/docker/daemon.json 2>&1)"; then
+        msg "daemon.json written with hardened defaults (validated by dockerd)"
+    else
+        printf '%s\n' "$daemon_validate_out" >&2
+        err "dockerd rejected /etc/docker/daemon.json; docker.service was left untouched."
+    fi
 
     if ! getent group docker &>/dev/null; then
         groupadd docker
@@ -164,26 +184,18 @@ EOF
     echo -e "${C_YELLOW}========================================================================${C_NC}"
     echo
 
-    msg "Creating hardened systemd override for docker.service..."
+    msg "Creating systemd override for docker.service..."
     install -d -m 0755 /etc/systemd/system/docker.service.d
 
-    # dockerd must manage cgroups, load storage/network modules, and configure
-    # forwarding sysctls; optional '-' prefixes avoid 226/NAMESPACE before first start.
+    # The packaged unit runs "dockerd -H fd:// --containerd=/run/containerd/containerd.sock"
+    # and is intentionally not sandboxed: dockerd mounts container root filesystems
+    # and network namespaces that containerd/runc (other units) must see, writes
+    # /run/docker.pid and /run/docker, and unpacks image layers that contain
+    # setuid files. ProtectSystem=, ProtectHome=, ReadWritePaths=, ProtectKernelLogs=
+    # (private mount namespace) and RestrictSUIDSGID= break container start or
+    # image pulls, so containment comes from daemon.json above instead.
     cat > /etc/systemd/system/docker.service.d/hardened.conf <<'EOF'
 [Service]
-StateDirectory=docker
-ProtectHome=read-only
-ProtectSystem=strict
-ReadWritePaths=-/var/lib/docker /etc/docker -/run/docker -/run/containerd -/run/docker.sock
-
-ProtectKernelTunables=false
-ProtectKernelModules=false
-ProtectKernelLogs=true
-ProtectControlGroups=false
-
-NoNewPrivileges=false
-RestrictSUIDSGID=true
-MemoryDenyWriteExecute=false
 LockPersonality=true
 
 LimitNOFILE=1048576
@@ -193,7 +205,7 @@ EOF
     chmod 0644 /etc/systemd/system/docker.service.d/hardened.conf
 
     systemctl daemon-reload
-    msg "systemd hardened override created"
+    msg "systemd override created (resource limits, no core dumps)"
 
     msg "Enabling and starting Docker..."
     systemctl enable docker.service
@@ -263,21 +275,30 @@ if [[ "$MODE" == "podman" ]]; then
     USER_CONTAINERS_DIR="${TARGET_HOME}/.config/containers"
     runuser -u "$TARGET_USER" -- mkdir -p -m 0700 "${TARGET_HOME}/.config" "$USER_CONTAINERS_DIR"
 
-    cat > "${USER_CONTAINERS_DIR}/storage.conf" <<'EOF'
+    # Written as the target user: root must never write through a path (or
+    # symlink) that the user controls. A differing storage.conf is backed up.
+    runuser -u "$TARGET_USER" -- bash -c '
+        set -euo pipefail
+        umask 077
+        tmp="$(mktemp "$1.XXXXXX")"
+        cat > "$tmp"
+        if [[ -e "$1" || -L "$1" ]] && ! cmp -s -- "$1" "$tmp"; then
+            cp -a -- "$1" "$1.bak.$(date +%Y%m%d%H%M%S)"
+        fi
+        mv -f -- "$tmp" "$1"
+    ' _ "${USER_CONTAINERS_DIR}/storage.conf" <<'EOF'
 [storage]
 driver = "overlay"
 
 [storage.options.overlay]
 mount_program = "/usr/bin/fuse-overlayfs"
 EOF
-    chown -h "${TARGET_USER}:${TARGET_GROUP}" "${USER_CONTAINERS_DIR}/storage.conf"
-    chmod 0600 "${USER_CONTAINERS_DIR}/storage.conf"
     msg "User storage.conf configured (overlay + fuse-overlayfs)"
 
     msg "Writing hardened /etc/containers/containers.conf..."
     install -d -m 0755 /etc/containers
 
-    cat > /etc/containers/containers.conf <<'EOF'
+    install_config 0644 /etc/containers/containers.conf <<'EOF'
 [containers]
 no_new_privileges = true
 default_ulimits = [
@@ -290,18 +311,16 @@ log_driver = "journald"
 runtime = "crun"
 events_logger = "journald"
 EOF
-    chmod 0644 /etc/containers/containers.conf
     msg "containers.conf written with hardened defaults"
 
     msg "Writing hardened /etc/containers/registries.conf..."
-    cat > /etc/containers/registries.conf <<'EOF'
+    # v2 format only: a v1 table such as [registries.insecure] next to these keys
+    # makes Podman reject the whole file. Registries are TLS-verified unless a
+    # [[registry]] entry sets insecure = true, so nothing has to be listed here.
+    install_config 0644 /etc/containers/registries.conf <<'EOF'
 unqualified-search-registries = ["docker.io"]
 short-name-mode = "enforcing"
-
-[registries.insecure]
-registries = []
 EOF
-    chmod 0644 /etc/containers/registries.conf
     msg "registries.conf written (short-name-mode=enforcing, no insecure registries)"
 
     msg "Enabling podman.socket and podman-auto-update.timer for user '$TARGET_USER'..."
@@ -317,7 +336,8 @@ EOF
         echo "..."
         msg "Podman info output shown above (truncated)"
     else
-        warn "podman info failed — user may need to log out and back in for subuid/subgid changes"
+        sed -n '1,10p' <<<"$podman_info_out" >&2
+        warn "podman info failed (output above) — a new subuid/subgid range needs a fresh login session"
     fi
 
 fi

@@ -12,11 +12,13 @@ sudo ./nodejs.sh -a /opt/myapp
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-a APP_PATH` | Absolute path to the Node.js application | *required* |
+| `-a APP_PATH` | Absolute path to the Node.js application, below `/opt/`, `/srv/` or `/var/www/` (letters, digits, `.`, `_`, `-`, `/` only) | *required* |
 | `-u APP_USER` | System user to run the app | `nodeapp` |
 | `-p PORT` | Application port | `3000` |
 | `-n APP_NAME` | Application/service name (`[A-Za-z0-9][A-Za-z0-9_-]*`) | `nodeapp` |
 | `-h` | Show help | |
+
+`APP_NAME` names the service unit, `/etc/<APP_NAME>/`, `/var/log/<APP_NAME>/`, the logrotate file, the AppArmor profile and the nginx vhost. The script refuses a name that is already taken by something it did not create (a packaged unit such as `nginx.service`, an existing `/etc/<name>` or `/var/log/<name>` directory, a foreign logrotate/nginx/AppArmor file, a loaded AppArmor profile), because it would otherwise re-own or replace it. Re-running with the name of an application the script set up earlier is fine: the service is restarted so the regenerated unit, environment and profile take effect.
 
 ### Examples
 
@@ -55,7 +57,7 @@ Creates a system account (`nodeapp` by default) with `/usr/bin/nologin` shell an
 | `ProtectKernelModules` | `yes` | Cannot load kernel modules |
 | `ProtectKernelLogs` | `yes` | No access to kernel log buffer |
 | `ProtectControlGroups` | `yes` | Read-only cgroup filesystem |
-| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX` | No raw sockets, no netlink |
+| `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX AF_NETLINK` | No raw or packet sockets. Netlink stays allowed: `os.networkInterfaces()` needs it and throws `EAFNOSUPPORT` otherwise |
 | `RestrictNamespaces` | `yes` | Cannot create new namespaces |
 | `RestrictRealtime` | `yes` | No realtime scheduling |
 | `RestrictSUIDSGID` | `yes` | Cannot create SUID/SGID files |
@@ -78,13 +80,15 @@ Creates a system account (`nodeapp` by default) with `/usr/bin/nologin` shell an
 - Rate limiting: 10 requests/second per IP with burst of 20
 - `X-Powered-By` header stripped via `proxy_hide_header`
 - Proxy buffering with reasonable sizes
+- The server block uses `server_name _` and is declared `default_server` on port 80, so it answers every host name that no other vhost declares (`_` on its own matches nothing). If another configuration already is the default server, the script says so and the proxy stays unreachable until you set a real `server_name` in `/etc/nginx/sites-enabled/<APP_NAME>.conf`
+- nginx is enabled and started (or reloaded) once `nginx -t` passes. If the test or the reload fails, the new server block is rolled back (the previous one is restored from its `.bak.<timestamp>` copy) so a broken vhost never blocks the other sites; the rest of the hardening still completes and the summary reports that the proxy is not active
 
 ### 5. Security Response Headers
 
 | Header | Value | Purpose |
 |--------|-------|---------|
-| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Force HTTPS for 2 years |
-| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` | Strict API-oriented CSP |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | Force HTTPS for 2 years. Only in the HTTPS server block template: browsers ignore HSTS sent over plain HTTP |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` | Strict API-oriented fallback, sent only when the application sets no CSP of its own (two CSP headers are intersected, so an unconditional one would override the policy of an app that serves HTML) |
 | `X-Content-Type-Options` | `nosniff` | Prevent MIME-type sniffing |
 | `X-Frame-Options` | `DENY` | Prevent clickjacking |
 | `Referrer-Policy` | `no-referrer` | No referrer leakage |
@@ -97,6 +101,7 @@ Sensitive configuration is stored in `/etc/<APP_NAME>/env` (mode 640, owned by `
 
 An unattached enforce-mode AppArmor profile (`profile <APP_NAME> flags=(enforce)`) is applied strictly to `<APP_NAME>.service` via `AppArmorProfile=-<APP_NAME>` without confining host-wide `/usr/bin/node` or `npm`. It restricts the service process to:
 - Network: `inet`/`inet6` stream and dgram, plus unix stream
+- Capabilities: none, except `net_bind_service` when `PORT` is below 1024 (AppArmor would otherwise deny the bind that systemd's `AmbientCapabilities` allows)
 - Read: Node.js binary, application source, `node_modules`, SSL trust store
 - Write: application `data/` and `logs/` directories, `/var/log/<APP_NAME>/`
 - Everything else is implicitly denied

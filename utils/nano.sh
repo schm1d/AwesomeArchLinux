@@ -32,7 +32,9 @@ mkdir -p -m 0700 "$HOME/.cache" "$HOME/.cache/nano" "$HOME/.cache/nano/backups"
 
 NANORC="$HOME/.nanorc"
 
-# Write a complete config (idempotent — overwrites any previous version)
+NANORC_NEW="$(mktemp "$HOME/.nanorc.XXXXXX")"
+
+# Write a complete config (idempotent — replaces any previous version)
 echo -e "${BBlue}Writing nano configuration...${NC}"
 {
     cat << 'EOF'
@@ -57,8 +59,17 @@ EOF
     if compgen -G '/usr/share/nano-syntax-highlighting/*.nanorc' >/dev/null; then
         printf '\n# Syntax highlighting (Arch package)\ninclude "/usr/share/nano-syntax-highlighting/*.nanorc"\n'
     fi
-} > "$NANORC"
+} > "$NANORC_NEW"
 
-chmod 600 "$NANORC"
+chmod 600 "$NANORC_NEW"
+
+# A differing ~/.nanorc (hand-written, or a symlink into a dotfiles checkout)
+# is kept as a timestamped backup instead of being silently overwritten.
+if [[ -e "$NANORC" || -L "$NANORC" ]] && ! cmp -s -- "$NANORC" "$NANORC_NEW"; then
+    NANORC_BACKUP="${NANORC}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -a -- "$NANORC" "$NANORC_BACKUP"
+    echo -e "${BBlue}Existing ${NANORC} saved as ${NANORC_BACKUP}${NC}"
+fi
+mv -f -- "$NANORC_NEW" "$NANORC"
 
 echo -e "${BGreen}Nano configuration completed successfully.${NC}"

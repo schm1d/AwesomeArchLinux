@@ -78,6 +78,8 @@ The `--scan` flag provides automated vulnerability scanning:
 3. **Generates a JSON report** at `/var/log/docker-security/image-scan-<date>.json`.
 4. **Creates a systemd timer** (`docker-image-scan.timer`) for weekly automated scans.
 
+An image Trivy could not scan (no vulnerability database, no network, unreadable image) is never reported as clean: it is counted separately in the summary and written to the report as `{"ArtifactName": "<image>", "ScanError": true}`. The weekly `docker-image-scan.service` exits non-zero when any image could not be scanned, so `systemctl status docker-image-scan.service` / `systemctl --failed` show it.
+
 ### Manual scanning
 
 ```bash

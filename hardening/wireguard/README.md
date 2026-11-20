@@ -13,23 +13,30 @@ sudo ./wireguard.sh -p 443 -s 172.16.0.0/24 -n 5 -c phone
 
 # Use Cloudflare DNS instead of Quad9
 sudo ./wireguard.sh -d 1.1.1.1,1.0.0.1
+
+# The server's own network already uses 10.0.0.0/24: pick another VPN subnet
+sudo ./wireguard.sh -s 10.66.66.0/24
+
+# Do not let the clients' IPv6 traffic bypass the IPv4-only tunnel
+sudo ./wireguard.sh --block-ipv6
 ```
 
 ## Usage
 
 ```
-sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d DNS] [-e ENDPOINT] [--add-client NAME] [--force] [-h]
+sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d DNS] [-e ENDPOINT] [--add-client NAME] [--block-ipv6] [--force] [-h]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-p PORT` | `51820` | WireGuard listen port (UDP) |
-| `-s SUBNET` | `10.0.0.0/24` | VPN subnet in IPv4 CIDR notation (`/8`–`/30`) |
+| `-s SUBNET` | `10.0.0.0/24` | VPN subnet in IPv4 CIDR notation (`/8`–`/30`). Must not overlap any network the server is attached to or has a route for; the script checks this and stops before changing anything |
 | `-c CLIENT_NAME` | `client` | Base name for client config files |
 | `-n NUM_CLIENTS` | `1` | Number of client configs to generate |
 | `-d DNS` | `9.9.9.9,149.112.112.112` | Comma-separated DNS server IPs pushed to clients (Quad9; inherited from existing clients on `--add-client` unless `-d` is passed) |
 | `-e ENDPOINT` | auto-detected | Public IPv4 or DNS hostname written to client `Endpoint` (inherited from existing clients on `--add-client` unless `-e` is passed) |
 | `--add-client NAME` | | Safely add one new peer to an existing `wg0.conf` and live-sync `wg0` |
+| `--block-ipv6` | off | Write `AllowedIPs = 0.0.0.0/0, ::/0` into the client configs so IPv6 is sent into the tunnel and dropped there instead of bypassing the VPN (inherited from existing clients on `--add-client`) |
 | `--force` | off | Back up existing `wg0.conf` and allow overwriting existing client keys/configs |
 | `-h` | | Show help |
 
@@ -45,6 +52,10 @@ sudo ./wireguard.sh [-p PORT] [-s SUBNET] [-c CLIENT_NAME] [-n NUM_CLIENTS] [-d 
 8. **Integrates nftables rules** -- inserts a marked block into `/etc/nftables.conf`, validates it, and updates only WireGuard-owned live rules
 9. **Enables the service** -- `wg-quick@wg0` enabled and started via systemd
 10. **Displays QR codes** -- scannable from the WireGuard mobile app
+
+### VPN subnet must be unused on the server
+
+`wg-quick` routes the whole VPN subnet through `wg0`. If the server's LAN, a second interface, a container bridge or a static route uses an overlapping range (10.0.0.0/24 is a common LAN and cloud-VPC range), bringing the tunnel up would send replies for that network into the tunnel: the server loses its LAN and the SSH session that started the script. The script therefore compares the subnet with every IPv4 address and route of the host (apart from `wg0` itself) and exits with the conflicting entry before installing or changing anything. Choose a free private range with `-s`.
 
 ## File Layout
 
@@ -209,7 +220,7 @@ On the client device, visit [https://www.dnsleaktest.com](https://www.dnsleaktes
 
 ## Split Tunnel Configuration
 
-The generated tunnel is IPv4-only, and the default client config routes **all IPv4 traffic** through it (`AllowedIPs = 0.0.0.0/0`). IPv6 is not advertised, so clients do not send IPv6 into a tunnel the server has not configured. To route only specific subnets, edit the client config:
+The generated tunnel is IPv4-only, and the default client config routes **all IPv4 traffic** through it (`AllowedIPs = 0.0.0.0/0`). To route only specific subnets, edit the client config:
 
 ```ini
 [Peer]
@@ -218,6 +229,17 @@ AllowedIPs = 10.0.0.0/24, 192.168.1.0/24
 ```
 
 This is useful when you only need access to resources on the VPN network without routing all internet traffic through the server.
+
+## IPv6 Leak
+
+With the default `AllowedIPs = 0.0.0.0/0` the client's IPv6 traffic does **not** enter the tunnel. On a client network that provides IPv6 (most mobile carriers and many home ISPs), dual-stack sites are reached directly over IPv6: the site sees the client's real IPv6 address and the traffic is not protected by the VPN. An IPv4-only check such as "what is my IP" does not reveal this; test with a dual-stack leak test.
+
+`--block-ipv6` writes `AllowedIPs = 0.0.0.0/0, ::/0` instead. The client then routes IPv6 into the tunnel, where the server (which has no IPv6 inside the tunnel) discards it, so applications fall back to IPv4 through the VPN. Trade-offs:
+
+- Applications without Happy Eyeballs may wait for a timeout before they fall back to IPv4.
+- A Linux client with IPv6 disabled by sysctl (`net.ipv6.conf.all.disable_ipv6 = 1`) cannot install the `::/0` route, and `wg-quick up` fails. Such a client has no IPv6 to leak; give it a config without `::/0`.
+
+To switch existing clients, edit `AllowedIPs` in their configs (the server side needs no change), or regenerate them with `--force --block-ipv6`. Alternatively, disable IPv6 on the client while the tunnel is up.
 
 ## Troubleshooting
 
@@ -228,6 +250,8 @@ This is useful when you only need access to resources on the VPN network without
 | DNS not resolving | Ensure the `DNS` line in client config is correct. Try `1.1.1.1` to rule out Quad9 issues. |
 | `wg-quick` fails to start | Check `journalctl -xeu wg-quick@wg0`. Common cause: syntax error in `wg0.conf`. |
 | "Address already in use" | Another WireGuard instance is running. Stop it: `systemctl stop wg-quick@wg0`. |
+| `VPN subnet ... overlaps ...` | The subnet is in use on the server (LAN, container bridge, static route). Re-run with `-s <unused range>`. |
+| Real IPv6 address visible while connected | The tunnel is IPv4-only; see "IPv6 Leak" and use `--block-ipv6`. |
 | Slow performance | Try a different port (some ISPs throttle UDP 51820). Use `-p 443` for better results. |
 
 ## Security Notes

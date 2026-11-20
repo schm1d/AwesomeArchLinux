@@ -225,28 +225,73 @@ test_audit_rules_render_load_and_syscalls() {
     ' _ "$LIBRARY" "$tmp" >/dev/null 2>&1 || rc=$?
     assert_ne "$rc" "0" "failed load returns non-zero"
     assert_not_contains "$(cat "$tmp/calls")" "-e 2" "never locks immutable on load failure"
+}
 
-    # Validate bundled syscalls via ausyscall if installed
-    if command -v ausyscall >/dev/null 2>&1; then
-        local line arch idx
-        local -a words=()
-        while IFS= read -r line; do
-            [[ "$line" == "-a "* && "$line" == *" -S "* ]] || continue
-            read -r -a words <<<"$line"
-            arch="x86_64"
-            [[ " $line " == *" arch=b32 "* ]] && arch="i386"
-            for idx in "${!words[@]}"; do
-                if [[ "${words[idx]}" == "-S" ]]; then
-                    ausyscall "$arch" "${words[idx + 1]}" --exact >/dev/null || fail "invalid syscall ${words[idx + 1]} ($arch): $line"
-                fi
-            done
-        done < "$REPO_ROOT/utils/auditd-attack.rules"
+# Path of the installed x86 syscall table header for an audit ABI (b64 or b32):
+# /usr/include/asm on Arch, the multiarch directory on Debian/Ubuntu.
+x86_syscall_header() {
+    local suffix=64 dir
+    [[ "$1" != b32 ]] || suffix=32
+    for dir in /usr/include/asm /usr/include/x86_64-linux-gnu/asm; do
+        if [[ -r "$dir/unistd_${suffix}.h" ]]; then
+            printf '%s' "$dir/unistd_${suffix}.h"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Is NAME a syscall of the given audit ABI? ausyscall (audit userspace) and
+# the kernel's UAPI headers are both consulted and either one may vouch for a
+# name: each can be older than the other on a given machine.
+syscall_known() {
+    local abi="$1" name="$2" arch="x86_64" header
+    [[ "$abi" != b32 ]] || arch="i386"
+    [[ "$name" =~ ^[a-z0-9_]+$ ]] || return 1
+    if command -v ausyscall >/dev/null 2>&1 && ausyscall "$arch" "$name" --exact >/dev/null 2>&1; then
+        return 0
     fi
+    header="$(x86_syscall_header "$abi")" || return 1
+    grep -qE "^#define __NR_${name}[[:space:]]" "$header"
+}
+
+# auditctl rejects the whole rules file when one -S name is not a syscall of
+# the rule's ABI (a typo, or a 32-bit-only name such as setuid32 in a b64 rule).
+test_bundled_audit_rules_name_real_syscalls() {
+    if ! command -v ausyscall >/dev/null 2>&1 &&
+       ! { x86_syscall_header b64 >/dev/null && x86_syscall_header b32 >/dev/null; }; then
+        echo "neither ausyscall nor the x86 kernel syscall headers are installed"
+        return 77
+    fi
+
+    # The check itself must be able to say no.
+    syscall_known b64 execve || fail "syscall lookup does not know execve"
+    if syscall_known b64 not_a_real_syscall; then fail "syscall lookup accepts a made-up name"; fi
+    if syscall_known b64 setuid32; then fail "syscall lookup accepts a 32-bit-only name for b64"; fi
+
+    local line abi idx name checked=0
+    local -a words=() names=()
+    while IFS= read -r line; do
+        [[ "$line" == "-a "* && "$line" == *" -S "* ]] || continue
+        read -r -a words <<<"$line"
+        abi="b64"
+        [[ " $line " != *" arch=b32 "* ]] || abi="b32"
+        for idx in "${!words[@]}"; do
+            [[ "${words[idx]}" == "-S" ]] || continue
+            IFS=, read -r -a names <<<"${words[idx + 1]}"
+            for name in "${names[@]}"; do
+                syscall_known "$abi" "$name" || fail "invalid syscall $name ($abi): $line"
+                (( ++checked ))
+            done
+        done
+    done < "$REPO_ROOT/utils/auditd-attack.rules"
+    (( checked >= 50 )) || fail "only $checked syscall names were checked: the rules were not parsed"
 }
 
 run_test "PAM password policy repair, idempotence, and passwd ordering" test_password_policy_repair_and_idempotence
 run_test "journal sealing key capture, preservation, and SplitMode=uid" test_journal_sealing
 run_test "arch-audit findings status and fetch-failure preservation" test_vulnerability_check
 run_test "auditd rules rendering, alias dedup, atomic lock, and syscalls" test_audit_rules_render_load_and_syscalls
+run_test "bundled audit rules only name syscalls that exist for their ABI" test_bundled_audit_rules_name_real_syscalls
 
 finish_test_file "test_chroot_security.sh"

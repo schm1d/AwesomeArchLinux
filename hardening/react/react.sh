@@ -56,6 +56,7 @@ err()  { printf "%b[!]%b %s\n" "$C_RED"   "$C_NC" "$1" >&2; exit 1; }
 APP_PATH=""
 PORT=3000
 DOMAIN="localhost"
+BACKUP_ROOT="/var/backups/react-hardening"
 
 # --- Usage ---
 usage() {
@@ -66,7 +67,8 @@ Required:
   -a APP_PATH   Path to the React app (project root or build directory)
 
 Optional:
-  -p PORT       Listening port (default: $PORT)
+  -p PORT       Listening port (default: $PORT). With certificates for DOMAIN,
+                80 or 443 serves HTTPS on 443 and redirects port 80
   -d DOMAIN     Server name / domain (default: $DOMAIN)
   -h            Show this help
 
@@ -118,19 +120,26 @@ msg "Detecting build directory..."
 
 BUILD_DIR=""
 
-# Check if APP_PATH itself is the build directory (contains index.html)
-if [[ -f "$APP_PATH/index.html" ]]; then
+# Look for build output first. A Vite project keeps its *source* index.html in
+# the project root, so preferring APP_PATH/index.html would publish the project
+# root (sources, package.json, node_modules) instead of the bundle in dist/.
+for candidate in dist build out; do
+    if [[ -f "$APP_PATH/$candidate/index.html" ]]; then
+        BUILD_DIR="$APP_PATH/$candidate"
+        info "Found build directory: $BUILD_DIR (detected $candidate/)"
+        break
+    fi
+done
+
+# Otherwise APP_PATH itself is the build directory (contains index.html)
+if [[ -z "$BUILD_DIR" && -f "$APP_PATH/index.html" ]]; then
     BUILD_DIR="$APP_PATH"
     info "Build directory is APP_PATH itself: $BUILD_DIR"
-else
-    # Check common build output directories
-    for candidate in dist build out; do
-        if [[ -f "$APP_PATH/$candidate/index.html" ]]; then
-            BUILD_DIR="$APP_PATH/$candidate"
-            info "Found build directory: $BUILD_DIR (detected $candidate/)"
-            break
-        fi
-    done
+    if [[ -f "$APP_PATH/package.json" ]]; then
+        warn "$APP_PATH contains package.json and index.html but no dist/, build/ or out/ output."
+        warn "It looks like an unbuilt project root: the whole directory (sources, package.json) will be served."
+        warn "Run your build (e.g. npm run build) and re-run this script, or pass the build directory with -a."
+    fi
 fi
 
 if [[ -z "$BUILD_DIR" ]]; then
@@ -198,6 +207,25 @@ else
     warn "Configuring HTTP-only. Run ../nginx/nginx.sh for HTTPS setup."
 fi
 
+# TLS belongs on 443: "-p 80" with certificates present would put an "ssl"
+# listener on the plain-HTTP port. Serve HTTPS on 443 instead and keep port 80
+# for the redirect and the ACME challenge.
+if [[ "$USE_SSL" == true && "$PORT" == "80" ]]; then
+    warn "Certificates found: serving HTTPS on port 443 and redirecting port 80 to it"
+    PORT=443
+fi
+
+# On the standard web ports (HTTP on 80, or HTTPS on 443 with the port-80
+# redirect) this vhost owns the name: it answers the ACME challenge on port 80
+# and replaces whatever default.conf declared for it.
+STANDARD_PORT=false
+if [[ ( "$USE_SSL" == true && "$PORT" == "443" ) || ( "$USE_SSL" == false && "$PORT" == "80" ) ]]; then
+    STANDARD_PORT=true
+elif [[ "$PORT" == "443" ]]; then
+    warn "No certificate in $CERT_DIR: this vhost will listen on port 443 without TLS settings of its own."
+    warn "Use -p 80 until a certificate exists for $DOMAIN (../nginx/nginx.sh), then re-run with -p 443."
+fi
+
 # =============================================================================
 # 4. WRITE NGINX SERVER BLOCK
 # =============================================================================
@@ -205,6 +233,8 @@ fi
 CONF_FILE="/etc/nginx/sites-enabled/${DOMAIN}.conf"
 CONF_BACKUP=""
 CONF_PREEXISTED=false
+DEFAULT_SITE="/etc/nginx/sites-enabled/default.conf"
+DEFAULT_SITE_BACKUP=""
 
 restore_nginx_conf() {
     if [[ "$CONF_PREEXISTED" == true ]]; then
@@ -213,6 +243,159 @@ restore_nginx_conf() {
     else
         rm -f -- "$CONF_FILE"
         warn "Removed the new nginx server block"
+    fi
+    if [[ -n "$DEFAULT_SITE_BACKUP" && -f "$DEFAULT_SITE_BACKUP" ]]; then
+        cp -p -- "$DEFAULT_SITE_BACKUP" "$DEFAULT_SITE"
+        warn "Restored $DEFAULT_SITE"
+    fi
+}
+
+# nginx honours only the first server block per name and listen socket, in
+# include (alphabetical) order, so a default.conf from ../nginx/nginx.sh that
+# declares the same name on ports 80/443 either hides this vhost or is hidden
+# by it. Take the name over instead of leaving the outcome to file naming:
+#   - default.conf serves nothing else  -> it is superseded and removed
+#   - it serves other names as well     -> only our names are dropped from it
+# The original is saved to $1 first and restored if nginx rejects the new vhost.
+# Call it once the new vhost is written, immediately before "nginx -t".
+# Usage: resolve_default_site_overlap BACKUP_PATH NAME...
+resolve_default_site_overlap() {
+    local backup_path="$1" state
+    shift
+    [[ -f "$DEFAULT_SITE" && "$CONF_FILE" != "$DEFAULT_SITE" ]] || return 0
+
+    state=$(OUR_NAMES=" $* " awk '
+        function ours(name) { return index(tolower(ENVIRON["OUR_NAMES"]), " " tolower(name) " ") > 0 }
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            if (line ~ /^[[:space:]]*server_name[[:space:]]/) {
+                sub(/^[[:space:]]*server_name[[:space:]]+/, "", line)
+                sub(/;.*/, "", line)
+                n = split(line, names, /[[:space:]]+/)
+                mine = 0
+                others = 0
+                for (i = 1; i <= n; i++) {
+                    if (names[i] == "") {
+                        continue
+                    }
+                    if (ours(names[i])) {
+                        mine++
+                    } else {
+                        others++
+                    }
+                }
+                if (mine && others)  { partial = 1 }
+                if (mine && !others) { whole = 1 }
+                if (!mine && others) { foreign = 1 }
+            } else if (line ~ /^[[:space:]]*listen[[:space:]]/) {
+                sub(/^[[:space:]]*listen[[:space:]]+/, "", line)
+                sub(/[[:space:]]*;.*/, "", line)
+                if (line !~ /^(\[::\]:)?(80|443 ssl)$/) {
+                    odd_listen = 1
+                }
+            }
+        }
+        END {
+            if (!partial && !whole) {
+                print "none"
+            } else if (whole && !partial && !foreign && !odd_listen) {
+                print "only"
+            } else if (partial && !whole) {
+                print "shared"
+            } else {
+                print "mixed"
+            }
+        }
+    ' "$DEFAULT_SITE")
+
+    case "$state" in
+        only)
+            cp -p -- "$DEFAULT_SITE" "$backup_path"
+            DEFAULT_SITE_BACKUP="$backup_path"
+            rm -f -- "$DEFAULT_SITE"
+            warn "$DEFAULT_SITE served only $* and is superseded by $CONF_FILE; it was moved to $backup_path"
+            ;;
+        shared)
+            cp -p -- "$DEFAULT_SITE" "$backup_path"
+            DEFAULT_SITE_BACKUP="$backup_path"
+            OUR_NAMES=" $* " awk '
+                function ours(name) { return index(tolower(ENVIRON["OUR_NAMES"]), " " tolower(name) " ") > 0 }
+                {
+                    line = $0
+                    sub(/#.*/, "", line)
+                    if (line ~ /^[[:space:]]*server_name[[:space:]]+[^;]*;[[:space:]]*$/) {
+                        match($0, /^[[:space:]]*/)
+                        indent = substr($0, 1, RLENGTH)
+                        sub(/^[[:space:]]*server_name[[:space:]]+/, "", line)
+                        sub(/;.*/, "", line)
+                        n = split(line, names, /[[:space:]]+/)
+                        kept = ""
+                        dropped = 0
+                        for (i = 1; i <= n; i++) {
+                            if (names[i] == "") {
+                                continue
+                            }
+                            if (ours(names[i])) {
+                                dropped = 1
+                                continue
+                            }
+                            kept = kept " " names[i]
+                        }
+                        if (dropped && kept != "") {
+                            print indent "server_name" kept ";"
+                            next
+                        }
+                    }
+                    print
+                }
+            ' "$backup_path" > "$DEFAULT_SITE"
+            warn "Removed $* from the server_name lines of $DEFAULT_SITE (now served by $CONF_FILE); original saved to $backup_path"
+            ;;
+        mixed)
+            if ( LC_ALL=C; [[ "${CONF_FILE##*/}" < "${DEFAULT_SITE##*/}" ]] ); then
+                warn "$DEFAULT_SITE also declares $*. nginx will use $CONF_FILE (read first) and log 'conflicting server name' warnings; remove the name(s) from $DEFAULT_SITE to silence them."
+            else
+                restore_nginx_conf
+                err "$DEFAULT_SITE also declares $* and is read before $CONF_FILE, so nginx would ignore this vhost. Remove the name(s) from $DEFAULT_SITE, then re-run this script."
+            fi
+            ;;
+    esac
+}
+
+# Print the webroot certbot recorded for DOMAIN ($1) when its certificate was
+# issued (../nginx/nginx.sh passes its own -w directory), or FALLBACK ($2).
+# Renewals are validated through that directory, so the vhost has to serve
+# /.well-known/acme-challenge/ from it rather than assume its own root.
+acme_webroot_for() {
+    local domain="$1" fallback="$2" renewal_dir="/etc/letsencrypt/renewal" renewal_conf recorded=""
+    # The certificate may be named after another domain (nginx.sh names it after
+    # its first -d), so look for this name in the webroot map of every lineage,
+    # starting with the one named after the domain itself.
+    for renewal_conf in "$renewal_dir/$domain.conf" "$renewal_dir"/*.conf; do
+        [[ -f "$renewal_conf" ]] || continue
+        recorded=$(DOMAIN_TARGET="$domain" awk '
+            /^\[\[webroot_map\]\]/ { in_map = 1; next }
+            /^\[/                  { in_map = 0 }
+            in_map && $1 == ENVIRON["DOMAIN_TARGET"] && $2 == "=" { print $3; exit }
+        ' "$renewal_conf")
+        [[ -z "$recorded" ]] || break
+    done
+    if [[ -z "$recorded" && -f "$renewal_dir/$domain.conf" ]]; then
+        recorded=$(awk '
+            /^webroot_path[[:space:]]*=/ {
+                val = $0
+                sub(/^[^=]*=[[:space:]]*/, "", val)
+                sub(/[[:space:]]*,.*$/, "", val)
+                print val
+                exit
+            }
+        ' "$renewal_dir/$domain.conf")
+    fi
+    if [[ "$recorded" =~ ^/[A-Za-z0-9._/-]+$ && -d "$recorded" ]]; then
+        printf '%s\n' "$recorded"
+    else
+        printf '%s\n' "$fallback"
     fi
 }
 
@@ -227,34 +410,18 @@ if [[ -f "$CONF_FILE" ]]; then
     info "Existing config backed up to $BACKUP"
 fi
 
-# Warn if /etc/nginx/sites-enabled/default.conf also claims $DOMAIN on port 80/443
-DEFAULT_SITE="/etc/nginx/sites-enabled/default.conf"
-if [[ -f "$DEFAULT_SITE" && "$CONF_FILE" != "$DEFAULT_SITE" ]]; then
-    if DOMAIN_TARGET="$DOMAIN" awk '
-        {
-            line = $0
-            sub(/#.*/, "", line)
-            if (line ~ /^[[:space:]]*server_name[[:space:]]/) {
-                sub(/^[[:space:]]*server_name[[:space:]]+/, "", line)
-                sub(/;.*/, "", line)
-                n = split(line, names, /[[:space:]]+/)
-                for (i = 1; i <= n; i++) {
-                    if (tolower(names[i]) == ENVIRON["DOMAIN_TARGET"]) {
-                        found = 1
-                        exit
-                    }
-                }
-            }
-        }
-        END { exit !found }
-    ' "$DEFAULT_SITE"; then
-        warn "$DEFAULT_SITE also declares server_name '$DOMAIN' (on port 80/443)."
-        if [[ "$PORT" == "80" || "$PORT" == "443" ]]; then
-            warn "Remove or update $DEFAULT_SITE so it does not shadow $CONF_FILE on port $PORT."
-        else
-            warn "Requests to $DOMAIN on port 80/443 will still hit $DEFAULT_SITE unless updated."
-        fi
-    fi
+ACME_ROOT=""
+ACME_LOCATION=""
+if [[ "$STANDARD_PORT" == true ]]; then
+    ACME_ROOT=$(acme_webroot_for "$DOMAIN" "$BUILD_DIR")
+    ACME_LOCATION="    # ACME challenge (certbot issuance and renewal)
+    location ^~ /.well-known/acme-challenge/ {
+        root $ACME_ROOT;
+        default_type \"text/plain\";
+        try_files \$uri =404;
+    }"
+elif [[ -f "$DEFAULT_SITE" ]]; then
+    info "This vhost only answers on port $PORT; other ports for $DOMAIN stay with the other vhosts (e.g. $DEFAULT_SITE)"
 fi
 
 # Build the listen, SSL, HSTS, and CSP directives
@@ -273,10 +440,16 @@ if [[ "$USE_SSL" == true ]]; then
     CSP_UPGRADE=" upgrade-insecure-requests;"
     HSTS_SERVER_LINE=$'    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
     HSTS_LOC_LINE=$'        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n'
+    MAIN_ACME_LOCATION=""
 else
     LISTEN_DIRECTIVE="listen $PORT;
     listen [::]:$PORT;"
     SSL_BLOCK=""
+    # HTTP-only on port 80: this server block also answers the ACME challenge.
+    MAIN_ACME_LOCATION=""
+    if [[ "$PORT" == "80" ]]; then
+        MAIN_ACME_LOCATION=$'\n'"$ACME_LOCATION"$'\n'
+    fi
     CSP_UPGRADE=""
     HSTS_SERVER_LINE=""
     HSTS_LOC_LINE=""
@@ -294,11 +467,34 @@ cat > "$CONF_FILE" <<EOF
 # Root:   $BUILD_DIR
 # SSL:    $USE_SSL
 # =============================================================================
+${ACME_ROOT:+# ACME-Webroot: $ACME_ROOT}
 
 # --- Rate limit zone for API proxy ---
 # Adjust rate as needed. 10r/s = 10 requests per second per IP.
 limit_req_zone \$binary_remote_addr zone=api_${DOMAIN//./_}:10m rate=10r/s;
 
+EOF
+
+# HTTP to HTTPS redirect block (only when this vhost serves HTTPS on port 443)
+if [[ "$USE_SSL" == true && "$PORT" == "443" ]]; then
+    cat >> "$CONF_FILE" <<EOF
+# --- HTTP: Redirect all to HTTPS ---
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+
+$ACME_LOCATION
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+EOF
+fi
+
+cat >> "$CONF_FILE" <<EOF
 server {
     $LISTEN_DIRECTIVE
     server_name $DOMAIN;
@@ -306,7 +502,7 @@ $SSL_BLOCK
 
     root $BUILD_DIR;
     index index.html;
-
+$MAIN_ACME_LOCATION
     # --- Gzip compression for static assets ---
     # Safe to enable for static SPA files (no secrets, no session cookies).
     gzip on;
@@ -516,6 +712,11 @@ fi
 # 7. VALIDATE AND RELOAD NGINX
 # =============================================================================
 
+if [[ "$STANDARD_PORT" == true ]]; then
+    install -d -o root -g root -m 0700 "$BACKUP_ROOT"
+    resolve_default_site_overlap "$BACKUP_ROOT/nginx-default.conf.$DOMAIN.$(date +%Y%m%d-%H%M%S)" "$DOMAIN"
+fi
+
 msg "Testing nginx configuration..."
 
 if nginx -t 2>&1; then
@@ -601,6 +802,18 @@ echo "    - CDN scripts:    script-src 'self' https://cdn.example.com"
 echo "    - Inline styles:  style-src already includes 'unsafe-inline' for CSS-in-JS"
 echo "    - Images from S3: img-src 'self' data: https://s3.amazonaws.com"
 echo
+if [[ "$PORT" != "80" && "$PORT" != "443" ]]; then
+    echo -e "${C_YELLOW}Firewall:${C_NC}"
+    echo "  Port $PORT is not opened by this script (../nginx/nginx.sh only opens 80 and its"
+    echo "  HTTPS port). Allow it in your firewall, or serve the app on the standard ports"
+    echo "  with -p 443 (certificates present) or -p 80."
+    echo
+fi
+if [[ "$STANDARD_PORT" == true ]]; then
+    echo -e "${C_BLUE}ACME webroot:${C_NC}"
+    echo "  /.well-known/acme-challenge/ is served from $ACME_ROOT"
+    echo
+fi
 if [[ "$USE_SSL" == false ]]; then
     echo -e "${C_YELLOW}SSL setup:${C_NC}"
     echo "  HTTPS is not configured. For production, run:"

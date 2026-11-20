@@ -2,7 +2,7 @@
 
 # =============================================================================
 # Script:      cpufreq.sh
-# Description: Installs linux-cpupower and pins a sensible default governor.
+# Description: Installs cpupower and pins a sensible default governor.
 #              Refuses to fight power-profiles-daemon, TLP, auto-cpufreq, or tuned.
 #
 # Author:      Bruno Schmid @brulliant
@@ -97,7 +97,7 @@ if rival=$(competing_daemon); then
     err "Refusing to configure cpupower while $rival is active or enabled."
 fi
 
-pacman -Syu --noconfirm --needed linux-cpupower
+pacman -Syu --noconfirm --needed cpupower
 
 available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || true)
 if [[ -n "$available" ]] && ! echo " $available " | grep -q " $GOVERNOR "; then
@@ -112,12 +112,26 @@ if [[ -n "$available" ]] && ! echo " $available " | grep -q " $GOVERNOR "; then
     warn "Falling back to '$GOVERNOR'"
 fi
 
-install -d -m 0755 /etc/default
-cat > /etc/default/cpupower <<EOF
-# Written by utils/cpufreq.sh
-governor='${GOVERNOR}'
-EOF
-chmod 0644 /etc/default/cpupower
+# The packaged cpupower.service reads /etc/default/cpupower-service.conf
+# (GOVERNOR=...). Older Arch packaging sourced /etc/default/cpupower
+# (governor=...); follow whichever file the installed unit actually uses.
+CPUPOWER_CONF="/etc/default/cpupower-service.conf"
+CPUPOWER_KEY="GOVERNOR"
+if ! grep -qs 'cpupower-service\.conf' /usr/lib/systemd/system/cpupower.service; then
+    CPUPOWER_CONF="/etc/default/cpupower"
+    CPUPOWER_KEY="governor"
+fi
+
+install -d -m 0755 "$(dirname "$CPUPOWER_CONF")"
+conf_tmp="$(mktemp "${CPUPOWER_CONF}.XXXXXX")"
+if [[ -f "$CPUPOWER_CONF" ]]; then
+    # Keep the packaged comments and any other tuning (MIN_FREQ, EPP, ...);
+    # replace only the active governor assignment.
+    grep -vE "^[[:space:]]*${CPUPOWER_KEY}=|^# Written by utils/cpufreq\.sh\$" "$CPUPOWER_CONF" > "$conf_tmp" || true
+fi
+printf "# Written by utils/cpufreq.sh\n%s='%s'\n" "$CPUPOWER_KEY" "$GOVERNOR" >> "$conf_tmp"
+chmod 0644 "$conf_tmp"
+mv -f "$conf_tmp" "$CPUPOWER_CONF"
 
 systemctl enable --now cpupower.service 2>/dev/null || warn "cpupower.service could not be enabled; applying governor live"
 if command -v cpupower >/dev/null; then

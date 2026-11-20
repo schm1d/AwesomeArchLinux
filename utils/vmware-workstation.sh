@@ -64,19 +64,18 @@ as_user() {
   fi
 }
 
-detect_aur_helper() {
-  if [[ -n ${AUR_HELPER} ]]; then
-    need_cmd "${AUR_HELPER}"
-    return
-  fi
-  local h
-  for h in yay paru; do
-    if command -v "${h}" >/dev/null 2>&1; then
-      AUR_HELPER="${h}"
-      return
+# Review-gated AUR builder shared with the installer (base stages a copy as
+# /root/aur-review.sh on installed systems).
+find_aur_review_lib() {
+  local script_dir candidate
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  for candidate in "${script_dir}/../hardening/lib/aur-review.sh" "${script_dir}/aur-review.sh" /root/aur-review.sh; do
+    if [[ -r ${candidate} ]]; then
+      printf '%s' "${candidate}"
+      return 0
     fi
   done
-  die "no AUR helper found (install yay or paru, or set AUR_HELPER=)"
+  return 1
 }
 
 tmp_has_noexec() {
@@ -101,7 +100,7 @@ restore_tmp() {
 }
 
 install_deps() {
-  local pkgs=(base-devel dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils pipewire-alsa)
+  local pkgs=(base-devel git dkms fuse2 gtk3 gtkmm3 libcanberra pcsclite hicolor-icon-theme desktop-file-utils pipewire-alsa)
   if pacman -Qq linux >/dev/null 2>&1; then
     pkgs+=(linux-headers)
   fi
@@ -115,19 +114,27 @@ install_deps() {
   sudo_run pacman -S --needed --noconfirm "${pkgs[@]}"
 }
 
+# AUR recipes are mutable, user-submitted build instructions. Instead of
+# `yay/paru -S --noconfirm`, each one goes through the reviewed builder: it
+# shows the exact recipe commit, waits for a typed confirmation on the terminal
+# and builds as a disposable unprivileged user. A package that is already
+# installed is left alone (upgrade it with your usual AUR workflow).
 install_package() {
-  [[ ${REAL_USER} != root ]] || die "cannot run AUR helper without a non-root user account"
-  detect_aur_helper
-  log "installing ${PKG} with ${AUR_HELPER} as ${REAL_USER}"
-
-  as_user mkdir -p -m 0700 "${REAL_HOME}/.cache" "${REAL_HOME}/.cache/${AUR_HELPER}" "${REAL_HOME}/.cache/vmware-tmp"
-  if command -v setfacl >/dev/null 2>&1; then
-    sudo_run setfacl -b -k "${REAL_HOME}/.cache/${AUR_HELPER}" "${REAL_HOME}/.cache/vmware-tmp" 2>/dev/null || true
+  [[ ${REAL_USER} != root ]] || die "cannot determine non-root target user for VMware group ownership"
+  if [[ -n ${AUR_HELPER} ]]; then
+    warn "AUR_HELPER=${AUR_HELPER} is ignored: AUR packages are built through the reviewed builder"
   fi
 
-  as_user env TMPDIR="${REAL_HOME}/.cache/vmware-tmp" "${AUR_HELPER}" -S --needed --noconfirm --overwrite '/usr/lib/vmware/xkeymap/*' vmware-keymaps
-  as_user env TMPDIR="${REAL_HOME}/.cache/vmware-tmp" "${AUR_HELPER}" -S --needed --noconfirm "${PKG}"
-  rm -rf -- "${REAL_HOME}/.cache/vmware-tmp" 2>/dev/null || true
+  local aur_lib pkg
+  aur_lib="$(find_aur_review_lib)" \
+    || die "hardening/lib/aur-review.sh not found — run this script from a full checkout of the repository"
+
+  for pkg in vmware-keymaps "${PKG}"; do
+    log "installing ${pkg} from the AUR (the recipe is shown for review first)"
+    # shellcheck disable=SC2016
+    sudo_run bash -c 'set -euo pipefail; source "$1"; aal_aur_install_reviewed "$2"' _ "${aur_lib}" "${pkg}" \
+      || die "${pkg} was not installed (review declined, no terminal, or the build failed). If pacman reported '/usr/lib/vmware/xkeymap/...: exists in filesystem', an older VMware installation left those files behind: move /usr/lib/vmware/xkeymap away and re-run."
+  done
 }
 
 install_pacman_hook() {
@@ -335,8 +342,10 @@ Usage: ./vmware-workstation.sh [command]
   help
 
 Env:
-  AUR_HELPER=yay|paru
   PKG=vmware-workstation
+  AUR_HELPER is no longer used: vmware-keymaps and PKG are built through the
+  reviewed AUR builder (hardening/lib/aur-review.sh), which shows each recipe
+  and needs a typed confirmation on the terminal.
 
 Do not launch the GUI with sudo.
 EOF

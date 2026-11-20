@@ -35,7 +35,9 @@ readonly C_NC='\033[0m'
 readonly LARGE_DISK_THRESHOLD_BYTES=1000000000000
 readonly DEFAULT_TMP_SIZE_GB=10
 readonly LARGE_DISK_TMP_SIZE_GB=25
+readonly MIN_TMP_SIZE_GB=1
 readonly SHM_SIZE_GB=2
+readonly MIN_TMPFS_SIZE_MB=64
 
 msg()  { printf "%b[+]%b %s\n" "$C_OK"   "$C_NC" "$1"; }
 info() { printf "%b[*]%b %s\n" "$C_INFO"  "$C_NC" "$1"; }
@@ -60,10 +62,18 @@ log_action() {
 # --- Defaults ---
 TMP_SIZE="$DEFAULT_TMP_SIZE_GB" # tmpfs /tmp ceiling in GB
 TMP_SIZE_EXPLICIT=false
+# size= values actually used for the tmpfs mounts. tmpfs pages live in RAM and
+# swap, so the automatic values never exceed half of the installed memory
+# (set in detect_disk_layout).
+TMP_SIZE_ARG="${DEFAULT_TMP_SIZE_GB}G"
+SHM_SIZE_ARG="${SHM_SIZE_GB}G"
 VAR_LOOP_SIZE=10            # /var loop image size in GB
 USERNAME=""                 # interactive or -u flag
 NEW_HOSTNAME=""             # interactive or -H flag
-SSH_PORT=22
+SSH_PORT=22                 # replaced by the port sshd uses now unless -p is given
+SSH_PORT_EXPLICIT=false
+CURRENT_SSH_PORT=""         # port sshd uses now (preflight)
+CURRENT_SSH_PORTS=""        # all of them, space separated
 SSH_PUBKEY=""
 ALLOW_NO_SSH_KEY=false
 SKIP_VAR=false
@@ -74,8 +84,16 @@ SYSCTL_DISABLE_IPV6=false
 ROLLBACK_SCRIPT="/root/undo-vps-harden.sh"
 VAR_MIGRATION_GUIDE="/root/MIGRATE_VAR_OFFLINE.txt"
 FSTAB_BACKUP=""
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RAW_BASE_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main"
+# Physical path (no symbolic links): verify_local_components checks who can
+# write to this directory and the ones above it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Components that are not used from a local checkout are downloaded from this
+# branch, tag or commit of the repository (--ref).
+COMPONENT_REF="main"
+RAW_BASE_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/${COMPONENT_REF}"
+# Set by verify_local_components: true only when the files next to this script
+# are a checkout that nobody but root or the owner of this script can write to.
+USE_LOCAL_COMPONENTS=false
 
 # State tracking
 VAR_STRATEGY="skip"        # partition | volume | loop | skip
@@ -87,11 +105,23 @@ PARENT_DISK=""
 # HELPER FUNCTIONS
 ###############################################################################
 
+# Read one line of input into the variable named by $2. A closed stdin (cron,
+# CI, "< /dev/null") ends the run: every caller loops until it gets a valid
+# answer, and a failing read would otherwise repeat the question forever while
+# the output is copied into the log file.
+prompt_read() {
+    local prompt_msg="$1" var_name="$2"
+    if ! read -r -p "$prompt_msg" "${var_name?}"; then
+        echo
+        err "No input available (stdin is closed). This step needs an interactive answer; nothing further was changed."
+    fi
+}
+
 ask_yes_no() {
     local prompt_msg="$1"
     local choice
     while true; do
-        read -r -p "$prompt_msg (y/n): " choice
+        prompt_read "$prompt_msg (y/n): " choice
         case "$choice" in
             [Yy]) return 0 ;;
             [Nn]) return 1 ;;
@@ -103,6 +133,20 @@ ask_yes_no() {
 validate_username() {
     local user="$1"
     [[ "$user" =~ ^[a-z_][a-z0-9_-]*$ ]] && [[ ${#user} -le 32 ]] && [[ "$user" != "root" ]]
+}
+
+# Prints why the account cannot be used as the administrator, or nothing when
+# it can: an existing system account must not be turned into the SSH/sudo
+# login, and a new user cannot be created when a group already has its name.
+username_problem() {
+    local user="$1" uid
+    if uid=$(id -u -- "$user" 2>/dev/null); then
+        if (( uid < 1000 || uid == 65534 )); then
+            echo "'$user' is a system account (uid $uid)"
+        fi
+    elif getent group -- "$user" >/dev/null 2>&1; then
+        echo "a group named '$user' already exists, so that user cannot be created"
+    fi
 }
 
 validate_hostname() {
@@ -121,9 +165,192 @@ validate_ssh_pubkey() {
         return 0
     fi
     if [[ "$key" =~ [\$\`\(\)\{\}\;\|\&\<\>\"\'\\] ]] || [[ "$key" == *$'\n'* ]] || [[ "$key" == *$'\r'* ]]; then
+        warn "The SSH public key contains invalid characters."
         return 1
     fi
-    [[ "$key" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-|sk-ecdsa-) ]]
+    # Accept only key types the hardened sshd will accept afterwards
+    # (PubkeyAcceptedAlgorithms in hardening/ssh/ssh.sh). Password logins are
+    # disabled, so a key sshd refuses -- plain ecdsa-sha2-* in particular --
+    # would lock the operator out of the server.
+    local key_type="${key%% *}"
+    case "$key_type" in
+        ssh-ed25519|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com|ssh-rsa) ;;
+        ecdsa-sha2-*)
+            warn "Plain ECDSA keys ($key_type) are not accepted by the hardened sshd configuration."
+            warn "Use an Ed25519 key (ssh-keygen -t ed25519), a FIDO2 key, or RSA."
+            return 1
+            ;;
+        *)
+            warn "Unsupported SSH key type '${key_type}'. Accepted: ssh-ed25519, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com, ssh-rsa."
+            return 1
+            ;;
+    esac
+    # Check the whole key, not just its prefix: a truncated paste must fail
+    # here rather than at the first login attempt.
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        local key_file
+        key_file=$(mktemp) || return 1
+        printf '%s\n' "$key" > "$key_file"
+        if ! ssh-keygen -l -f "$key_file" >/dev/null 2>&1; then
+            rm -f -- "$key_file"
+            warn "That is not a complete, valid SSH public key (ssh-keygen could not parse it)."
+            return 1
+        fi
+        rm -f -- "$key_file"
+    fi
+    return 0
+}
+
+# True when the file holds at least one public key that the sshd_config
+# written by ssh.sh accepts (same test as has_accepted_authorized_key there).
+# A non-empty authorized_keys with only plain ECDSA or DSA keys would pass an
+# emptiness test and still lock the user out once passwords are disabled.
+authorized_keys_usable() {
+    local key_file="$1" listing
+    [[ -s "$key_file" ]] || return 1
+    listing=$(ssh-keygen -l -f "$key_file" 2>/dev/null || true)
+    awk '
+        { type = $NF }
+        type == "(ED25519)" || type == "(ED25519-SK)" || type == "(ECDSA-SK)" { ok = 1 }
+        type == "(RSA)" && $1 + 0 >= 1024 { ok = 1 }
+        END { exit ok ? 0 : 1 }
+    ' <<< "$listing"
+}
+
+# Ports the running sshd listens on, one per line in ascending order; the
+# configured ports when no listening sshd is found (socket activation, sshd
+# stopped). Prints nothing when neither can be determined.
+detect_sshd_ports() {
+    local ports=""
+    if command -v ss &>/dev/null; then
+        ports=$(ss -H -tlnp 2>/dev/null |
+            awk '/users:\(\("sshd"/ { n = split($4, part, ":"); print part[n] }' | sort -un || true)
+    fi
+    if [[ -z "$ports" ]] && command -v sshd &>/dev/null; then
+        # sshd -T prints the keyword as "port" or "Port" depending on the version.
+        ports=$(sshd -T 2>/dev/null | awk 'tolower($1) == "port" { print $2 }' | sort -un || true)
+    fi
+    grep -E '^[0-9]+$' <<< "$ports" || true
+}
+
+# tmpfs pages live in RAM and swap, so a tmpfs must not be sized from the disk
+# alone: on a 1 GB VPS a 10G /tmp (with /var/tmp bound onto it) lets any user
+# exhaust the memory. Prints the size= value for a ceiling given in GB: the
+# ceiling itself, or half of the installed memory when that is less (the
+# kernel's own tmpfs default), but at least MIN_TMPFS_SIZE_MB.
+tmpfs_size_arg() {
+    local ceiling_gb="$1" mem_kb half_ram_mb
+    mem_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && (( mem_kb > 0 )); then
+        half_ram_mb=$((mem_kb / 2048))
+        (( half_ram_mb >= MIN_TMPFS_SIZE_MB )) || half_ram_mb=$MIN_TMPFS_SIZE_MB
+        if (( half_ram_mb < ceiling_gb * 1024 )); then
+            printf '%sM\n' "$half_ram_mb"
+            return 0
+        fi
+    fi
+    printf '%sG\n' "$ceiling_gb"
+}
+
+# Prints why PATH could have been written by somebody other than root or the
+# owner of this script, or nothing when it could not. KIND is "file",
+# "directory" (holds a component directly) or "ancestor" (further up).
+untrusted_path_reason() {
+    local path="$1" kind="$2" trusted_uid="$3" owner mode
+    if ! owner=$(stat -L -c %u -- "$path" 2>/dev/null) || ! mode=$(stat -L -c %a -- "$path" 2>/dev/null); then
+        echo "$path cannot be examined"
+        return 0
+    fi
+    if [[ "$owner" != 0 && "$owner" != "$trusted_uid" ]]; then
+        echo "$path belongs to uid $owner"
+        return 0
+    fi
+    if (( 8#$mode & 8#022 )); then
+        # A root-owned sticky directory such as /tmp is fine further up the
+        # path: nobody can replace another user's entry in it.
+        if [[ "$kind" == "ancestor" && "$owner" == 0 ]] && (( 8#$mode & 8#1000 )); then
+            return 0
+        fi
+        echo "$path is writable by its group or by others (mode $mode)"
+    fi
+}
+
+# Decide whether the repository files next to this script may be used.
+# Everything staged from there is executed or sourced as root, so a local copy
+# is only trusted when nobody else could have written it: each file, its
+# directory and every directory above must belong to root or to the owner of
+# this script and must not be writable by group or others. Otherwise a local
+# user could plant, say, vps-chroot.sh next to a vps-harden.sh that was
+# downloaded into /tmp. Without any such file (single-file download) the
+# components are fetched from the repository instead.
+verify_local_components() {
+    local -a candidates=(
+        "$SCRIPT_DIR/vps-chroot.sh"
+        "$SCRIPT_DIR/lib/chroot-security.sh"
+        "$SCRIPT_DIR/install-aur-packages.sh"
+        "$SCRIPT_DIR/../utils/auditd-attack.rules"
+        "$SCRIPT_DIR/../utils/aide-config.sh"
+        "$SCRIPT_DIR/../hardening/lib/aur-review.sh"
+        "$SCRIPT_DIR/../hardening/lib/nftables.sh"
+        "$SCRIPT_DIR/../hardening/ssh/ssh.sh"
+    )
+    local -A checked=() reported=()
+    local -a problems=()
+    local path real link_dir dir kind reason script_owner found=false
+
+    USE_LOCAL_COMPONENTS=false
+    for path in "$SCRIPT_DIR"/../hardening/sysctl/*; do
+        candidates+=("$path")
+    done
+    script_owner=$(stat -L -c %u -- "${BASH_SOURCE[0]}" 2>/dev/null || echo 0)
+
+    for path in "${candidates[@]}"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        found=true
+        if ! real=$(realpath -e -- "$path" 2>/dev/null); then
+            problems+=("$path cannot be resolved")
+            continue
+        fi
+        reason=$(untrusted_path_reason "$real" file "$script_owner")
+        [[ -z "$reason" ]] || problems+=("$reason")
+        # Walk up from the directory that holds the file and, when the entry is
+        # a symbolic link, also from the directory that holds the link.
+        link_dir=$(realpath -e -- "$(dirname -- "$path")" 2>/dev/null || true)
+        for dir in "$(dirname -- "$real")" "$link_dir"; do
+            [[ -n "$dir" ]] || continue
+            kind="directory"
+            while true; do
+                if [[ -z "${checked[$kind:$dir]:-}" ]]; then
+                    checked[$kind:$dir]=1
+                    reason=$(untrusted_path_reason "$dir" "$kind" "$script_owner")
+                    if [[ -n "$reason" && -z "${reported[$reason]:-}" ]]; then
+                        reported[$reason]=1
+                        problems+=("$reason")
+                    fi
+                fi
+                [[ "$dir" != "/" ]] || break
+                dir=$(dirname -- "$dir")
+                kind="ancestor"
+            done
+        done
+    done
+
+    if [[ "$found" == false ]]; then
+        info "No repository files next to this script: components are downloaded (ref: $COMPONENT_REF)"
+        return 0
+    fi
+    if (( ${#problems[@]} > 0 )); then
+        warn "Repository files were found next to this script, but they cannot be trusted:"
+        for reason in "${problems[@]}"; do
+            warn "  - $reason"
+        done
+        warn "These files would be executed as root. Use a checkout that only you (or root) can"
+        warn "write to (for example: chmod -R go-w <checkout>), or copy vps-harden.sh alone into"
+        warn "an empty directory owned by root to have the components downloaded instead."
+        err "Refusing to use repository files that other users could have written."
+    fi
+    USE_LOCAL_COMPONENTS=true
+    info "Using the repository files next to this script (${SCRIPT_DIR%/*})"
 }
 
 # --- Usage ---
@@ -135,14 +362,17 @@ Harden filesystem mount points on a live, running Arch Linux VPS.
 Optional /var preparation formats selected storage; migration requires rescue downtime.
 
 Options:
-  -t SIZE     tmpfs size for /tmp in GB (minimum: 10; automatic default: 10,
-              or 25 when the root disk is at least 1 TB)
+  -t SIZE     tmpfs size for /tmp in GB (minimum: $MIN_TMP_SIZE_GB). tmpfs is backed by RAM
+              and swap. Automatic default: half of the installed memory, but
+              at most 10 GB (25 GB when the root disk is at least 1 TB)
   -v SIZE     /var loop image size in GB, if using loop device (default: $VAR_LOOP_SIZE)
   -u USER     Non-root username for vps-chroot.sh (prompted if not given)
   -H HOST     Hostname to set (prompted if not given)
-  -p PORT     SSH port for vps-chroot.sh (default: $SSH_PORT)
+  -p PORT     SSH port for vps-chroot.sh (default: the port sshd uses now,
+              22 if that cannot be determined)
   --ssh-key KEY
-              SSH public key to install for USER
+              SSH public key to install for USER (ssh-ed25519, ssh-rsa,
+              sk-ssh-ed25519@openssh.com or sk-ecdsa-sha2-nistp256@openssh.com)
   -k, --allow-no-ssh-key
               Allow disabling SSH password auth without an authorized_keys entry
               (ONLY if you have verified out-of-band VPS console access)
@@ -152,6 +382,9 @@ Options:
               Select workstation, strict, or performance (default: workstation)
   --disable-ipv6
               Install the explicit IPv6-disable sysctl overlay
+  --ref REF   Branch, tag or commit of the repository that components are
+              downloaded from when this script runs without a local checkout
+              (default: $COMPONENT_REF). Pass a tag or commit to pin what is run.
   --dry-run   Show planned changes without executing
   -h, --help  Show this help
 
@@ -174,8 +407,8 @@ parse_args() {
             -t)
                 [[ $# -ge 2 ]] || err "-t requires a size in GB"
                 TMP_SIZE="$2"
-                if ! [[ "$TMP_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 10#$TMP_SIZE < DEFAULT_TMP_SIZE_GB )); then
-                    err "Invalid tmpfs size: $TMP_SIZE (minimum ${DEFAULT_TMP_SIZE_GB} GB)"
+                if ! [[ "$TMP_SIZE" =~ ^[1-9][0-9]*$ ]] || (( 10#$TMP_SIZE < MIN_TMP_SIZE_GB )); then
+                    err "Invalid tmpfs size: $TMP_SIZE (whole GB, minimum ${MIN_TMP_SIZE_GB})"
                 fi
                 TMP_SIZE_EXPLICIT=true
                 shift 2
@@ -206,6 +439,7 @@ parse_args() {
                 [[ $# -ge 2 ]] || err "-p requires an SSH port"
                 SSH_PORT="$2"
                 validate_ssh_port "$SSH_PORT" || err "Invalid SSH port: $SSH_PORT (must be 1-65535)"
+                SSH_PORT_EXPLICIT=true
                 shift 2
                 ;;
             --ssh-key)
@@ -213,6 +447,15 @@ parse_args() {
                 SSH_PUBKEY="${2%$'\r'}"
                 [[ -n "$SSH_PUBKEY" ]] && validate_ssh_pubkey "$SSH_PUBKEY" ||
                     err "Invalid SSH public key supplied to --ssh-key"
+                shift 2
+                ;;
+            --ref)
+                [[ $# -ge 2 ]] || err "--ref requires a branch, tag or commit"
+                COMPONENT_REF="$2"
+                if ! [[ "$COMPONENT_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$COMPONENT_REF" == *..* ]]; then
+                    err "Invalid --ref value: $COMPONENT_REF"
+                fi
+                RAW_BASE_URL="https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/${COMPONENT_REF}"
                 shift 2
                 ;;
             -k|--allow-no-ssh-key)
@@ -276,6 +519,51 @@ preflight_checks() {
         systemctl start sshd
     fi
 
+    # Everything the software hardening needs is checked now, before the first
+    # filesystem change, not after the mounts have already been reworked.
+    if [[ "$SKIP_SW" == false ]]; then
+        local -a software_tools=(pacman ssh-keygen sshd ss sha256sum)
+        verify_local_components
+        if [[ "$USE_LOCAL_COMPONENTS" == false ]]; then
+            software_tools+=(curl)
+        elif [[ "$COMPONENT_REF" != "main" ]]; then
+            warn "--ref $COMPONENT_REF only applies to downloads; the local checkout is used as it is"
+        fi
+        for tool in "${software_tools[@]}"; do
+            if ! command -v "$tool" &>/dev/null; then
+                err "Required tool for the software hardening not found: $tool — install it first, or pass --skip-sw"
+            fi
+        done
+        if [[ -e /var/lib/pacman/db.lck ]]; then
+            err "pacman is in use (/var/lib/pacman/db.lck exists). Let it finish, or remove a stale lock, then run this script again."
+        fi
+        if [[ "$USE_LOCAL_COMPONENTS" == false ]] &&
+           ! curl -fsSL --max-time 30 -o /dev/null "${RAW_BASE_URL}/base/vps-chroot.sh"; then
+            if [[ "$DRY_RUN" == true ]]; then
+                warn "Cannot download ${RAW_BASE_URL}/base/vps-chroot.sh (network, or a wrong --ref); a real run would stop here"
+            else
+                err "Cannot download ${RAW_BASE_URL}/base/vps-chroot.sh — check the network connection and --ref, or pass --skip-sw"
+            fi
+        fi
+
+        # sshd stays on the port it uses now unless -p asks for another one.
+        # With several ports, the one this very session came in through is
+        # known to be reachable; otherwise the lowest one is taken.
+        local -a sshd_ports=()
+        local sshd_port session_port="${SSH_CONNECTION:-}"
+        session_port="${session_port##* }"
+        mapfile -t sshd_ports < <(detect_sshd_ports)
+        CURRENT_SSH_PORT="${sshd_ports[0]:-}"
+        CURRENT_SSH_PORTS=""
+        for sshd_port in "${sshd_ports[@]}"; do
+            CURRENT_SSH_PORTS+="${CURRENT_SSH_PORTS:+ }$sshd_port"
+            [[ "$sshd_port" != "$session_port" ]] || CURRENT_SSH_PORT="$sshd_port"
+        done
+        if [[ "$SSH_PORT_EXPLICIT" == false && -n "$CURRENT_SSH_PORT" ]]; then
+            SSH_PORT="$CURRENT_SSH_PORT"
+        fi
+    fi
+
     msg "Preflight checks passed"
 }
 
@@ -324,8 +612,18 @@ detect_disk_layout() {
         else
             TMP_SIZE="$DEFAULT_TMP_SIZE_GB"
         fi
-        info "Automatic /tmp tmpfs ceiling: ${TMP_SIZE}G"
+        TMP_SIZE_ARG=$(tmpfs_size_arg "$TMP_SIZE")
+        info "Automatic /tmp tmpfs size: ${TMP_SIZE_ARG} (half of the RAM, at most ${TMP_SIZE}G)"
+    else
+        TMP_SIZE_ARG="${TMP_SIZE}G"
+        local mem_total_kb
+        mem_total_kb=$(awk '/^(MemTotal|SwapTotal):/ { sum += $2 } END { print sum + 0 }' /proc/meminfo 2>/dev/null || true)
+        if [[ "$mem_total_kb" =~ ^[0-9]+$ ]] && (( mem_total_kb > 0 && 10#$TMP_SIZE * 1048576 > mem_total_kb )); then
+            warn "-t ${TMP_SIZE} is more than this system's RAM and swap together ($((mem_total_kb / 1024)) MiB)."
+            warn "tmpfs lives in memory: filling /tmp (or /var/tmp) can then exhaust it."
+        fi
     fi
+    SHM_SIZE_ARG=$(tmpfs_size_arg "$SHM_SIZE_GB")
 
     # Show current layout
     echo
@@ -376,8 +674,8 @@ show_plan() {
     echo -e "${C_INFO}============================================================${C_NC}"
     echo
     echo -e "${C_OK}Filesystem hardening:${C_NC}"
-    echo "  1. /tmp      → tmpfs (${TMP_SIZE}G, noexec,nosuid,nodev)"
-    echo "  2. /dev/shm  → remount with noexec,nosuid,nodev"
+    echo "  1. /tmp      → tmpfs (${TMP_SIZE_ARG}, noexec,nosuid,nodev)"
+    echo "  2. /dev/shm  → remount with noexec,nosuid,nodev (${SHM_SIZE_ARG} from the next boot)"
     echo "  3. /proc     → remount with hidepid=2,gid=proc"
     echo "  4. /var/tmp  → bind mount to /tmp (inherits hardened options)"
 
@@ -393,22 +691,59 @@ show_plan() {
 
     echo
     echo -e "${C_OK}fstab hardening:${C_NC}"
-    echo "  Add nosuid,nodev to /home and other existing mounts"
+    echo "  Add nosuid,nodev to the /home entry (when /home is a separate mount)"
     echo
     echo -e "${C_OK}Safety:${C_NC}"
     echo "  - fstab backed up before changes"
     echo "  - Rollback script generated at $ROLLBACK_SCRIPT"
     echo "  - mount -a --fake validation after every fstab change"
     echo "  - SSH stays up throughout the entire process"
+    echo "  - Tip: run this inside tmux or screen, so that a dropped SSH session"
+    echo "    cannot stop the run half-way"
 
     if [[ "$SKIP_SW" == false ]]; then
         echo
-        echo -e "${C_OK}Software hardening:${C_NC}"
-        echo "  Will run vps-chroot.sh (SSH, nftables, sysctl, PAM, etc.)"
-        echo "  Username and hostname will be prompted before running"
-        echo "  SSH port: $SSH_PORT"
-        echo "  Sysctl profile: $SYSCTL_PROFILE"
-        echo "  IPv6 disabled: $SYSCTL_DISABLE_IPV6"
+        echo -e "${C_OK}Software hardening (vps-chroot.sh, run on this live system):${C_NC}"
+        echo "  Username, hostname and SSH key are asked for before anything is changed"
+        if [[ -z "$CURRENT_SSH_PORTS" ]]; then
+            echo "  SSH port: $SSH_PORT (the port sshd uses now could not be determined)"
+        elif [[ "$CURRENT_SSH_PORTS" == "$SSH_PORT" ]]; then
+            echo "  SSH port: $SSH_PORT (unchanged)"
+        else
+            echo -e "  SSH port: ${C_WARN}sshd listens on ${CURRENT_SSH_PORTS} now and on ${SSH_PORT} ONLY afterwards${C_NC}"
+            echo "            (a port it leaves stays open in an installed firewall until sshd"
+            echo "            answers on $SSH_PORT)"
+        fi
+        echo "  Changes:"
+        echo "    - sshd: new /etc/ssh/sshd_config — key-only logins, no root login, and"
+        echo "      SSH access for the chosen user ONLY (AllowUsers); other accounts can"
+        echo "      no longer log in over SSH"
+        echo "    - new passwords are set for that user and for root (asked for)"
+        echo "    - firewall: a default-deny nftables ruleset is installed when the host"
+        echo "      has no firewall (ports with a listening service stay open). An"
+        echo "      existing firewall (own nftables.conf, firewalld, ufw, iptables rules,"
+        echo "      Docker/libvirt tables) is left as it is"
+        echo "    - sudo: hardened defaults added as /etc/sudoers.d/00-awesome-hardening;"
+        echo "      the user joins the 'sudo' group; /etc/sudoers keeps its rules"
+        echo "    - DNS: systemd-resolved with DNS-over-TLS; /etc/resolv.conf is replaced"
+        echo "    - packages: nftables fail2ban clamav rkhunter audit lynis arpwatch chrony"
+        echo "      sysstat arch-audit and a few small tools"
+        echo "    - PAM password policy, auditd rules, systemd unit hardening, login banner"
+        echo "    - sysctl profile: $SYSCTL_PROFILE (IPv6 disabled: $SYSCTL_DISABLE_IPV6); it turns"
+        echo "      packet forwarding off — do not use it on a router, VPN or container host"
+        echo "  Kept: timezone, locale, keymap, network profiles, the entries in /etc/hosts,"
+        echo "        existing ~/.nanorc and ~/.ssh/config"
+        echo "  Backups: /etc/hosts, /etc/resolv.conf, /etc/sudoers and /etc/nftables.conf are copied"
+        echo "        to <file>.before-awesome.<time> before they are changed; the old sshd_config is"
+        echo "        kept as /etc/ssh/sshd_config.bak.<time>. Other files get no backup copy."
+        if [[ "$USE_LOCAL_COMPONENTS" == true ]]; then
+            echo "  Components: the repository checkout at ${SCRIPT_DIR%/*}"
+        else
+            echo "  Components: downloaded from $RAW_BASE_URL"
+            if [[ "$COMPONENT_REF" == "main" ]]; then
+                echo "              (the moving 'main' branch; pass --ref <tag|commit> to pin them)"
+            fi
+        fi
     else
         echo
         echo -e "${C_WARN}Software hardening:${C_NC} SKIPPED"
@@ -443,6 +778,21 @@ create_backup() {
 }
 
 create_rollback_script() {
+    # A rollback script left by an earlier run restores the fstab from before
+    # this system was hardened. While the entries of that run are still in
+    # /etc/fstab it remains the way back: regenerating it would make "rollback"
+    # restore the already hardened fstab that was backed up a moment ago.
+    local earlier_backup=""
+    if [[ -f "$ROLLBACK_SCRIPT" ]]; then
+        earlier_backup=$(grep -o '/root/fstab\.backup\.[0-9-]*' "$ROLLBACK_SCRIPT" | head -n1 || true)
+    fi
+    if [[ -n "$earlier_backup" && -f "$earlier_backup" ]] &&
+       grep -Eq '^/tmp[[:space:]]+/var/tmp[[:space:]]+none[[:space:]]+bind' /etc/fstab; then
+        info "Keeping the rollback script of the earlier run: $ROLLBACK_SCRIPT"
+        info "It restores the fstab from before the first hardening: $earlier_backup"
+        return 0
+    fi
+
     info "Generating rollback script at $ROLLBACK_SCRIPT..."
 
     cat > "$ROLLBACK_SCRIPT" <<'ROLLBACK_HEADER'
@@ -559,7 +909,7 @@ validate_fstab() {
 ###############################################################################
 
 harden_tmp() {
-    info "Hardening /tmp → tmpfs (${TMP_SIZE}G, noexec,nosuid,nodev)..."
+    info "Hardening /tmp → tmpfs (${TMP_SIZE_ARG}, noexec,nosuid,nodev)..."
 
     if [[ "$DRY_RUN" == true ]]; then
         info "[DRY-RUN] Would mount tmpfs on /tmp"
@@ -571,30 +921,30 @@ harden_tmp() {
     sed -i '\|^[^#].*[[:space:]]/tmp[[:space:]]|d' /etc/fstab
 
     # Add hardened entry
-    echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=${TMP_SIZE}G 0 0" >> /etc/fstab
+    echo "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec,relatime,size=${TMP_SIZE_ARG} 0 0" >> /etc/fstab
 
     # Mount (preserve existing files by copying first)
     if findmnt -n /tmp &>/dev/null; then
         # Already mounted — remount with new options
-        mount -o remount,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" /tmp 2>/dev/null || {
+        mount -o remount,nosuid,nodev,noexec,relatime,size="${TMP_SIZE_ARG}" /tmp 2>/dev/null || {
             # If remount fails, do a fresh mount (preserve existing files)
             local tmp_backup
             tmp_backup=$(mktemp -d /root/tmp_backup.XXXXXX) || {
                 warn "mktemp failed — mounting /tmp without preserving contents"
-                mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
+                mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE_ARG}" tmpfs /tmp
                 return 0
             }
             rsync -aHAX --exclude='lost+found' /tmp/ "$tmp_backup/" 2>/dev/null || true
-            mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
+            mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE_ARG}" tmpfs /tmp
             rsync -aHAX --exclude='lost+found' "$tmp_backup/" /tmp/ 2>/dev/null || true
             rm -rf "$tmp_backup"
         }
     else
-        mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE}G" tmpfs /tmp
+        mount -t tmpfs -o rw,nosuid,nodev,noexec,relatime,size="${TMP_SIZE_ARG}" tmpfs /tmp
     fi
 
     validate_fstab
-    msg "/tmp hardened (tmpfs, ${TMP_SIZE}G)"
+    msg "/tmp hardened (tmpfs, ${TMP_SIZE_ARG})"
     log_action "Hardened /tmp as tmpfs"
 }
 
@@ -615,7 +965,7 @@ harden_dev_shm() {
     sed -i '\|^[^#].*[[:space:]]/dev/shm[[:space:]]|d' /etc/fstab
 
     # Add hardened entry
-    echo "tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=${SHM_SIZE_GB}G 0 0" >> /etc/fstab
+    echo "tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=${SHM_SIZE_ARG} 0 0" >> /etc/fstab
 
     # Remount with hardened options
     mount -o remount,nosuid,nodev,noexec /dev/shm 2>/dev/null || \
@@ -712,6 +1062,38 @@ harden_var_tmp() {
 # /var SEPARATION — STRATEGY DETECTION
 ###############################################################################
 
+# Whole disks that could be given to /var: not the root disk, no zram, ramdisk,
+# network block or loop device, writable, at least 1 GiB, and with nothing on
+# them in use -- no mounted filesystem or active swap, and no LVM, LUKS or RAID
+# device stacked on the disk or one of its partitions. "Not mounted" alone is
+# not "unused": a disk can hold a volume group or an unmounted data filesystem.
+list_spare_disks() {
+    local disk mounts types
+    while IFS= read -r disk; do
+        [[ -n "$disk" && "$disk" != "$PARENT_DISK" && -b "$disk" ]] || continue
+        mounts=$(lsblk -n -o MOUNTPOINTS "$disk" 2>/dev/null || true)
+        [[ ! "$mounts" =~ [^[:space:]] ]] || continue
+        # Anything but the disk and its partitions in the device tree (lvm,
+        # crypt, raid*, mpath ...) means the disk is in use. An empty answer
+        # (lsblk failed) is treated the same way.
+        types=$(lsblk -n -o TYPE "$disk" 2>/dev/null || true)
+        if grep -qvE '^[[:space:]]*(disk|part)[[:space:]]*$' <<< "$types"; then
+            continue
+        fi
+        printf '%s\n' "$disk"
+    done < <(lsblk -d -n -b -o NAME,TYPE,RO,SIZE 2>/dev/null | awk '
+        $2 == "disk" && $3 == 0 && $4 >= 1073741824 && $1 !~ /^(zram|ram|nbd|loop)/ { print "/dev/" $1 }
+    ' || true)
+}
+
+# True when the disk carries a partition table or a filesystem/LVM/RAID/LUKS
+# signature, i.e. erasing it may destroy data.
+disk_has_signature() {
+    local disk="$1" signatures
+    signatures=$(lsblk -n -o FSTYPE,PTTYPE "$disk" 2>/dev/null | tr -d '[:space:]' || true)
+    [[ -n "$signatures" ]]
+}
+
 choose_var_strategy() {
     info "Detecting /var separation options..."
 
@@ -723,32 +1105,40 @@ choose_var_strategy() {
     fi
 
     # Option 1: Check for extra attached volumes (e.g., /dev/vdb, /dev/sdb)
-    local extra_disks
-    extra_disks=$(lsblk -d -n -o NAME,TYPE | awk '$2=="disk" {print "/dev/"$1}' | while read -r disk; do
-        # Skip the root disk
-        [[ "$disk" == "$PARENT_DISK" ]] && continue
-        # Check if disk has no partitions/filesystems in use
-        if ! lsblk -n -o MOUNTPOINTS "$disk" 2>/dev/null | grep -q '[^[:space:]]'; then
-            echo "$disk"
-        fi
-    done)
+    local -a spare_disks=()
+    local spare_disk typed_name
+    mapfile -t spare_disks < <(list_spare_disks)
 
-    if [[ -n "$extra_disks" ]]; then
-        local first_disk
-        first_disk=$(echo "$extra_disks" | head -1)
-        local disk_size
-        disk_size=$(lsblk -d -n -o SIZE "$first_disk" 2>/dev/null)
+    for spare_disk in "${spare_disks[@]}"; do
         echo
-        info "Found unmounted disk: $first_disk ($disk_size)"
-        if ask_yes_no "Erase $first_disk to prepare storage for offline /var migration?"; then
+        info "Found a disk that is not in use: $spare_disk"
+        lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$spare_disk" 2>/dev/null || true
+        if disk_has_signature "$spare_disk"; then
+            warn "$spare_disk is NOT blank: it carries a partition table or a filesystem (see above)."
+            warn "Using it for /var ERASES everything on it."
+            prompt_read "Type the device name ($spare_disk) to erase it, or press Enter to leave it alone: " typed_name
+            if [[ "${typed_name%$'\r'}" == "$spare_disk" ]]; then
+                VAR_STRATEGY="volume"
+                VAR_DEVICE="$spare_disk"
+                return 0
+            fi
+            info "$spare_disk left untouched"
+        elif ask_yes_no "Format the blank disk $spare_disk to prepare storage for offline /var migration?"; then
             VAR_STRATEGY="volume"
-            VAR_DEVICE="$first_disk"
+            VAR_DEVICE="$spare_disk"
             return 0
         fi
-    fi
+    done
 
-    # Option 2: Check for free unpartitioned space on root disk
-    local free_space_bytes
+    # Option 2: Check for free unpartitioned space on root disk. The partition
+    # is created with sgdisk, which would convert an MBR (DOS) disk to GPT in
+    # place and leave a BIOS-booted server unbootable, so this is offered on
+    # GPT disks only.
+    local free_space_bytes parent_pttype partition_tool partition_tools_ok=true
+    parent_pttype=$(lsblk -d -n -o PTTYPE "$PARENT_DISK" 2>/dev/null | tr -d '[:space:]' || true)
+    for partition_tool in sgdisk partprobe uuidgen; do
+        command -v "$partition_tool" &>/dev/null || partition_tools_ok=false
+    done
     free_space_bytes=$(LC_ALL=C sfdisk -F "$PARENT_DISK" 2>/dev/null | awk '
         match($0, /[0-9]+ bytes/) {
             s = substr($0, RSTART, RLENGTH)
@@ -763,7 +1153,11 @@ choose_var_strategy() {
         local free_gb=$((free_space_bytes / 1073741824))
         echo
         info "Found ${free_gb}G free space on $PARENT_DISK"
-        if ask_yes_no "Create a new partition for /var?"; then
+        if [[ "$parent_pttype" != "gpt" ]]; then
+            info "Not offering a new partition: $PARENT_DISK has a '${parent_pttype:-unknown}' partition table (GPT is required)"
+        elif [[ "$partition_tools_ok" == false ]]; then
+            info "Not offering a new partition: sgdisk (gptfdisk), partprobe (parted) and uuidgen are needed for it"
+        elif ask_yes_no "Create a new partition for /var?"; then
             VAR_STRATEGY="partition"
             return 0
         fi
@@ -988,15 +1382,41 @@ harden_fstab_options() {
         return 0
     fi
 
-    # Add nosuid,nodev to /home if it's a separate mount
+    # Add nosuid,nodev to /home if it's a separate mount. Only the options
+    # field of the /home entry is rewritten, whatever it contains ("defaults",
+    # "rw,relatime", ...); comments and every other line stay as they are.
     if findmnt -n /home &>/dev/null && [[ "$(findmnt -n -o SOURCE /home)" != "$(findmnt -n -o SOURCE /)" ]]; then
-        local home_opts
-        home_opts=$(findmnt -n -o OPTIONS /home)
-        if ! echo "$home_opts" | grep -q "nosuid"; then
+        local fstab_new
+        fstab_new=$(mktemp /etc/fstab.XXXXXX)
+        awk '
+            /^[[:space:]]*#/ || NF < 4 || $2 != "/home" { print; next }
+            {
+                opts = $4
+                if (("," opts ",") !~ /,nosuid,/) opts = opts ",nosuid"
+                if (("," opts ",") !~ /,nodev,/) opts = opts ",nodev"
+                if (opts != $4 && match($0, /^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/)) {
+                    rest = substr($0, RLENGTH + 1)
+                    sub(/^[^[:space:]]+/, "", rest)
+                    print substr($0, 1, RLENGTH) opts rest
+                    next
+                }
+                print
+            }
+        ' /etc/fstab > "$fstab_new"
+        if cmp -s -- "$fstab_new" /etc/fstab; then
+            rm -f -- "$fstab_new"
+            if awk '!/^[[:space:]]*#/ && $2 == "/home" { found = 1 } END { exit found ? 0 : 1 }' /etc/fstab; then
+                info "/home fstab entry already has nosuid,nodev"
+            else
+                warn "/home is a separate mount without an /etc/fstab entry; add nosuid,nodev where it is defined"
+            fi
+        else
             info "Adding nosuid,nodev to /home fstab entry"
-            sed -i '/[[:space:]]\/home[[:space:]]/ s/defaults/defaults,nosuid,nodev/' /etc/fstab
-            mount -o remount,nosuid,nodev /home 2>/dev/null || true
+            chmod 0644 "$fstab_new"
+            mv -f -- "$fstab_new" /etc/fstab
         fi
+        mount -o remount,nosuid,nodev /home 2>/dev/null ||
+            warn "/home remount with nosuid,nodev failed (will apply on next boot)"
     fi
 
     validate_fstab
@@ -1014,27 +1434,56 @@ prompt_user_config() {
     echo
 
     # Prompt for username if not provided via -u, and always validate
+    local user_problem
     if [[ -z "$USERNAME" ]]; then
-        local default_user
-        default_user=$(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1 || true)
+        # Suggest the account that called sudo; failing that, the first home
+        # directory that belongs to a regular account.
+        local default_user="" home_name
+        if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+            default_user="$SUDO_USER"
+        else
+            while IFS= read -r home_name; do
+                if validate_username "$home_name" && id -u -- "$home_name" &>/dev/null &&
+                   [[ -z "$(username_problem "$home_name")" ]]; then
+                    default_user="$home_name"
+                    break
+                fi
+            done < <(find /home -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort || true)
+        fi
+        if [[ -n "$default_user" ]] &&
+           { ! validate_username "$default_user" || [[ -n "$(username_problem "$default_user")" ]]; }; then
+            default_user=""
+        fi
 
         while true; do
-            if [[ -n "$default_user" ]] && validate_username "$default_user"; then
-                read -r -p "Username [${default_user}]: " USERNAME
+            if [[ -n "$default_user" ]]; then
+                prompt_read "Username [${default_user}]: " USERNAME
                 USERNAME="${USERNAME:-$default_user}"
             else
-                read -r -p "Username: " USERNAME
+                prompt_read "Username: " USERNAME
             fi
             USERNAME="${USERNAME%$'\r'}"
-            if validate_username "$USERNAME"; then
-                break
-            else
+            if ! validate_username "$USERNAME"; then
                 warn "Invalid username. Must be non-root, begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
+                continue
             fi
+            user_problem=$(username_problem "$USERNAME")
+            if [[ -n "$user_problem" ]]; then
+                warn "Cannot use that name: $user_problem."
+                continue
+            fi
+            break
         done
     else
         validate_username "$USERNAME" ||
             err "Invalid username '$USERNAME'. Must be non-root, begin with [a-z_], contain only [a-z0-9_-], max 32 chars."
+        user_problem=$(username_problem "$USERNAME")
+        [[ -z "$user_problem" ]] || err "Cannot use '$USERNAME' as the administrator account: $user_problem."
+    fi
+    if id -u -- "$USERNAME" &>/dev/null; then
+        info "Account '$USERNAME' exists: it is kept and added to the sudo and proc groups"
+    else
+        info "Account '$USERNAME' does not exist yet: it will be created"
     fi
 
     # Prompt for hostname if not provided via -H, and always validate
@@ -1044,7 +1493,7 @@ prompt_user_config() {
         [[ -n "$current_host" ]] || current_host="archlinux"
 
         while true; do
-            read -r -p "Hostname [${current_host}]: " NEW_HOSTNAME
+            prompt_read "Hostname [${current_host}]: " NEW_HOSTNAME
             NEW_HOSTNAME="${NEW_HOSTNAME:-$current_host}"
             NEW_HOSTNAME="${NEW_HOSTNAME%$'\r'}"
             if validate_hostname "$NEW_HOSTNAME"; then
@@ -1060,10 +1509,19 @@ prompt_user_config() {
 
     validate_ssh_port "$SSH_PORT" || err "Invalid SSH port: $SSH_PORT (must be 1-65535)"
 
-    local existing_auth_keys="/home/$USERNAME/.ssh/authorized_keys"
+    # The account's real home directory (not always /home/<name>), and a key
+    # check that matches what the hardened sshd accepts: a non-empty file with
+    # only plain ECDSA or DSA keys would not let anybody in.
+    local user_home existing_auth_keys
+    user_home=$(getent passwd -- "$USERNAME" 2>/dev/null | cut -d: -f6 || true)
+    [[ -n "$user_home" ]] || user_home="/home/$USERNAME"
+    existing_auth_keys="$user_home/.ssh/authorized_keys"
     local has_existing_keys=false
-    if [[ -s "$existing_auth_keys" ]]; then
+    if authorized_keys_usable "$existing_auth_keys"; then
         has_existing_keys=true
+    elif [[ -s "$existing_auth_keys" ]]; then
+        warn "$existing_auth_keys holds no key that the hardened sshd accepts"
+        warn "(accepted: Ed25519, FIDO2 sk-* keys, RSA of at least 1024 bits)."
     fi
 
     # Validate or prompt for SSH public key (critical: password auth will be disabled)
@@ -1072,34 +1530,38 @@ prompt_user_config() {
     else
         echo -e "\n${C_WARN}Password authentication and root SSH login will be disabled after hardening.${C_NC}"
         if [[ "$has_existing_keys" == true ]]; then
-            info "Existing non-empty $existing_auth_keys detected (press Enter to keep existing keys, or paste an additional key)."
+            info "Usable keys found in $existing_auth_keys (press Enter to keep them, or paste an additional key)."
         fi
         while true; do
             echo -e "${C_WARN}Paste your SSH public key (from ~/.ssh/id_ed25519.pub on your local machine):${C_NC}"
-            read -r SSH_PUBKEY
+            prompt_read "" SSH_PUBKEY
             SSH_PUBKEY="${SSH_PUBKEY%$'\r'}"
             if [[ -z "$SSH_PUBKEY" ]]; then
                 if [[ "$has_existing_keys" == true || "$ALLOW_NO_SSH_KEY" == true ]]; then
                     break
                 fi
-                warn "No SSH public key provided and $existing_auth_keys is missing or empty!"
+                warn "No SSH public key provided and $existing_auth_keys has no usable key!"
                 if ask_yes_no "Confirm out-of-band VPS console access and proceed WITHOUT an SSH key?"; then
                     ALLOW_NO_SSH_KEY=true
                     break
                 fi
                 continue
             fi
+            # validate_ssh_pubkey explains what is wrong with the key.
             if validate_ssh_pubkey "$SSH_PUBKEY"; then
                 break
             fi
-            warn "Invalid SSH public key. Must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-, sk-ssh-, or sk-ecdsa- and contain no shell metacharacters."
         done
     fi
 
     echo
     info "Username:  $USERNAME"
     info "Hostname:  $NEW_HOSTNAME"
-    info "SSH port:  $SSH_PORT"
+    if [[ -n "$CURRENT_SSH_PORTS" && "$CURRENT_SSH_PORTS" != "$SSH_PORT" ]]; then
+        info "SSH port:  $SSH_PORT (sshd listens on $CURRENT_SSH_PORTS now)"
+    else
+        info "SSH port:  $SSH_PORT"
+    fi
     if [[ -n "$SSH_PUBKEY" ]]; then
         info "SSH key:   (provided)"
     elif [[ "$has_existing_keys" == true ]]; then
@@ -1141,14 +1603,15 @@ stage_ssh_components() {
     local target_root="$1"
     # Stage both SSH components before vps-chroot.sh can change authentication.
     # The single-file download workflow needs the same helper as a local clone.
+    # Local files are used only once verify_local_components has accepted them.
     local ssh_component ssh_target
     for ssh_component in lib/nftables.sh ssh/ssh.sh; do
         ssh_target="${target_root%/}/${ssh_component##*/}"
-        if [[ -r "$SCRIPT_DIR/../hardening/$ssh_component" ]]; then
+        if [[ "${USE_LOCAL_COMPONENTS:-false}" == true && -r "$SCRIPT_DIR/../hardening/$ssh_component" ]]; then
             install -m 0644 "$SCRIPT_DIR/../hardening/$ssh_component" "$ssh_target"
         else
             curl -fsSL \
-                "https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main/hardening/$ssh_component" \
+                "${RAW_BASE_URL:-https://raw.githubusercontent.com/schm1d/AwesomeArchLinux/main}/hardening/$ssh_component" \
                 -o "$ssh_target" || err "Could not fetch required SSH component: $ssh_component"
             chmod 0644 "$ssh_target"
         fi
@@ -1164,7 +1627,7 @@ stage_repo_component() {
 
     install -d -m 0755 "$(dirname "$dest")"
     tmp_dest=$(mktemp "${dest}.XXXXXX")
-    if [[ -r "$src" ]]; then
+    if [[ "${USE_LOCAL_COMPONENTS:-false}" == true && -r "$src" ]]; then
         cat "$src" > "$tmp_dest"
     else
         if ! curl -fsSL "${RAW_BASE_URL}/${remote_rel}" -o "$tmp_dest"; then
@@ -1199,8 +1662,9 @@ run_software_hardening() {
     chroot_script=$(mktemp /root/vps-chroot.XXXXXX.sh)
     chmod 0700 "$chroot_script"
 
-    # Try local copy first, otherwise fetch into private /root mktemp file
-    if [[ -r "$SCRIPT_DIR/vps-chroot.sh" ]]; then
+    # Use the local copy when preflight accepted the checkout (see
+    # verify_local_components), otherwise fetch into a private /root mktemp file
+    if [[ "$USE_LOCAL_COMPONENTS" == true && -r "$SCRIPT_DIR/vps-chroot.sh" ]]; then
         info "Staging local vps-chroot.sh from $SCRIPT_DIR"
         cat "$SCRIPT_DIR/vps-chroot.sh" > "$chroot_script"
     else
@@ -1258,6 +1722,15 @@ run_software_hardening() {
     chmod 0755 "$sysctl_stage/sysctl.sh"
 
     stage_ssh_components /
+
+    # Record exactly what is about to run as root. For components downloaded
+    # from a moving branch the log is the only trace of which version ran.
+    info "Staged components (sha256):"
+    sha256sum -- "$chroot_script" \
+        /usr/local/lib/awesomearchlinux/chroot-security.sh \
+        /usr/local/share/awesomearchlinux/auditd-attack.rules \
+        /root/install-aur-packages.sh /root/aur-review.sh /root/aide-config.sh \
+        "$sysctl_stage"/* /ssh.sh /nftables.sh || true
 
     # Set up environment variables and run
     export _INSTALL_DISK="$PARENT_DISK"
@@ -1328,7 +1801,14 @@ show_summary() {
 
     echo
     echo -e "${C_INFO}Checklist:${C_NC}"
-    echo "  [ ] Verify SSH access in a NEW terminal before closing this one"
+    if [[ "$SKIP_SW" == false ]]; then
+        echo "  [ ] Verify SSH access in a NEW terminal before closing this one:"
+        echo "        ssh -p $SSH_PORT $USERNAME@<this server>   (key login; root and passwords are refused)"
+        echo "  [ ] Pre-hardening copies: <file>.before-awesome.<time> next to /etc/hosts, /etc/resolv.conf,"
+        echo "        /etc/sudoers and /etc/nftables.conf; /etc/ssh/sshd_config.bak.<time>"
+    else
+        echo "  [ ] Verify SSH access in a NEW terminal before closing this one"
+    fi
     echo "  [ ] Review fstab: cat /etc/fstab"
     echo "  [ ] Check mounts: findmnt --real"
     [[ "$VAR_STRATEGY" != "skip" ]] && \
@@ -1370,6 +1850,13 @@ main() {
         exit 0
     fi
 
+    # Ask for everything the software hardening needs before the first change,
+    # so that a wrong answer or a missing SSH key cannot leave the server half
+    # converted.
+    if [[ "$SKIP_SW" == false ]]; then
+        prompt_user_config
+    fi
+
     create_backup
     create_rollback_script
 
@@ -1391,7 +1878,6 @@ main() {
 
     # Software hardening
     if [[ "$SKIP_SW" == false ]]; then
-        prompt_user_config
         create_install_env
         run_software_hardening
     fi

@@ -11,6 +11,10 @@ set -euo pipefail
 umask 022
 
 DEFAULT_REPO_URL="https://github.com/Zagitta/gpu-unlock.git"
+# Commit of DEFAULT_REPO_URL that is built when --ref is not given, so an
+# unattended install never builds whatever upstream's default branch holds at
+# that moment. Review upstream's diff before moving this pin.
+DEFAULT_REPO_REF="7eb51bccae0a0b7e599e084d971170e9a1e82d0c"
 SYSFS_PCI_DEVICES="${GPU_UNLOCK_SYSFS_PCI:-/sys/bus/pci/devices}"
 SYSFS_DMI_DIR="${GPU_UNLOCK_SYSFS_DMI:-/sys/class/dmi/id}"
 KERNEL_CMDLINE_FILE="${GPU_UNLOCK_KERNEL_CMDLINE:-/etc/kernel/cmdline}"
@@ -21,6 +25,8 @@ MKINITCPIO_PRESET_DIR="${GPU_UNLOCK_PRESET_DIR:-/etc/mkinitcpio.d}"
 MKINITCPIO_DROPIN="${GPU_UNLOCK_MKINITCPIO_DROPIN:-/etc/mkinitcpio.conf.d/zz-gpu-unlock.conf}"
 SBCTL_DIR="${GPU_UNLOCK_SBCTL_DIR:-/var/lib/sbctl}"
 MODPROBE_PM_CONF="${GPU_UNLOCK_MODPROBE_PM_CONF:-/etc/modprobe.d/gpu-unlock-pm.conf}"
+TPM_LUKS_CONF="${GPU_UNLOCK_TPM_LUKS_CONF:-/etc/tpm_luks.conf}"
+SECUREBOOT_CONF="${GPU_UNLOCK_SECUREBOOT_CONF:-/etc/awesome-secureboot.conf}"
 INSTALLED_HELPER="${GPU_UNLOCK_INSTALLED_HELPER:-/usr/local/lib/awesomearchlinux/gpu-unlock.sh}"
 INSTALLED_SYMLINK="${GPU_UNLOCK_INSTALLED_SYMLINK:-/usr/local/sbin/awesome-gpu-unlock}"
 CACHE_ROOT="${GPU_UNLOCK_CACHE_ROOT:-/var/cache/awesomearchlinux/gpu-unlock}"
@@ -46,7 +52,8 @@ Modes:
   --status                  Show GPU compatibility, DKMS/firmware, and cmdline status (default)
   --install                 Build & install gpu-unlock-firmware + gpu-unlock-dkms and enable cmdline
   --set-targets TARGETS     Update gpu_unlock.targets= on an installed system and refresh boot images
-  --disable                 Remove gpu_unlock.* parameters from kernel cmdline (keep packages installed)
+  --disable                 Remove gpu_unlock.* parameters from kernel cmdline and the
+                            dynamic-PM override (keep packages installed)
   --uninstall               Remove kernel cmdline parameters, uninstall packages, and refresh boot images
   -h, --help                Show this help
 
@@ -54,8 +61,10 @@ Options:
   --targets TARGETS         'all' (default) or comma-separated PCI BDFs (e.g. 0000:01:00.0,0000:21:00.0)
   --no-resume-unlock        Also set gpu_unlock.resume=0 on the kernel command line
   --disable-dynamic-pm      Write NVreg_DynamicPowerManagement=0x00 for laptop dGPUs
+                            (with --install or --set-targets)
   --repo-url URL            Upstream Git repository URL (default: https://github.com/Zagitta/gpu-unlock.git)
-  --ref REF                 Optional Git tag, branch, or commit SHA to check out before building
+  --ref REF                 Git tag, branch, or commit SHA to build (default: the commit
+                            pinned in this script for the default repository)
   --build-user USER         Unprivileged user account to run makepkg (default: SUDO_USER or ephemeral builder)
   --no-bootloader           Install packages/DKMS only; caller updates bootloader/UKI (used by chroot.sh)
   --keep-cache              Keep downloaded NVIDIA source/installer cache under /var/cache/awesomearchlinux
@@ -248,6 +257,157 @@ has_uki_preset() {
     return 1
 }
 
+# Kernel parameters in /etc/kernel/cmdline: everything except comment lines,
+# which mkinitcpio also leaves out of the UKI.
+kernel_cmdline_content() {
+    [[ -r "$KERNEL_CMDLINE_FILE" ]] || return 0
+    grep -v '^[[:space:]]*#' "$KERNEL_CMDLINE_FILE" || true
+}
+
+_GU_LAST_BACKUP=""
+_GU_CMDLINE_STATUS=""
+
+# Move TMP over FILE unless both are identical. A changed FILE is first copied
+# to FILE.bak.<timestamp>; _GU_LAST_BACKUP names that copy (empty: no change).
+replace_if_changed() {
+    local tmp="$1" file="$2"
+    _GU_LAST_BACKUP=""
+    if cmp -s -- "$tmp" "$file"; then
+        rm -f -- "$tmp"
+        return 0
+    fi
+    _GU_LAST_BACKUP="${file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p -- "$file" "$_GU_LAST_BACKUP"
+    mv -f -- "$tmp" "$file"
+}
+
+restore_backup() {
+    local backup="$1" file="$2"
+    [[ -n "$backup" && -f "$backup" ]] || return 0
+    cp -p -- "$backup" "$file"
+    warn "Restored $file from $backup"
+}
+
+# Add or remove gpu_unlock.* tokens in /etc/kernel/cmdline and report the
+# outcome in _GU_CMDLINE_STATUS (updated | unchanged | refused).
+#  - Comment lines stay untouched. Folding them into the parameter line would
+#    turn the whole command line into a comment and mkinitcpio would build a
+#    UKI without root=.
+#  - New tokens are appended to the last parameter line. Without such a line
+#    (file missing, empty or comments only) nothing is written: a file holding
+#    only our tokens would replace mkinitcpio's other command line sources
+#    (/etc/cmdline.d/*.conf, /proc/cmdline) and likewise drop root=.
+update_kernel_cmdline_file() {
+    local -a desired_tokens=("$@")
+    local -a lines=() out=()
+    local line last_content=-1 tmp_cmd
+
+    _GU_LAST_BACKUP=""
+    _GU_CMDLINE_STATUS="unchanged"
+    if [[ -f "$KERNEL_CMDLINE_FILE" ]]; then
+        mapfile -t lines < "$KERNEL_CMDLINE_FILE"
+    fi
+    for line in "${lines[@]}"; do
+        if [[ ! "$line" =~ ^[[:space:]]*(#|$) ]]; then
+            if [[ "$line" == *gpu_unlock.* ]]; then
+                line="$(transform_cmdline_string "$line")"
+                # A line that only held our tokens disappears again.
+                [[ -n "$line" ]] || continue
+            fi
+            last_content=${#out[@]}
+        fi
+        out+=("$line")
+    done
+
+    if (( ${#desired_tokens[@]} > 0 )); then
+        if (( last_content < 0 )); then
+            _GU_CMDLINE_STATUS="refused"
+            return 0
+        fi
+        out[last_content]="$(transform_cmdline_string "${out[last_content]}" "${desired_tokens[@]}")"
+    fi
+    [[ -f "$KERNEL_CMDLINE_FILE" ]] || return 0
+
+    tmp_cmd="$(mktemp "${KERNEL_CMDLINE_FILE}.XXXXXX")"
+    chmod 0600 "$tmp_cmd"
+    if (( ${#out[@]} > 0 )); then
+        printf '%s\n' "${out[@]}" > "$tmp_cmd"
+    fi
+    replace_if_changed "$tmp_cmd" "$KERNEL_CMDLINE_FILE"
+    [[ -z "$_GU_LAST_BACKUP" ]] || _GU_CMDLINE_STATUS="updated"
+}
+
+# Write SRC (/etc/default/grub) to DST with the gpu_unlock.* tokens of
+# GRUB_CMDLINE_LINUX_DEFAULT replaced by the given ones, without re-quoting
+# what the admin wrote: old tokens are removed textually from every active
+# assignment, and the new ones go in front of the closing quote of the last
+# assignment. A value that is not one plain "..." or '...' string (optionally
+# followed by a comment) is left alone and extended by a single managed line,
+# which grub-mkconfig evaluates like any other shell assignment.
+render_grub_default() {
+    local src="$1" dst="$2"
+    shift 2
+    local tokens="$*"
+    local marker="# awesome-gpu-unlock"
+    local token_re='gpu_unlock\.(targets|resume)=[0-9A-Za-z:.,]*'
+    local -a lines=()
+    local line last=-1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT= ]]; then
+            [[ "$line" != *"$marker" ]] || continue
+            if [[ "$line" == *gpu_unlock.* ]]; then
+                line="$(sed -E "s/[[:space:]]+${token_re}//g; s/([\"'=])${token_re}[[:space:]]*/\\1/g" <<<"$line")"
+            fi
+            last=${#lines[@]}
+        fi
+        lines+=("$line")
+    done < "$src"
+
+    local managed=""
+    if [[ -n "$tokens" ]]; then
+        managed="GRUB_CMDLINE_LINUX_DEFAULT=\"\${GRUB_CMDLINE_LINUX_DEFAULT} ${tokens}\" ${marker}"
+        if (( last >= 0 )); then
+            local prefix value quote body rest ch
+            local i esc=0 close=-1
+            line="${lines[last]}"
+            prefix="${line%%=*}="
+            value="${line#*=}"
+            quote="${value:0:1}"
+            if [[ "$quote" == '"' || "$quote" == "'" ]]; then
+                for (( i = 1; i < ${#value}; i++ )); do
+                    ch="${value:i:1}"
+                    if (( esc )); then
+                        esc=0
+                    elif [[ "$quote" == '"' && "$ch" == '\' ]]; then
+                        esc=1
+                    elif [[ "$ch" == "$quote" ]]; then
+                        close=$i
+                        break
+                    fi
+                done
+            fi
+            if (( close > 0 )); then
+                body="${value:1:close-1}"
+                rest="${value:close+1}"
+                if [[ "$rest" =~ ^[[:space:]]*(#.*)?$ ]]; then
+                    [[ -z "$body" || "$body" == *[[:space:]] ]] || body+=" "
+                    lines[last]="${prefix}${quote}${body}${tokens}${quote}${rest}"
+                    managed=""
+                fi
+            fi
+        fi
+    fi
+
+    : > "$dst"
+    if (( ${#lines[@]} > 0 )); then
+        printf '%s\n' "${lines[@]}" >> "$dst"
+    fi
+    if [[ -n "$managed" ]]; then
+        printf '%s\n' "$managed" >> "$dst"
+    fi
+}
+
 find_systemd_boot_entries() {
     local -a dirs=()
     if [[ -n "${GPU_UNLOCK_LOADER_ENTRIES_DIR:-}" ]]; then
@@ -280,27 +440,31 @@ find_systemd_boot_entries() {
 apply_bootloader_cmdline() {
     local -a desired_tokens=("$@")
     local updated_any=false
+    local uki_refused=false
 
     # 1. UKI profile (/etc/kernel/cmdline + mkinitcpio UKI preset)
     if [[ -f "$KERNEL_CMDLINE_FILE" ]] || has_uki_preset; then
-        local existing="" updated_line tmp_cmd
-        if [[ -f "$KERNEL_CMDLINE_FILE" ]]; then
-            existing="$(tr '\n' ' ' < "$KERNEL_CMDLINE_FILE")"
+        update_kernel_cmdline_file "${desired_tokens[@]}"
+        if [[ "$_GU_CMDLINE_STATUS" == "refused" ]]; then
+            uki_refused=true
+            warn "$KERNEL_CMDLINE_FILE has no kernel parameter line to extend; it was left untouched and no UKI was rebuilt."
+        else
+            local cmdline_backup="$_GU_LAST_BACKUP" rebuild_ok=true
+            if [[ -n "$cmdline_backup" ]]; then
+                info "Updated UKI kernel command line in $KERNEL_CMDLINE_FILE (previous version: $cmdline_backup)"
+            fi
+            mkinitcpio -P || rebuild_ok=false
+            if [[ "$rebuild_ok" == true ]] && [[ -f "$SBCTL_DIR/GUID" || -d "$SBCTL_DIR/keys" ]] && command -v sbctl >/dev/null 2>&1; then
+                info "Re-signing EFI binaries with sbctl..."
+                sbctl sign-all || rebuild_ok=false
+            fi
+            if [[ "$rebuild_ok" != true ]]; then
+                restore_backup "$cmdline_backup" "$KERNEL_CMDLINE_FILE"
+                err "Rebuilding or signing the UKI failed. Boot images may be partly rebuilt: fix the error above and run 'mkinitcpio -P' before rebooting."
+            fi
+            warn_if_tpm_pcr_needs_rebind
+            updated_any=true
         fi
-        updated_line="$(transform_cmdline_string "$existing" "${desired_tokens[@]}")"
-        install -d -m 0755 "$(dirname "$KERNEL_CMDLINE_FILE")"
-        tmp_cmd="$(mktemp "${KERNEL_CMDLINE_FILE}.XXXXXX")"
-        chmod 0600 "$tmp_cmd"
-        printf '%s\n' "$updated_line" > "$tmp_cmd"
-        mv -f "$tmp_cmd" "$KERNEL_CMDLINE_FILE"
-        info "Updated UKI kernel command line in $KERNEL_CMDLINE_FILE"
-        mkinitcpio -P
-        if [[ -f "$SBCTL_DIR/GUID" || -d "$SBCTL_DIR/keys" ]] && command -v sbctl >/dev/null 2>&1; then
-            info "Re-signing EFI binaries with sbctl..."
-            sbctl sign-all
-        fi
-        warn_if_tpm_pcr_needs_rebind
-        updated_any=true
     fi
 
     # 2. Type-1 systemd-boot loader entries (if present)
@@ -310,32 +474,46 @@ apply_bootloader_cmdline() {
         [[ -n "$entry_file" ]] && boot_entries+=("$entry_file")
     done < <(find_systemd_boot_entries)
 
-    if (( ${#boot_entries[@]} > 0 )); then
-        for entry_file in "${boot_entries[@]}"; do
-            local tmp_entry
-            tmp_entry="$(mktemp "${entry_file}.XXXXXX")"
-            chmod 0644 "$tmp_entry"
-            local had_options=false line
-            while IFS= read -r line || [[ -n "$line" ]]; do
-                if [[ "$line" =~ ^options([[:space:]]+(.*))?$ ]]; then
-                    had_options=true
-                    local new_opts
-                    new_opts="$(transform_cmdline_string "${BASH_REMATCH[2]:-}" "${desired_tokens[@]}")"
-                    if [[ -n "$new_opts" ]]; then
-                        printf 'options %s\n' "$new_opts" >> "$tmp_entry"
-                    else
-                        printf 'options\n' >> "$tmp_entry"
-                    fi
-                else
-                    printf '%s\n' "$line" >> "$tmp_entry"
-                fi
-            done < "$entry_file"
-            if [[ "$had_options" == false && ${#desired_tokens[@]} -gt 0 ]]; then
-                printf 'options %s\n' "${desired_tokens[*]}" >> "$tmp_entry"
+    local linux_entries=0
+    for entry_file in "${boot_entries[@]}"; do
+        # Only Linux entries take kernel parameters. Windows, EFI shell and
+        # other "efi" entries are not ours to edit.
+        grep -qE '^[[:space:]]*(linux|uki)[[:space:]]' "$entry_file" || continue
+        (( ++linux_entries ))
+
+        local -a entry_lines=() entry_out=()
+        local line new_opts tmp_entry last_options=-1
+        mapfile -t entry_lines < "$entry_file"
+        for line in "${entry_lines[@]}"; do
+            if [[ "$line" =~ ^options([[:space:]]+(.*))?$ ]]; then
+                new_opts="$(transform_cmdline_string "${BASH_REMATCH[2]:-}")"
+                # An options line that only held our tokens disappears again,
+                # so --disable restores the entry instead of leaving "options".
+                [[ -n "$new_opts" ]] || continue
+                last_options=${#entry_out[@]}
+                entry_out+=("options $new_opts")
+            else
+                entry_out+=("$line")
             fi
-            mv -f "$tmp_entry" "$entry_file"
-            info "Updated systemd-boot entry: $entry_file"
         done
+        # systemd-boot concatenates all options lines: add the tokens once.
+        if (( ${#desired_tokens[@]} > 0 )); then
+            if (( last_options >= 0 )); then
+                entry_out[last_options]+=" ${desired_tokens[*]}"
+            else
+                entry_out+=("options ${desired_tokens[*]}")
+            fi
+        fi
+
+        tmp_entry="$(mktemp "${entry_file}.XXXXXX")"
+        chmod 0644 "$tmp_entry"
+        printf '%s\n' "${entry_out[@]}" > "$tmp_entry"
+        replace_if_changed "$tmp_entry" "$entry_file"
+        if [[ -n "$_GU_LAST_BACKUP" ]]; then
+            info "Updated systemd-boot entry: $entry_file (previous version: $_GU_LAST_BACKUP)"
+        fi
+    done
+    if (( linux_entries > 0 )); then
         if [[ "$updated_any" == false ]] && command -v mkinitcpio >/dev/null 2>&1; then
             mkinitcpio -P
         fi
@@ -344,57 +522,69 @@ apply_bootloader_cmdline() {
 
     # 3. GRUB (/etc/default/grub)
     if [[ -f "$GRUB_DEFAULT_FILE" ]]; then
-        local current_grub="" new_grub escaped_grub tmp_grub
-        current_grub="$(awk '
-            /^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/ {
-                line = $0
-                sub(/^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=[[:space:]]*"?/, "", line)
-                sub(/"?[[:space:]]*$/, "", line)
-                print line
-                exit
-            }
-        ' "$GRUB_DEFAULT_FILE")"
-        new_grub="$(transform_cmdline_string "$current_grub" "${desired_tokens[@]}")"
-        escaped_grub="${new_grub//\\/\\\\}"
-        escaped_grub="${escaped_grub//\"/\\\"}"
+        local tmp_grub grub_backup
         tmp_grub="$(mktemp "${GRUB_DEFAULT_FILE}.XXXXXX")"
-        chmod 0644 "$tmp_grub"
-        RENDERED="GRUB_CMDLINE_LINUX_DEFAULT=\"${escaped_grub}\"" awk '
-            BEGIN { repl = ENVIRON["RENDERED"]; done_line = 0 }
-            /^[[:space:]]*#?[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/ {
-                if (!done_line) { print repl; done_line = 1 }
-                next
-            }
-            { print }
-            END { if (!done_line) print repl }
-        ' "$GRUB_DEFAULT_FILE" > "$tmp_grub"
-        mv -f "$tmp_grub" "$GRUB_DEFAULT_FILE"
-        info "Updated GRUB_CMDLINE_LINUX_DEFAULT in $GRUB_DEFAULT_FILE"
+        chmod --reference="$GRUB_DEFAULT_FILE" "$tmp_grub"
+        render_grub_default "$GRUB_DEFAULT_FILE" "$tmp_grub" "${desired_tokens[@]}"
+        replace_if_changed "$tmp_grub" "$GRUB_DEFAULT_FILE"
+        grub_backup="$_GU_LAST_BACKUP"
+        if [[ -n "$grub_backup" ]]; then
+            info "Updated GRUB_CMDLINE_LINUX_DEFAULT in $GRUB_DEFAULT_FILE (previous version: $grub_backup)"
+        fi
         if [[ "$updated_any" == false ]] && command -v mkinitcpio >/dev/null 2>&1; then
             mkinitcpio -P
         fi
         if command -v grub-mkconfig >/dev/null 2>&1 && [[ -d "$(dirname "$GRUB_CFG_FILE")" ]]; then
-            grub-mkconfig -o "$GRUB_CFG_FILE"
+            if ! grub-mkconfig -o "$GRUB_CFG_FILE"; then
+                restore_backup "$grub_backup" "$GRUB_DEFAULT_FILE"
+                err "grub-mkconfig failed; $GRUB_CFG_FILE was not regenerated."
+            fi
             chmod og-rwx "$GRUB_CFG_FILE" 2>/dev/null || true
         fi
         updated_any=true
     fi
 
     if [[ "$updated_any" == false ]]; then
+        if [[ "$uki_refused" == true ]]; then
+            err "Nothing was changed. Add '${desired_tokens[*]}' to your kernel command line yourself (next to root=... in $KERNEL_CMDLINE_FILE or /etc/cmdline.d/) and run 'mkinitcpio -P'."
+        fi
         err "Could not detect UKI ($KERNEL_CMDLINE_FILE), systemd-boot entries, or GRUB ($GRUB_DEFAULT_FILE)."
     fi
 }
 
+# Print the PCR indexes named by TPM2_PCRS= in the installer's TPM settings,
+# one per line (only that key: other lines hold UUIDs full of digits).
+configured_tpm_pcrs() {
+    local file line value
+    for file in "$TPM_LUKS_CONF" "$SECUREBOOT_CONF"; do
+        [[ -r "$file" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?TPM2_PCRS=(.*)$ ]] || continue
+            value="${BASH_REMATCH[2]}"
+            value="${value//[\"\']/}"
+            tr -s '+, \t' '\n' <<<"$value"
+        done < "$file"
+    done
+}
+
+# PCR 4 (boot loader / UKI image), 9 (kernel and initrd) and 11/12 (UKI
+# sections, kernel command line) change when the UKI is rebuilt.
 warn_if_tpm_pcr_needs_rebind() {
-    if [[ -r /etc/tpm_luks.conf ]] && grep -qE '(^|[^0-9])(4|9)([^0-9]|$)' /etc/tpm_luks.conf 2>/dev/null; then
-        warn "TPM2 LUKS policy appears to include PCR 4 or 9; if UKI measurements are bound, re-run 'sudo awesome-secureboot bind-tpm' after verifying boot."
-    fi
+    local pcr
+    while IFS= read -r pcr; do
+        case "$pcr" in
+            4|9|11|12)
+                warn "TPM2 LUKS policy is bound to PCR ${pcr}, which the rebuilt UKI changes: expect a passphrase prompt on next boot, then re-run 'sudo awesome-secureboot bind-tpm'."
+                return 0
+                ;;
+        esac
+    done < <(configured_tpm_pcrs)
 }
 
 warn_if_module_sig_enforced() {
     local cmd=""
     [[ -r "$PROC_CMDLINE_FILE" ]] && cmd+=" $(<"$PROC_CMDLINE_FILE")"
-    [[ -r "$KERNEL_CMDLINE_FILE" ]] && cmd+=" $(<"$KERNEL_CMDLINE_FILE")"
+    cmd+=" $(kernel_cmdline_content)"
     if [[ "$cmd" == *"module.sig_enforce=1"* || "$cmd" == *"lockdown=integrity"* || "$cmd" == *"lockdown=confidentiality"* ]]; then
         warn "Kernel module signature enforcement or lockdown detected on cmdline; unsigned DKMS modules (gpu_unlock) will be rejected unless signed by a trusted kernel module key."
     fi
@@ -465,9 +655,6 @@ build_and_install_packages() {
 
     if [[ -n "$build_user" ]]; then
         id -u "$build_user" >/dev/null 2>&1 || err "Specified build user '$build_user' does not exist."
-        if getent group compilers >/dev/null 2>&1; then
-            usermod -aG compilers "$build_user" 2>/dev/null || true
-        fi
     else
         build_user="_awesome_gpubuild"
         if ! id -u "$build_user" >/dev/null 2>&1; then
@@ -478,6 +665,14 @@ build_and_install_packages() {
             useradd -r -M -d /nonexistent -s /usr/bin/nologin "${extra_groups[@]}" "$build_user"
             _GU_TEMP_USER="$build_user"
         fi
+    fi
+
+    # Compiler access is restricted to the 'compilers' group on hardened
+    # installs. Grant it to this build only (runuser --supp-group) instead of
+    # permanently adding an existing account to the group.
+    local -a run_as=(runuser -u "$build_user")
+    if getent group compilers >/dev/null 2>&1 && [[ " $(id -nG "$build_user") " != *" compilers "* ]]; then
+        run_as+=(-g "$(id -gn "$build_user")" -G compilers)
     fi
 
     install -d -m 0755 "$CACHE_ROOT"
@@ -499,20 +694,25 @@ build_and_install_packages() {
         "$workdir/home" "$workdir/pkg"
     chown -hR "$build_user:$(id -gn "$build_user")" "$workdir" "$src_cache"
 
+    if [[ -z "$git_ref" && "$repo_url" == "$DEFAULT_REPO_URL" ]]; then
+        git_ref="$DEFAULT_REPO_REF"
+    fi
+
     info "Cloning gpu-unlock from $repo_url..."
     if [[ -n "$git_ref" ]]; then
-        runuser -u "$build_user" -- env \
+        "${run_as[@]}" -- env \
             HOME="$workdir/home" \
             GIT_TERMINAL_PROMPT=0 \
             GIT_CONFIG_COUNT=1 \
             GIT_CONFIG_KEY_0=protocol.file.allow \
             GIT_CONFIG_VALUE_0=always \
             git clone -- "$repo_url" "$workdir/repo"
-        runuser -u "$build_user" -- env \
+        "${run_as[@]}" -- env \
             HOME="$workdir/home" \
             git -C "$workdir/repo" checkout --detach "$git_ref"
     else
-        runuser -u "$build_user" -- env \
+        warn "No --ref given for $repo_url: building the current tip of its default branch (not pinned)."
+        "${run_as[@]}" -- env \
             HOME="$workdir/home" \
             GIT_TERMINAL_PROMPT=0 \
             GIT_CONFIG_COUNT=1 \
@@ -521,11 +721,18 @@ build_and_install_packages() {
             git clone --depth 1 -- "$repo_url" "$workdir/repo"
     fi
 
+    local head_commit
+    head_commit="$("${run_as[@]}" -- env HOME="$workdir/home" git -C "$workdir/repo" rev-parse HEAD)"
+    if [[ "$git_ref" =~ ^[0-9a-fA-F]{40}$ && "${head_commit,,}" != "${git_ref,,}" ]]; then
+        err "Checked-out commit $head_commit does not match the requested commit $git_ref"
+    fi
+    info "Building gpu-unlock at commit $head_commit"
+
     [[ -f "$workdir/repo/packaging/arch/PKGBUILD" ]] || err "Cloned repository is missing packaging/arch/PKGBUILD"
     [[ -f "$workdir/repo/VERSION" ]] || err "Cloned repository is missing VERSION"
 
     info "Building gpu-unlock-firmware and gpu-unlock-dkms via makepkg (downloads & verifies pinned NVIDIA 610.43.03 assets)..."
-    runuser -u "$build_user" -- bash -c '
+    "${run_as[@]}" -- bash -c '
         set -euo pipefail
         umask 022
         cd "$1/repo/packaging/arch"
@@ -632,7 +839,7 @@ show_status() {
     fi
     if [[ -r "$KERNEL_CMDLINE_FILE" ]]; then
         local uki_tok="" tok
-        for tok in $(<"$KERNEL_CMDLINE_FILE"); do
+        for tok in $(kernel_cmdline_content); do
             [[ "$tok" == gpu_unlock.* ]] && uki_tok+="${uki_tok:+ }$tok"
         done
         printf '  - Configured UKI (%s): %s\n' "$KERNEL_CMDLINE_FILE" "${uki_tok:-none}"
@@ -654,6 +861,13 @@ show_status() {
             printf '\nRecent kernel log (gpu_unlock):\n%s\n' "$klog"
         fi
     fi
+}
+
+write_dynamic_pm_conf() {
+    install -d -m 0755 "$(dirname "$MODPROBE_PM_CONF")"
+    printf '# Prevent laptop dGPU runtime D3cold from resetting gpu_unlock tensor selectors\noptions nvidia NVreg_DynamicPowerManagement=0x00\n' > "$MODPROBE_PM_CONF"
+    chmod 0644 "$MODPROBE_PM_CONF"
+    info "Wrote $MODPROBE_PM_CONF"
 }
 
 main() {
@@ -761,10 +975,7 @@ main() {
             install_self_helper
 
             if [[ "$disable_dynamic_pm" == "true" ]]; then
-                install -d -m 0755 "$(dirname "$MODPROBE_PM_CONF")"
-                printf '# Prevent laptop dGPU runtime D3cold from resetting gpu_unlock tensor selectors\noptions nvidia NVreg_DynamicPowerManagement=0x00\n' > "$MODPROBE_PM_CONF"
-                chmod 0644 "$MODPROBE_PM_CONF"
-                info "Wrote $MODPROBE_PM_CONF"
+                write_dynamic_pm_conf
             elif is_laptop_chassis; then
                 warn "Laptop/portable chassis detected: if your dGPU powers off when idle, re-run with --disable-dynamic-pm to keep tensor-core unlock persistent."
             fi
@@ -783,11 +994,18 @@ main() {
             validate_targets "$targets" || err "Invalid targets '$targets'. Expected 'all' or comma-separated PCI BDFs (e.g. 0000:01:00.0)."
             local -a tokens=("gpu_unlock.targets=${targets}")
             [[ "$no_resume_unlock" == "true" ]] && tokens+=("gpu_unlock.resume=0")
+            if [[ "$disable_dynamic_pm" == "true" ]]; then
+                write_dynamic_pm_conf
+            fi
             apply_bootloader_cmdline "${tokens[@]}"
             ok "Updated kernel command line (${tokens[*]}). Reboot to apply."
             ;;
         disable)
             require_root
+            if [[ -f "$MODPROBE_PM_CONF" ]]; then
+                rm -f -- "$MODPROBE_PM_CONF"
+                info "Removed $MODPROBE_PM_CONF (NVIDIA dynamic power management is back to its default)"
+            fi
             apply_bootloader_cmdline
             ok "Removed gpu_unlock.* from kernel command line (packages remain installed). Reboot to apply."
             ;;

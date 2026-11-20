@@ -1,6 +1,6 @@
 # WordPress Production Hardening
 
-Hardens an existing WordPress installation on Arch Linux. This script does **not** install WordPress -- it secures the server environment around an existing WordPress site with wp-config.php hardening, strict file permissions, a hardened nginx server block, fail2ban jails, PHP runtime restrictions, and a systemd-based cron replacement.
+Hardens an existing WordPress installation on Arch Linux. This script does **not** install WordPress -- it secures the server environment around an existing WordPress site with wp-config.php hardening, strict file permissions, a hardened nginx server block, fail2ban jails, PHP runtime restrictions, a systemd-based cron replacement, and privilege-separated updates that keep the code read-only for PHP.
 
 ## Quick Start
 
@@ -22,6 +22,7 @@ sudo ./wordpress.sh -d blog.example.com -w /srv/http/wordpress --db-name wpblog 
 | `--db-user USER` | Database user written to `wp-config.php` when passed or when `DB_USER` is still a placeholder | `wpuser` |
 | `--db-host HOST` | Database host written to `wp-config.php` when passed | `localhost` |
 | `--fresh-install` | Randomize `$table_prefix` and preserve `wp-admin/install.php` even when DB credentials are already configured | off |
+| `--auto-update MODE` | What the daily update timer applies: `all` (core minor releases, plugins and themes), `core` (core minor releases only) or `off` (no timer). See [Updating WordPress](#updating-wordpress) | `all` |
 | `-h` | Show help | |
 
 ### Prerequisites
@@ -31,6 +32,7 @@ sudo ./wordpress.sh -d blog.example.com -w /srv/http/wordpress --db-name wpblog 
 - An existing WordPress installation at WP_PATH
 - nginx-mainline installed (see `../nginx/nginx.sh`)
 - PHP-FPM installed and running
+- [wp-cli](https://wp-cli.org/#installing) for updates, installed as root outside `/root` and `/home` (for example `/usr/local/bin/wp`). Optional: without it the script still hardens the site, but the update timer stays off and the script says so
 
 For safety, the resolved WordPress path must be below `/var/www/` or `/srv/http/`; the domain is validated before it is used in nginx paths or directives.
 
@@ -45,9 +47,9 @@ Checks that `wp-config.php` or `wp-includes/` exists at the specified path befor
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `DISALLOW_FILE_EDIT` | `true` | Disable the theme/plugin editor in wp-admin |
-| `DISALLOW_FILE_MODS` | `false` | Allow updates from admin (set `true` for locked-down servers) |
+| `DISALLOW_FILE_MODS` | `false` | Keep update notifications and the update screens available (set `true` for locked-down servers). The read-only file permissions from step 3 still prevent PHP from writing code, so the dashboard shows pending updates but cannot apply them; see [Updating WordPress](#updating-wordpress) |
 | `FORCE_SSL_ADMIN` | `true` (`false` if HTTP-only) | Force HTTPS for wp-admin and wp-login.php when SSL certs exist |
-| `WP_AUTO_UPDATE_CORE` | `'minor'` | Auto-update minor/security releases only |
+| `WP_AUTO_UPDATE_CORE` | `'minor'` | Update policy: minor/security releases only. WordPress cannot apply it itself (the code is read-only for PHP); the update timer from step 8 applies the same policy |
 | `WP_DEBUG` | `false` | Disable debug output in production |
 | `WP_DEBUG_DISPLAY` | `false` | Never display errors to visitors |
 | `WP_DEBUG_LOG` | `false` | Disable debug log file |
@@ -60,6 +62,8 @@ Additionally:
 - **Security keys/salts** are regenerated from `https://api.wordpress.org/secret-key/1.1/salt/`
 - **Table prefix** is randomized (4-char string) if still set to `wp_` on unconfigured installs (or when `--fresh-install` is passed; existing configured databases keep their prefix so live sites are not broken)
 - A comment block for **custom `WP_CONTENT_DIR`** is added
+- **Backup**: before any change, `wp-config.php` is copied to `/var/backups/wordpress-hardening/<WP_PATH>/wp-config.php.bak.<timestamp>` (root-only, mode `0600`). The backup is never written next to the original: a copy inside the document root would be readable by the web server and served as plain text. Backups left in the document root by earlier versions of the script (`wp-config.php.bak.*`) are moved to the same directory.
+- **Placeholder detection**: an installation counts as "not installed yet" only when `DB_NAME`, `DB_USER` or `DB_PASSWORD` still hold the literal `wp-config-sample.php` values. A `define()` the script cannot parse (for example `getenv()`) is treated as configured, so a live site never gets its table prefix changed or `install.php` kept.
 
 ### 3. File Permissions
 
@@ -72,6 +76,8 @@ Additionally:
 | `wp-content/cache` | `http:http` | `770/660` | Cache plugins need write access |
 | `wp-content/themes` | `root:http` | `750/640` | Read-only for web server |
 | `wp-content/plugins` | `root:http` | `750/640` | Read-only for web server |
+
+The model is applied by `/usr/local/bin/awesome-wordpress-update --seal`, the same code that restores it after every update (step 8). It never follows symbolic links and leaves a symlinked `uploads` or `cache` directory alone. In the code it only touches entries that deviate, so re-running the script does not rewrite the change time of every file in a tree that is already sealed; `uploads` and `cache` are re-applied in full each time.
 
 Files removed:
 - `wp-config-sample.php`, `readme.html`, `license.txt` (information disclosure)
@@ -89,6 +95,9 @@ A complete, hardened nginx configuration for WordPress (with all deny regexes ev
 - **PHP blocked in wp-includes**: prevents direct access to include files (`403`)
 - **PHP blocked in wp-content**: all direct `.php` requests under `/wp-content/` are denied (`403`)
 - **.htaccess/.htpasswd & dotfiles blocked**: hidden file protection (except `.well-known`)
+- **Backup, dump and log files blocked**: `.sql`, `.bak`, `.orig`, `.old`, `.save`, `.swp`, `.swo`, `.log`, suffixed copies such as `wp-config.php.bak.20260101-120000`, `dump.sql.gz` or `debug.log.1`, and editor backups ending in `~` (`404`)
+- **ACME challenge**: `/.well-known/acme-challenge/` is served from the webroot certbot recorded for this domain in `/etc/letsencrypt/renewal/*.conf` (the directory `../nginx/nginx.sh` passed to certbot, also when the certificate is named after another domain), falling back to `WP_PATH`, so renewals keep working. The directory is also announced in a `# ACME-Webroot:` header line that `../nginx/nginx.sh` reads.
+- **Overlap with `default.conf`**: nginx only uses the first server block per name and port, in include order, so the WordPress vhost takes its names over from `/etc/nginx/sites-enabled/default.conf` (written by `../nginx/nginx.sh`) instead of leaving the outcome to file naming. If `default.conf` declares only this domain on ports 80/443, it is superseded and removed. If it also serves other names, only this site's names are removed from its `server_name` lines. Either way the original is saved first as `/var/backups/wordpress-hardening/<WP_PATH>/nginx-default.conf.<timestamp>` and restored automatically if `nginx -t` or the reload fails. A `default.conf` the script cannot split safely (a block that serves only this domain next to blocks for other names, or one on a non-standard HTTPS port) is left untouched: the script warns when the WordPress vhost is read first and stops with an error when `default.conf` would hide it.
 - **Rate limiting**: wp-login.php (1r/s, burst 3), admin-ajax.php (10r/s, burst 20)
 - **Static asset caching**: 1 year, immutable for images, CSS, JS, fonts
 - **FastCGI cache**: included as commented template
@@ -125,7 +134,17 @@ WordPress's built-in wp-cron runs on every page load, which is inefficient and u
 
 1. Sets `DISABLE_WP_CRON` to `true` in wp-config.php
 2. Creates a per-domain systemd timer (`wordpress-cron-<domain>.timer`) that runs every 15 minutes (`ProtectSystem=strict`)
-3. Uses `wp-cli cron event run --due-now` if wp-cli is installed, otherwise falls back to `curl -fsS --max-time 30 --resolve <domain>:<port>:127.0.0.1`
+3. Uses `wp-cli cron event run --due-now` if wp-cli is installed (at whatever path `command -v wp` resolves to), otherwise falls back to `curl -fsS --max-time 30 --resolve <domain>:<port>:127.0.0.1`. When wp-cli is a PHP script/phar it is started as `php -d open_basedir= <wp> ...`: the global `open_basedir` that `../php/php.sh` writes to `php.ini` also applies to the CLI and would otherwise stop PHP from opening wp-cli itself. A wp-cli below `/root` or `/home` cannot be reached by the sandboxed unit, so curl is used instead.
+
+### 8. Updates
+
+With the code owned by root, WordPress cannot update itself: the dashboard, the background updater and `wp-cli` run as `http` are all read-only. The script therefore installs its own update path, which keeps PHP-FPM read-only at all times:
+
+1. Creates the locked system account `wp-update` (no shell, no home, no password)
+2. Installs `/usr/local/bin/awesome-wordpress-update`
+3. Creates a per-domain timer (`wordpress-update-<domain>.timer`) that runs it once a day (03:30 plus up to an hour of random delay)
+
+See [Updating WordPress](#updating-wordpress) for what a run does and how to use the helper by hand.
 
 ## WordPress Security Best Practices
 
@@ -151,7 +170,7 @@ The fail2ban jails in this script handle server-level login throttling. For appl
 
 This script sets `DISALLOW_FILE_EDIT` to `true`, which removes the theme/plugin editor from wp-admin. This prevents attackers who compromise an admin account from injecting PHP code via the editor.
 
-For maximum lockdown, set `DISALLOW_FILE_MODS` to `true` to also disable plugin/theme installation and updates from the admin panel. Updates must then be done via wp-cli or manually on the server.
+For maximum lockdown, set `DISALLOW_FILE_MODS` to `true` to also hide plugin/theme installation and updates in the admin panel. Either way, updates are applied on the server by the update timer, as described in [Updating WordPress](#updating-wordpress).
 
 ## Customizing the Content-Security-Policy
 
@@ -223,8 +242,14 @@ Check the browser console (F12 > Console) for CSP violation reports.
 | `/etc/fail2ban/filter.d/wordpress-xmlrpc.conf` | xmlrpc.php filter |
 | `/etc/fail2ban/jail.d/wordpress.conf` | WordPress fail2ban jails |
 | `<WP_PATH>/.user.ini` | PHP runtime restrictions |
+| `/var/backups/wordpress-hardening/<WP_PATH>/` | Root-only backups: `wp-config.php.bak.<timestamp>` and, if it was superseded, `nginx-default.conf.<timestamp>` |
 | `/etc/systemd/system/wordpress-cron-<domain>.service` | Per-domain WP-Cron systemd service |
 | `/etc/systemd/system/wordpress-cron-<domain>.timer` | Per-domain WP-Cron systemd timer |
+| `/usr/local/bin/awesome-wordpress-update` | Update helper (shared by all sites); also applies the file permissions |
+| `/etc/systemd/system/wordpress-update-<domain>.service` | Per-domain update service |
+| `/etc/systemd/system/wordpress-update-<domain>.timer` | Per-domain daily update timer |
+
+The script also creates the system account `wp-update`.
 
 ### FastCGI Cache
 
@@ -278,18 +303,68 @@ Adjust the `limit_req_zone` rate and `burst` values in the nginx config if legit
 
 ### Keeping Plugins Updated
 
-- Enable auto-updates for trusted plugins in wp-admin > Plugins
+- The update timer applies every available plugin and theme update once a day (`--auto-update all`, the default). The "Enable auto-updates" links in wp-admin > Plugins have no effect on this server: WordPress's own updater cannot write the code
 - Subscribe to the WordPress security mailing list
 - Monitor [WPScan Vulnerability Database](https://wpscan.com/wordpresses) for known issues
 - Remove unused plugins entirely -- deactivated plugins can still be exploited
 
 ### Plugin File Permissions
 
-With the permissions set by this script, plugins and themes are owned by `root:http` and are read-only to the web server. This means:
+With the permissions set by this script, WordPress core, plugins and themes are owned by `root:http` and are read-only to the web server. This means:
 
-- Plugin/theme installation and updates from wp-admin will fail (by design)
-- Use wp-cli to install/update: `sudo -u http wp plugin update --all --path=/var/www/wordpress`
-- Or temporarily set `DISALLOW_FILE_MODS` to `false` and adjust permissions
+- Plugin/theme installation and updates from wp-admin fail (by design): WordPress asks for FTP credentials instead of writing the files
+- WordPress's own background updater cannot apply anything, including the minor core updates allowed by `WP_AUTO_UPDATE_CORE`
+- wp-cli running as `http` cannot write the files any more than PHP-FPM can
+
+Code that an attacker cannot write is code they cannot backdoor, so the script does not relax this. It moves updates out of PHP-FPM instead.
+
+### Updating WordPress
+
+Updates are applied by `/usr/local/bin/awesome-wordpress-update`, daily from `wordpress-update-<domain>.timer` or by hand. A run works like this:
+
+1. **Check, without write access.** wp-cli looks up pending updates as the account `wp-update` (group `http`) in a sandbox in which nothing on disk is writable. If there is nothing to apply, the run ends here and no file is touched.
+2. **Open a window for one account.** The code (not `uploads` or `cache`) is handed to `wp-update`. Group and modes stay `http` and `750/640`, so PHP-FPM keeps serving the site and still cannot write a single file.
+3. **Update in a sandbox.** wp-cli runs as `wp-update` in a transient systemd unit: no capabilities, `NoNewPrivileges`, `ProtectSystem=strict` with the installation as the only writable path, private `/tmp`, no access to `/home` or `/root`. Plugins and themes are not loaded (`--skip-plugins --skip-themes`): their code could have been tampered with through the database or `uploads` and would otherwise run with write access.
+4. **Seal.** Ownership goes back to `root:http` and the modes from step 3 are restored. This also happens when an update fails or the run is interrupted, and a run that was killed outright is repaired by the next one. If `opcache.validate_timestamps` is off, `php-fpm` is reloaded so it serves the new code.
+
+What the timer applies is set with `--auto-update`:
+
+| Mode | Core | Plugins and themes |
+|------|------|--------------------|
+| `all` (default) | Minor releases (6.8.1 to 6.8.2), matching `WP_AUTO_UPDATE_CORE` | Every available update, plus translations |
+| `core` | Minor releases | Not touched |
+| `off` | Nothing: the timer is disabled | Nothing |
+
+Using the helper by hand (as root):
+
+```bash
+# Apply pending updates now (what the timer runs)
+sudo awesome-wordpress-update -w /var/www/wordpress
+
+# Also move to a new major release (6.8 to 6.9); never done automatically
+sudo awesome-wordpress-update -w /var/www/wordpress --major
+
+# Core only
+sudo awesome-wordpress-update -w /var/www/wordpress --core-only
+
+# Any other wp-cli command that has to write code: everything after "--"
+sudo awesome-wordpress-update -w /var/www/wordpress -- plugin install akismet --activate
+sudo awesome-wordpress-update -w /var/www/wordpress -- theme delete twentytwentytwo
+
+# Results of the timer
+systemctl list-timers 'wordpress-update-*'
+journalctl -u wordpress-update-example-com.service
+```
+
+Things to know:
+
+- **wp-cli is required** and has to be root's own copy: owned by root, not writable by anyone else, installed outside `/root` and `/home`. Without it the script leaves the timer disabled and reports that updates are not active; install wp-cli and run the script again.
+- **Fresh installations**: the timer is enabled once WordPress is installed (run the script again after the installer, as for the rest of the hardening).
+- **Major releases are never applied automatically.** The run logs that one is available; apply it with `--major` after a backup.
+- **Plugins with their own update server** (most commercial plugins) are not offered by wordpress.org and their updater is not loaded, so the timer does not see their updates. Install the new archive with `-- plugin install /srv/plugin.zip --force`; the file has to be readable by `wp-update` and must not be in `/tmp`, `/root` or `/home`, which the sandbox hides.
+- **`../php/php.sh`**: its `open_basedir` and `disable_functions` in `php.ini` also apply to the PHP CLI and would stop wp-cli from starting or downloading. The helper lifts both for its own wp-cli run only (`php -d open_basedir= -d disable_functions=`); PHP-FPM is unaffected.
+- **Database login**: wp-cli connects with the credentials from `wp-config.php` as the system user `wp-update`. A database account that authenticates the system user `http` through `unix_socket` instead of a password cannot be used by it.
+- **Read-only wp-cli commands** (`wp core verify-checksums`, `wp db export`, ...) still work as `http`: `sudo -u http wp ... --path=/var/www/wordpress`. With `../php/php.sh` applied, start them as `sudo -u http php -d open_basedir= "$(command -v wp)" ...`.
 
 ## Backup Strategy
 
@@ -422,10 +497,11 @@ Ensure WordPress-related logs do not grow unbounded:
     compress
     missingok
     notifempty
-    su http http
     create 640 http http
 }
 ```
+
+Skip this file when `../php/php.sh` was applied: its `/etc/logrotate.d/php` already rotates `/var/log/php/*.log`, and logrotate rejects a log that is listed twice. `/var/log/php` is root-owned, so the rotation runs as root (no `su` line).
 
 ## References
 

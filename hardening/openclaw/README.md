@@ -32,6 +32,8 @@ sudo ./openclaw.sh -u myuser -p 19000 --with-sandbox --with-firewall --with-appa
 sudo ./openclaw.sh -u myuser --with-sandbox --with-firewall
 ```
 
+The script can be re-run at any time. The gateway is installed as the root-owned system unit `openclaw-gateway-<USER>.service` (it runs as `<USER>`); a host that still has the older `systemctl --user` units is migrated on the next run -- see [Migrating From the Old User Units](#migrating-from-the-old-user-units).
+
 ## What It Does
 
 ### 1. Gateway Security
@@ -56,7 +58,7 @@ This script sets the bind mode to `loopback` and configures the gateway to liste
 
 #### Token Authentication
 
-The gateway supports token-based authentication. This script generates a cryptographically random 64-character hex token (256-bit entropy), stores it as `OPENCLAW_GATEWAY_TOKEN` in `~/.openclaw/.env` (mode `600`, loaded via systemd `EnvironmentFile`), and references `${OPENCLAW_GATEWAY_TOKEN}` in `~/.openclaw/openclaw.json` so plaintext secrets never sit in the JSON config:
+The gateway supports token-based authentication. This script generates a cryptographically random 64-character hex token (256-bit entropy), stores it as `OPENCLAW_GATEWAY_TOKEN` in `~/.openclaw/.env` (mode `600`, loaded as the service user by a root-owned launcher -- see [systemd Service Hardening](#11-systemd-service-hardening)), and references `${OPENCLAW_GATEWAY_TOKEN}` in `~/.openclaw/openclaw.json` so plaintext secrets never sit in the JSON config:
 
 ```jsonc
 // ~/.openclaw/openclaw.json (gateway section)
@@ -684,7 +686,7 @@ This script installs a per-user logrotate configuration using `copytruncate` (**
 |------|------|-------|---------|
 | `~/.openclaw/` | `700` | `USER:GROUP` | Root config directory; no other users should read agent data |
 | `~/.openclaw/openclaw.json` | `600` | `USER:GROUP` | Main config (references `${OPENCLAW_GATEWAY_TOKEN}`) |
-| `~/.openclaw/.env` | `600` | `USER:GROUP` | Gateway token and AI provider API keys (`EnvironmentFile`) |
+| `~/.openclaw/.env` | `600` | `USER:GROUP` | Gateway token and AI provider API keys (read by the env launcher, never by systemd) |
 | `~/.openclaw/credentials/` | `700` | `USER:GROUP` | Credential storage directory |
 | `~/.openclaw/credentials/*` | `600` | `USER:GROUP` | Stored platform credentials |
 | `~/.openclaw/agents/*/sessions/` | `700` | `USER:GROUP` | Session history; contains full conversation logs |
@@ -694,17 +696,39 @@ This script installs a per-user logrotate configuration using `copytruncate` (**
 
 > **Security Note:** Never add `<USER>` to the `docker` or `proc` groups (`docker` grants host-root container control; `proc` bypasses `hidepid=2`). When `--with-sandbox` is enabled, rootless Docker (`/run/user/<UID>/docker.sock`) is used instead.
 
+#### How the Script Applies Them (root never follows the agent's paths)
+
+Everything under the service user's home can be rearranged by that user, and the agent has read/write access to `~/.openclaw` by design. A compromised agent can therefore plant a symlink -- for example `ln -sf /etc/shadow ~/.openclaw/exec-approvals.json` -- and wait for the next `sudo ./openclaw.sh -u <USER>` run. To make that harmless, the script follows one rule: **root never opens, writes, chmods or chowns a path inside the service user's tree.**
+
+- Every directory, file and mode change under `$HOME` is made **as the service user** (`runuser -u <USER>`). A symlink can then only reach what that user could already reach.
+- Files are written to a temporary file in the same directory and renamed over the destination, so a symlink at the destination is **replaced, not followed**. Content that needs root-side values (config, token) is built in a root-private directory under `/run` and streamed to that writer.
+- Nothing is chowned. The script refuses to start if the home directory is not owned by the user, or if `~/.openclaw` is a symlink, not a directory, or owned by someone else. Entries inside `~/.openclaw` that are not owned by the user are **listed in a warning and left untouched**; a symlinked or foreign-owned `exec-approvals.json` or `openclaw.json` is reported instead of being "repaired". Review such entries by hand with the gateway stopped.
+- `~/.openclaw/.env` must be a regular file owned by the user. It is read as the user and treated as data; an existing `OPENCLAW_GATEWAY_TOKEN` is kept only if it is a plain token (`[A-Za-z0-9._~+/=-]`, at most 512 characters), otherwise a new one is generated and the script says so.
+
 ### 11. systemd Service Hardening
 
-OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-gateway.service`) with a security drop-in (`~/.config/systemd/user/openclaw-gateway.service.d/hardening.conf`), managed from root via `systemctl --machine=<USER>@ --user`.
+OpenClaw runs from a **root-owned system unit**, `/etc/systemd/system/openclaw-gateway-<USER>.service`, with `User=<USER>` / `Group=<GROUP>` and a security drop-in, `/etc/systemd/system/openclaw-gateway-<USER>.service.d/hardening.conf`. The weekly audit job (`openclaw-audit-<USER>.service` / `.timer`) is a system unit too and gets a byte-identical copy of the drop-in. Unit names carry the user name, so several accounts can be hardened on one host.
+
+#### Why Not a `systemctl --user` Unit
+
+Earlier versions of this script installed the gateway as a unit in the service user's own systemd manager (`~/.config/systemd/user/`). That is not a security boundary:
+
+- From inside the sandbox, `systemd-run --user <command>` asks the same user manager (through `/run/user/<UID>/bus` or `/run/user/<UID>/systemd/private`) to start `<command>` **without any sandbox**, under the same UID.
+- The unit, its drop-in and the audit script lived in directories the confined account owns.
+- The old audit unit was unsandboxed and loaded the agent-writable `~/.openclaw/.env` through `EnvironmentFile=`; a `BASH_ENV=` or `NODE_OPTIONS=` line in it ran code outside the sandbox.
+- `systemd.exec(5)` only honours `AppArmorProfile=` and `ProtectProc=` for system services, and in a user manager the filesystem directives (`ProtectSystem=`, `ProtectHome=`, `ReadWritePaths=`, ...) depend on unprivileged user namespaces (`kernel.unprivileged_userns_clone`), which hardened hosts often turn off.
+
+System units fix all four: the unit files are root-owned, the sandbox is applied by PID 1, and the drop-in hides the user manager's sockets from the service.
 
 #### systemd Directive Reference
 
 | Directive | Value | Purpose |
 |-----------|-------|---------|
+| `User` / `Group` | `<USER>` / `<GROUP>` | The process never runs as root; only the unit files are root-owned |
 | `ProtectSystem` | `strict` | Read-only filesystem except explicit `ReadWritePaths` |
 | `ProtectHome` | `read-only` | Home hierarchy is read-only outside `~/.openclaw` |
 | `ReadWritePaths` | `~/.openclaw` | Explicit write access to OpenClaw data directory |
+| `InaccessiblePaths` | `/run/user` (or `-/run/user/<UID>/bus -/run/user/<UID>/systemd` with `--with-sandbox`) | The service user's systemd user manager and D-Bus session bus cannot be reached, so `systemd-run --user` cannot be used to leave the sandbox. Without `--with-sandbox` every per-user runtime directory is hidden, including one mounted after the service started |
 | `PrivateTmp` | `yes` | Isolated `/tmp` namespace |
 | `PrivateDevices` | `yes` | No access to physical devices |
 | `NoNewPrivileges` | `yes` | Cannot escalate privileges via SUID/SGID |
@@ -713,7 +737,7 @@ OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-
 | `ProtectKernelLogs` | `yes` | No access to kernel log buffer |
 | `ProtectControlGroups` | `yes` | Read-only cgroup filesystem |
 | `ProtectHostname` | `yes` | Cannot change hostname |
-| `ProtectProc` / `ProcSubset` | `invisible` / `pid` | Hide other processes in `/proc` |
+| `ProtectProc` | `invisible` | Hide other users' processes in `/proc`. `ProcSubset=pid` is deliberately **not** set: it removes `/proc/cpuinfo`, `/proc/meminfo` and `/proc/stat`, and Node.js then reports `os.cpus().length == 0` |
 | `RestrictAddressFamilies` | `AF_INET AF_INET6 AF_UNIX AF_NETLINK` | TCP, UDP, Unix sockets, netlink |
 | `RestrictNamespaces` | `yes` (or `~cgroup ipc` with `--with-sandbox`) | Block namespace creation (except rootless Docker namespaces when sandboxed) |
 | `RestrictRealtime` | `yes` | No realtime scheduling |
@@ -727,20 +751,54 @@ OpenClaw runs as a user-level systemd service (`~/.config/systemd/user/openclaw-
 | `UMask` | `077` | Restrictive file creation mask |
 | `LimitNOFILE` | `4096` | File descriptor limit for WebSocket connections |
 | `LimitNPROC` | `512` | Process limit |
-| `AppArmorProfile` | `-openclaw-gateway` | Binds only OpenClaw to the unattached AppArmor profile (when `--with-apparmor`) |
+| `AppArmorProfile` | `openclaw-gateway` | Binds only OpenClaw to the unattached AppArmor profile (when `--with-apparmor`). No `-` prefix: if AppArmor is enabled and the profile is not loaded, the service **fails to start** instead of running unconfined. The setting is ignored on hosts where AppArmor is disabled |
 
 #### Why MemoryDenyWriteExecute=no
 
 V8 (the JavaScript engine in Node.js) uses Just-In-Time (JIT) compilation, which requires memory pages to be simultaneously writable and executable. Setting `MemoryDenyWriteExecute=yes` would cause Node.js to crash on startup with a `SIGABRT`. This is a known and accepted limitation of running any V8-based process under systemd hardening.
 
-#### Managing the User Service
+#### How `~/.openclaw/.env` Is Loaded
 
-`openclaw.sh` enables `loginctl enable-linger <USER>` so the user manager starts at boot without requiring an interactive login session:
+The units contain **no `EnvironmentFile=`**. systemd reads an `EnvironmentFile=` of a system unit as root and follows symlinks, so pointing it at a file the service user can replace would let that user load any root-readable `KEY=VALUE` file into its own environment. Instead, `ExecStart=` runs a small root-owned launcher **as the service user, inside the sandbox**:
+
+```ini
+ExecStart=/usr/local/lib/openclaw-hardening/openclaw-env-exec /home/<USER>/.openclaw/.env /usr/bin/openclaw gateway
+```
+
+The launcher treats the file as data: it skips blank lines and lines starting with `#` or `;`, drops an optional leading `export `, splits each line at the first `=`, accepts only `[A-Za-z_][A-Za-z0-9_]*` keys, strips surrounding whitespace and one pair of matching quotes from the value, exports the result and `exec`s the command. Nothing is evaluated, expanded or sourced, there are no escape sequences or line continuations, and unquoted values may contain spaces (`NODE_OPTIONS=--max-old-space-size=1024 --disable-proto=throw` works as written). A missing or unreadable file stops the service.
+
+The audit job uses the same launcher with `--only OPENCLAW_GATEWAY_TOKEN`, so the only thing it takes from the agent-writable file is that one value.
+
+#### Managing the Service
+
+The gateway is an ordinary system service. Run these as root:
 
 ```bash
-systemctl --machine=<USER>@ --user enable --now openclaw-gateway.service
-systemctl --machine=<USER>@ --user status openclaw-gateway.service
+systemctl enable --now openclaw-gateway-<USER>.service
+systemctl status openclaw-gateway-<USER>.service
+journalctl -u openclaw-gateway-<USER>.service -f
+
+# Review the sandbox systemd applies
+systemd-analyze security openclaw-gateway-<USER>.service
 ```
+
+Lingering (`loginctl enable-linger <USER>`) is only enabled with `--with-sandbox`, because rootless Docker runs inside the account's user manager. Without `--with-sandbox` nothing needs that manager any more; if linger is still on from an earlier run the script leaves it alone and tells you how to turn it off (`loginctl disable-linger <USER>`).
+
+#### Migrating From the Old User Units
+
+Re-running the script on a host hardened by an earlier version migrates it. The script:
+
+1. stops and disables the user-level `openclaw-gateway.service`, `openclaw-audit.timer` and `openclaw-audit.service` through the user's manager (if it is reachable);
+2. removes, as the service user, the old unit files, the `hardening.conf` drop-in and `~/.local/bin/openclaw-security-audit.sh` (a drop-in directory that still holds files of your own is kept and reported);
+3. reloads the user manager and installs the system units described above.
+
+The new gateway unit is **not started automatically**. If the old gateway was running, the output says so and the service stays down until you run `systemctl enable --now openclaw-gateway-<USER>.service`.
+
+#### What the Sandbox Does Not Cover
+
+- **Rootless Docker (`--with-sandbox`).** The gateway must reach `/run/user/<UID>/docker.sock`, and the daemon behind it runs in the user manager, outside the gateway unit's sandbox. Anything that can use the socket can start a container with host directories bind-mounted and so read or write whatever the service user can -- for example the home directory that `ProtectHome=read-only` protects. In this mode the unit's filesystem sandbox limits the gateway process itself, not what it can ask Docker to do. Only the user manager's own endpoints (`bus`, `systemd/`) are masked, and those masks are established when the service starts.
+- **Other processes of the same user.** Do not run interactive sessions or other services under the OpenClaw account. `ptrace` is filtered and `kernel.yama.ptrace_scope` should be at least `1`, but a dedicated account with nothing else running is the only clean separation.
+- **`--with-apparmor` covers one account per host.** The profile is named `openclaw-gateway` and contains one account's paths. The script refuses to replace a profile that was generated for a different account.
 
 ### 12. Network Security
 
@@ -830,6 +888,8 @@ When `--with-apparmor` is specified, this script installs an AppArmor profile at
 | Network: unix stream | Yes (Docker socket if sandbox enabled) | |
 | Network: raw | | Yes (no raw sockets) |
 | File read: `/usr/bin/node` and `$OPENCLAW_BIN` | Yes | |
+| Execute (`ix`, stays in this profile): the resolved `node` binary, `/usr/bin/env`, `/usr/bin/{bash,sh,dash}`, the OpenClaw launcher paths, the two root-owned helpers in `/usr/local/lib/openclaw-hardening/`, and `/usr/bin/{mkdir,rm}` (audit log housekeeping) | Yes | |
+| Execute: any other program | | Not allowed (no rule) |
 | File read: `/usr/lib/node_modules/` | Yes | |
 | File read/write: `~/.openclaw/**` | Yes (other `$HOME` dirs like `~/.config`, `~/.mozilla`, `~/.netrc` are not readable) | |
 | File write: `~/.openclaw/.env` and `~/.openclaw/credentials/**` | | Explicitly denied (`w` blocked even to owner) |
@@ -848,6 +908,28 @@ When `--with-apparmor` is specified, this script installs an AppArmor profile at
 | Capability: sys_ptrace | | Denied |
 | Signal: send to self | Yes | |
 | Signal: send to others | | Denied |
+
+#### How the Profile Is Applied
+
+The profile is not attached to a path. The gateway and audit units name it with `AppArmorProfile=openclaw-gateway`, and every program they start inherits it (`ix`), so `node`, `npm` and shells used elsewhere on the host stay unconfined.
+
+- **It fails closed.** There is no `-` prefix on the directive. On a host with AppArmor enabled, the units do not start until the profile is loaded (`apparmor_parser -r /etc/apparmor.d/openclaw-gateway`); the gateway unit is ordered after `apparmor.service`. On a host without AppArmor the directive is ignored.
+- **It is applied by PID 1 only because these are system units.** `AppArmorProfile=` has no effect in a `systemctl --user` unit, which is one reason the old user-level service was replaced.
+- **One account per host.** The profile name is fixed and the rules name one account's paths, so the script refuses to overwrite a profile generated for a different account.
+
+#### Exec Rules and Local Overrides
+
+The gateway is started through a `#!/usr/bin/env node` script (or a pnpm `/bin/sh` shim), so the profile must allow those interpreters to be executed -- without exec rules the service cannot start at all. The script grants `ix` (execute and remain in this profile) for exactly the programs listed in the table above and nothing else. It deliberately does **not** allow `/usr/bin/**`: with exec and host tools denied in `openclaw.json`, the agent has no reason to run `git`, `curl`, `python` or anything similar.
+
+If you later allow tools that must run on the host, that is a local policy decision. Put the extra rules in `/etc/apparmor.d/local/openclaw-gateway`, which the profile includes (`include if exists <local/openclaw-gateway>`) and which the script never writes or overwrites:
+
+```
+# /etc/apparmor.d/local/openclaw-gateway
+/usr/bin/git                                mrix,
+/usr/lib/git-core/**                        mrix,
+```
+
+Then reload with `apparmor_parser -r /etc/apparmor.d/openclaw-gateway`. Use `ix` only: the units set `NoNewPrivileges=yes`, which makes the kernel refuse transitions to another profile (`px`, `cx`, `ux`).
 
 #### Why ptrace/mount/raw Are Denied
 
@@ -881,14 +963,18 @@ If you suspect the OpenClaw agent or gateway has been compromised, follow these 
 #### Step 1: Kill the Gateway
 
 ```bash
-# Stop the service immediately
-systemctl --user stop openclaw-gateway
+# Stop the service immediately (root-owned system unit)
+systemctl stop openclaw-gateway-<USER>.service
 
 # Verify it is stopped
-systemctl --user status openclaw-gateway
+systemctl status openclaw-gateway-<USER>.service
 
 # If the service does not stop, force kill
-pkill -9 -f "openclaw.*gateway"
+pkill -9 -u <USER> -f "openclaw.*gateway"
+
+# Nothing should be running in the account's own user manager, and no unit
+# files should exist there (a unit in this directory runs UNSANDBOXED)
+ls -la /home/<USER>/.config/systemd/user/
 ```
 
 #### Step 2: Disable All Channels
@@ -972,7 +1058,7 @@ openclaw agent info --agent default
 | Indicator | What to Check |
 |-----------|---------------|
 | Unexpected network connections | `ss -tlnp \| grep -v 127.0.0.1` |
-| Commands you did not request | Session logs, `journalctl --user -u openclaw-gateway` |
+| Commands you did not request | Session logs, `journalctl -u openclaw-gateway-<USER>.service` |
 | Files modified outside workspace | `find ~ -newer ~/.openclaw/openclaw.json -not -path '~/.openclaw/*'` |
 | Agent responding to unseen messages | Channel message history vs session logs |
 | New or modified plugins/skills | `openclaw plugin list`, `openclaw skill list`, check modification times |
@@ -1040,24 +1126,28 @@ openclaw doctor
 
 #### Automated Weekly Audit via systemd Timer
 
-This script creates a systemd timer that runs the deep audit weekly:
+This script creates a root-owned systemd timer that runs the deep audit weekly as the service user:
 
 ```ini
-# ~/.config/systemd/user/openclaw-audit.service
+# /etc/systemd/system/openclaw-audit-<USER>.service
 [Unit]
-Description=OpenClaw Weekly Security Audit
+Description=OpenClaw Weekly Security Audit for <USER>
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/home/<USER>/.openclaw/.env
+User=<USER>
+Group=<GROUP>
+WorkingDirectory=/home/<USER>
 UMask=0077
-ExecStart=/home/<USER>/.local/bin/openclaw-security-audit.sh
-PrivateTmp=true
+ExecStart=/usr/local/lib/openclaw-hardening/openclaw-env-exec --only OPENCLAW_GATEWAY_TOKEN /home/<USER>/.openclaw/.env /usr/local/lib/openclaw-hardening/openclaw-security-audit /home/<USER>/.openclaw /usr/bin/openclaw
 
-# ~/.config/systemd/user/openclaw-audit.timer
+# /etc/systemd/system/openclaw-audit-<USER>.service.d/hardening.conf
+# (identical to the gateway's drop-in)
+
+# /etc/systemd/system/openclaw-audit-<USER>.timer
 [Unit]
-Description=Weekly OpenClaw Security Audit Timer
+Description=Weekly OpenClaw Security Audit Timer for <USER>
 
 [Timer]
 OnCalendar=weekly
@@ -1068,12 +1158,21 @@ Persistent=true
 WantedBy=timers.target
 ```
 
+The audit reads files the gateway can write (`openclaw.json`, plugins, the workspace), so it must never be less confined than the gateway:
+
+- the audit script is root-owned and lives in `/usr/local/lib/openclaw-hardening/`, not in the service user's home;
+- the unit gets the same sandbox drop-in (and AppArmor profile) as the gateway;
+- there is no `EnvironmentFile=`; only `OPENCLAW_GATEWAY_TOKEN` is taken from `~/.openclaw/.env`, as data. With `--with-sandbox` the Docker endpoint is set by the unit itself.
+
+Results are written to `~/.openclaw/audit-logs/` (the last 12 are kept).
+
 ```bash
-# Enable the timer
-systemctl --user enable --now openclaw-audit.timer
+# Enable the timer (the script already does this)
+systemctl enable --now openclaw-audit-<USER>.timer
 
 # Verify
-systemctl --user list-timers | grep openclaw
+systemctl list-timers 'openclaw-audit-*'
+journalctl -u openclaw-audit-<USER>.service -n 20
 ```
 
 ### 16. Secret Scanning
@@ -1242,8 +1341,14 @@ openclaw doctor
 # Run a deep security audit
 openclaw security audit --deep --filesystem
 
-# Check the gateway service is running
-systemctl --user status openclaw-gateway
+# Check the gateway service is running (system unit, as root)
+systemctl status openclaw-gateway-<USER>.service
+
+# Confirm the unit is root-owned and nothing is left in the user manager
+stat -c "%U %a %n" /etc/systemd/system/openclaw-gateway-<USER>.service
+# Expected: root 644 ...
+ls /home/<USER>/.config/systemd/user/ 2>/dev/null
+# Expected: no openclaw-* units
 
 # --- Network ---
 # Verify gateway is bound to loopback only (should show 127.0.0.1:18789)
@@ -1356,14 +1461,17 @@ pacman -Syu nodejs
 |------|-------------|
 | `~/.openclaw/openclaw.json` | Hardened main configuration |
 | `~/.openclaw/.env` | Gateway authentication token (`OPENCLAW_GATEWAY_TOKEN`) and API keys (`0600`) |
-| `~/.config/systemd/user/openclaw-gateway.service` | Hardened systemd user service |
-| `~/.config/systemd/user/openclaw-gateway.service.d/hardening.conf` | systemd sandboxing drop-in |
-| `~/.config/systemd/user/openclaw-audit.service` | Security audit service (`EnvironmentFile=~/.openclaw/.env`, `UMask=0077`) |
-| `~/.config/systemd/user/openclaw-audit.timer` | Weekly audit timer |
-| `~/.local/bin/openclaw-security-audit.sh` | Automated audit wrapper script |
+| `/etc/systemd/system/openclaw-gateway-<USER>.service` | Hardened systemd system service, `root:root 0644`, runs as `<USER>` |
+| `/etc/systemd/system/openclaw-gateway-<USER>.service.d/hardening.conf` | systemd sandboxing drop-in |
+| `/etc/systemd/system/openclaw-audit-<USER>.service` | Security audit service, runs as `<USER>` (no `EnvironmentFile=`, `UMask=0077`) |
+| `/etc/systemd/system/openclaw-audit-<USER>.service.d/hardening.conf` | Same sandboxing drop-in for the audit job |
+| `/etc/systemd/system/openclaw-audit-<USER>.timer` | Weekly audit timer |
+| `/usr/local/lib/openclaw-hardening/openclaw-env-exec` | Root-owned launcher that loads `~/.openclaw/.env` as the service user, as data |
+| `/usr/local/lib/openclaw-hardening/openclaw-security-audit` | Root-owned automated audit wrapper script |
 | `~/.openclaw/EXEC_DENYLIST.md` | Dangerous command denylist reference |
 | `~/.openclaw/workspace/.git/hooks/pre-commit` | Pure-Bash secret-scanning pre-commit hook |
 | `/etc/apparmor.d/openclaw-gateway` | AppArmor confinement profile (if `--with-apparmor`) |
+| `/etc/apparmor.d/local/openclaw-gateway` | Optional site additions to the profile; read if present, never written by the script |
 | `/etc/nftables.d/openclaw.conf` | nftables firewall rules (if `--with-firewall`) |
 | `/etc/logrotate.d/openclaw-<USER>` | Per-user log rotation configuration (`copytruncate`) |
 

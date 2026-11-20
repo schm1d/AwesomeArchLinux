@@ -1,6 +1,8 @@
 # Memory Encryption (AMD SME / Intel TME)
 
-Opt-in only. The installer never injects `mem_encrypt=on`. Supports signed UKIs (`/etc/kernel/cmdline` + `mkinitcpio -P` + `sbctl sign-all` when `sbctl` / `awesome-secureboot` keys are present), Type-1 `systemd-boot` entries, and GRUB (`0600 root:root` on `grub.cfg`). Active SME status is verified directly from kernel logs (`dmesg` / `journalctl -k -b 0`), never inferred solely from CPU capability flags and `/proc/cmdline`.
+Opt-in only. The installer never injects `mem_encrypt=on`. Supports signed UKIs (`/etc/kernel/cmdline` + `mkinitcpio -P` + `sbctl sign-all` when `sbctl` / `awesome-secureboot` keys are present), Type-1 `systemd-boot` entries, and GRUB (`0600 root:root` on `grub.cfg`). Active SME status is verified directly from kernel logs (`dmesg` / `journalctl -k -b 0`, the `Memory Encryption Features active: ... SME` line), never inferred solely from CPU capability flags and `/proc/cmdline`.
+
+Comment lines in `/etc/kernel/cmdline` are preserved; the parameters are written back as one line below them, which is how `mkinitcpio` reads the file. If `mkinitcpio -P`, `sbctl sign-all`, or `grub-mkconfig` fails, the script stops with an error instead of reporting the change as staged: fix the cause and re-run that command before rebooting (the previous file is kept as `<file>.bak.<timestamp>`).
 
 ```bash
 sudo ./memcrypt.sh              # Probe CPU flags and current state

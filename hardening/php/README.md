@@ -71,6 +71,8 @@ The script backs up the original `php.ini` before modifying it.
 | `open_basedir` | `/var/www:/srv/http:/var/lib/php/sessions:/var/log/php:/tmp:/usr/share/php` | Restrict filesystem access while permitting sessions and logs |
 | `cgi.fix_pathinfo` | `0` | Prevent CGI path traversal |
 
+> **`open_basedir` and the PHP CLI:** the directive is set in `/etc/php/php.ini`, which the command-line `php` reads too. CLI tools that live outside the listed directories (Composer in `/usr/bin`, wp-cli in `/usr/local/bin`, anything under `/root` or `/home`) fail with `open_basedir restriction in effect`. Run a trusted admin command with the restriction lifted for that one invocation: `php -d open_basedir= /usr/local/bin/wp ...` (this is what the WP-Cron timer of `../wordpress/wordpress.sh` does). FPM workers are unaffected: their limit is pinned by `php_admin_value[open_basedir]` in the pool.
+
 #### Session Security
 
 | Directive | Value | Purpose |
@@ -117,6 +119,8 @@ The script backs up the original `php.ini` before modifying it.
 | `pm.max_spare_servers` | `10` | Maximum idle workers |
 | `pm.max_requests` | `500` | Recycle workers to prevent memory leaks |
 | `request_terminate_timeout` | `60` | Kill hung requests |
+| `access.log` / `access.format` | `/var/log/php/fpm-access.log` | Per-request log including duration (ms), peak memory (kB) and CPU |
+| `request_slowlog_timeout` | `0` | Slow log disabled: it needs `ptrace`, which the systemd sandbox blocks (see [Slow Log](#slow-log)) |
 | `rlimit_files` | `1024` | File descriptor limit per worker |
 | `rlimit_core` | `0` | No core dumps (prevent info leakage) |
 | `security.limit_extensions` | `.php` | Only execute `.php` files |
@@ -162,6 +166,8 @@ The script backs up the original `php.ini` before modifying it.
 
 Daily rotation of `/var/log/php/*.log` with 14-day retention, compression, and automatic PHP-FPM reload after rotation (when `--with-fpm` is enabled).
 
+`/var/log/php` is owned by `root` (group `POOL_GROUP`, mode `0750`). The FPM master opens its logs as root, so the pool user must not be able to create or replace entries in that directory (it could point a log name at another file through a symlink). The pool user only owns the log files it appends to (`error.log`, created by the script; rotated files are re-created with `create 640 POOL_USER POOL_GROUP`). logrotate therefore runs as root, without a `su` directive. An application that wants its own log file in `/var/log/php` needs that file created for it first, e.g. `install -o http -g http -m 0640 /dev/null /var/log/php/myapp.log`.
+
 ## Generated Files
 
 | Path | Description |
@@ -173,7 +179,7 @@ Daily rotation of `/var/log/php/*.log` with 14-day retention, compression, and a
 | `/etc/nginx/snippets/php-fpm.conf` | nginx FastCGI location snippet (if `--with-nginx`) |
 | `/etc/nginx/conf.d/php-security.conf.sample` | nginx PHP security rules (if `--with-nginx`) |
 | `/etc/logrotate.d/php` | Log rotation config |
-| `/var/log/php/` | Error log, FPM access log, slow log |
+| `/var/log/php/` | Error log and FPM access log (directory `root:POOL_GROUP` `0750`) |
 | `/var/lib/php/sessions/` | PHP session storage |
 
 ## Customizing disable_functions
@@ -463,16 +469,19 @@ sudo ./php.sh --with-nginx
 ```
 
 ```nginx
-# Inside the HTTPS server block, add PHP handling:
-location ~ \.php$ {
-    try_files $uri =404;
-    include snippets/php-fpm.conf;
-}
+# Inside the HTTPS server block, add PHP handling.
 
-# Deny PHP in uploads
+# Deny PHP in uploads. This block must come BEFORE the PHP handler: nginx uses
+# the first matching regex location, so placed after it this rule never applies
+# and an uploaded .php file would be executed.
 location ~* /(?:uploads|media)/.*\.php$ {
     deny all;
     return 403;
+}
+
+location ~ \.php$ {
+    try_files $uri =404;
+    include snippets/php-fpm.conf;
 }
 ```
 
@@ -538,14 +547,37 @@ curl http://localhost/fpm-ping
 
 ### Slow Log
 
-The slow log captures requests that exceed `request_slowlog_timeout` (5 seconds), including a full stack trace:
+The FPM slow log is **disabled** (`request_slowlog_timeout = 0`). To write a stack trace the FPM master attaches to the worker with `ptrace()`, and the hardened `php-fpm.service` does not allow that system call (`SystemCallFilter=@system-service`; `kernel.yama.ptrace_scope` may forbid it as well). With the slow log enabled, each slow request would only produce `failed to ptrace(ATTACH) child ...: Operation not permitted` in the FPM log, and no trace.
+
+Slow requests are visible in the access log instead, which records the duration of every request:
 
 ```bash
-# Watch for slow requests in real time
-tail -f /var/log/php/fpm-slow.log
+# Format: client - user time "METHOD URI" status script duration_ms peak_kB cpu%
+tail -f /var/log/php/fpm-access.log
 
-# Count slow requests per script
-awk '/\[pool www\]/ {getline; print}' /var/log/php/fpm-slow.log | sort | uniq -c | sort -rn
+# Requests that took longer than 5 seconds (duration is the third field from the end)
+awk '$(NF-2) + 0 > 5000' /var/log/php/fpm-access.log
+
+# Slowest scripts
+awk '{ print $(NF-2), $(NF-3) }' /var/log/php/fpm-access.log | sort -rn | head -20
+```
+
+If you need stack traces while profiling, enable the slow log temporarily and remove the override again afterwards (it weakens the sandbox). The root FPM master traces a worker running under another user, which needs `CAP_SYS_PTRACE`; with `kernel.yama.ptrace_scope = 3` attaching is not possible at all.
+
+```bash
+# 1. Allow ptrace for php-fpm
+sudo install -d /etc/systemd/system/php-fpm.service.d
+printf '[Service]\nSystemCallFilter=ptrace\nCapabilityBoundingSet=CAP_SYS_PTRACE\n' | \
+    sudo tee /etc/systemd/system/php-fpm.service.d/zz-slowlog.conf
+
+# 2. In /etc/php/php-fpm.d/www.conf set:
+#      slowlog = /var/log/php/fpm-slow.log
+#      request_slowlog_timeout = 5
+
+# 3. Apply
+sudo systemctl daemon-reload && sudo systemctl restart php-fpm
+
+# When done: remove zz-slowlog.conf, set request_slowlog_timeout = 0, restart again.
 ```
 
 ### journald

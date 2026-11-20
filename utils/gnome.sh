@@ -195,7 +195,9 @@ fi
 
 # 8) Harden GNOME configuration
 echo -e "${BBlue}Hardening GNOME configuration...${NC}"
-systemctl disable --now geoclue.service 2>/dev/null || true
+# geoclue.service is D-Bus activated, so "disable" alone does not keep it from
+# starting again; mask it (undo with: systemctl unmask geoclue.service).
+systemctl mask --now geoclue.service 2>/dev/null || true
 chmod 700 "$HOME_DIR/.config" 2>/dev/null || true
 
 # 9) Clean up package cache

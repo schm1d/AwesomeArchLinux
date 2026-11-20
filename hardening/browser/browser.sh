@@ -33,12 +33,15 @@ DO_ARKENFOX=false
 DO_PACKAGES=true
 ANY_EXPLICIT=false
 INSTALL_CHROMIUM_PKG=false
+STAGE_ONLY=false
 
 usage() {
     cat <<EOF
 Usage: sudo $0 [options]
 
 With no flags: detect installed browsers and apply enterprise policies.
+If none is installed, Firefox and Chromium policies are staged and no browser
+package is installed; pass --firefox / --chromium to install one.
 
   --firefox --chromium --brave --firejail --arkenfox --no-packages -h
 EOF
@@ -74,9 +77,13 @@ if [[ "$ANY_EXPLICIT" == false ]]; then
     [[ -x /usr/bin/chromium || -x /usr/bin/google-chrome-stable ]] && DO_CHROMIUM=true
     [[ -x /usr/bin/brave || -x /usr/bin/brave-browser ]] && DO_BRAVE=true
     if [[ "$DO_FIREFOX" == false && "$DO_CHROMIUM" == false && "$DO_BRAVE" == false ]]; then
+        # Auto-detection must not pull two browsers onto a host that has none:
+        # stage the policy files so they apply to whatever is installed later.
         DO_FIREFOX=true
         DO_CHROMIUM=true
-        INSTALL_CHROMIUM_PKG=true
+        STAGE_ONLY=true
+        warn "No supported browser found in /usr/bin; staging Firefox and Chromium policies only."
+        info "Pass --firefox and/or --chromium to install a browser as well."
     fi
 fi
 
@@ -90,9 +97,10 @@ check_userns() {
 }
 
 write_firefox_policies() {
-    local dir="/etc/firefox/policies"
+    local dir="/etc/firefox/policies" tmp backup
     install -d -m 0755 /etc/firefox "$dir"
-    cat > "$dir/policies.json" <<'EOF'
+    tmp=$(mktemp "$dir/.policies.json.XXXXXX")
+    cat > "$tmp" <<'EOF'
 {
   "policies": {
     "DisableTelemetry": true,
@@ -133,7 +141,16 @@ write_firefox_policies() {
   }
 }
 EOF
-    chmod 644 "$dir/policies.json"
+    chmod 644 "$tmp"
+    # Firefox reads exactly one policies.json. Keep the previous file (other
+    # names in this directory are ignored) instead of silently discarding an
+    # administrator's own policies.
+    if [[ -f "$dir/policies.json" ]] && ! cmp -s "$tmp" "$dir/policies.json"; then
+        backup="$dir/policies.json.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -p -- "$dir/policies.json" "$backup"
+        warn "Replaced existing $dir/policies.json; previous version saved as $backup"
+    fi
+    mv -f -- "$tmp" "$dir/policies.json"
     msg "Wrote $dir/policies.json"
 }
 
@@ -157,7 +174,6 @@ write_chromium_policies() {
   "AutofillAddressEnabled": false,
   "AutofillCreditCardEnabled": false,
   "BlockThirdPartyCookies": true,
-  "DefaultCookiesSetting": 4,
   "DnsOverHttpsMode": "automatic",
   "HttpsOnlyMode": "force_enabled",
   "SitePerProcess": true,
@@ -211,7 +227,6 @@ write_brave_policies() {
   "HardwareAccelerationModeEnabled": true,
   "HttpsOnlyMode": "force_enabled",
   "BlockThirdPartyCookies": true,
-  "DefaultCookiesSetting": 4,
   "SitePerProcess": true,
   "RemoteDebuggingAllowed": false,
   "BrowserSignin": 0,
@@ -311,7 +326,7 @@ install_arkenfox() {
 check_userns
 
 if [[ "$DO_FIREFOX" == true ]]; then
-    if [[ "$DO_PACKAGES" == true ]]; then
+    if [[ "$DO_PACKAGES" == true && "$STAGE_ONLY" == false ]]; then
         pacman -Syu --noconfirm --needed firefox
     fi
     write_firefox_policies
